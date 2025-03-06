@@ -6,8 +6,6 @@ from helper import *
 from summary_manager import SummaryManager
 from data_processing import *
 
-# TODO need more tuning a lot of metrics
-
 
 def setup_env():
     username = os.getenv("USERNAME")
@@ -39,7 +37,7 @@ def main():
             item
             for item in avanza.get_watchlists()
             if item.get("name")
-            == "Mina favoritaktier"  # "Berkshire"   # "Mina favoritaktier"  # "Äger"
+            == "Äger"  # "Mina favoritaktier"  # "Berkshire"   # "Mina favoritaktier"  # "Äger"
         ),
         None,
     )["orderbookIds"]
