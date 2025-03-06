@@ -1,0 +1,36 @@
+# Ignore macOS system files
+.DS_Store
+
+# Ignore logs and temporary files
+*.log
+*.tmp
+
+# Ignore compiled files
+*.o
+*.exe
+
+# Ignore Python cache files
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Ignore environment files
+.env
+
+# Ignore virtual environments and installed Python packages
+venv/
+analyze/lib/
+analyze/lib/python3.11/
+analyze/lib/python3.11/site-packages/
+analyze/bin/
+analyze/pyvenv.cfg
+analyze/share/
+
+# Ignore Python cache files
+**/__pycache__/
+**/*.pyc
+
+# Bonus cuz secret
+lathund.md
+metrics.py
