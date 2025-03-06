@@ -1,11 +1,15 @@
-# tech_analyze
+# Technical analysis
 
-Simply python script that uses the VERY INSECURE, NOT OFFICIAL, API FROM A SWEDISH BANK THAT NO ONE SHOULD USE to do technical analysis on whats in my watchlist.
+A simple Python script that uses a VERY INSECURE, UNOFFICIAL API FROM A SWEDISH BANK THAT NO ONE SHOULD USE to perform technical analysis on stocks in my watchlist.
 
-A couple of things needs to be setup before using this program, all of them are related to this INSERCURE UNOFFICIAL API, so follow that information. Read the code and you will be able to guess what to search for to find this API.
+# Setup
+
+Before using this program, you’ll need to configure a few things related to this UNSECURE, UNOFFICIAL API. I won’t spell it out, but if you read the code, you’ll get an idea of what to search for to find it.
 
 # Secret Sauce
-I have purposely leftout the metrics.py function, which contains all the juicy secrets on what i consider is a good stock or not.
 
-# Disclouser
-I'm not in any way associated with this swedish bank and I'm not educated in economics. So its all basically a guess and a collection of what other smart peolpe think on the internet.
+The metrics.py file is missing on purpose—it’s where all the magic happens. It contains my secret formula for what makes a stock “good” (or at least what I think makes it good).
+
+# Disclaimer
+
+I have no affiliation with this Swedish bank, nor do I have any formal education in economics. This script is just an experiment, loosely based on things I’ve read from smarter people on the internet. Use at your own risk.
