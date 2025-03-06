@@ -9,4 +9,3 @@ I have purposely leftout the metrics.py function, which contains all the juicy s
 
 # Disclouser
 I'm not in any way associated with this swedish bank and I'm not educated in economics. So its all basically a guess and a collection of what other smart peolpe think on the internet.
-
