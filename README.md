@@ -1,2 +1,4 @@
 # tech_analyze
-Magic analysis by Zacka
+Magic tech analysis by Zacka
+
+
