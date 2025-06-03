@@ -65,7 +65,7 @@ def main():
 
         if not ticker_info["sectors"] or ticker_id == "1640718":
             continue
-        ticker_name = get_data(
+        ticker_name, hist = get_data(
             ticker_id,
             ticker_info,
             manager,
@@ -73,12 +73,12 @@ def main():
             start_date=args.start,
             end_date=args.end,
         )
-        save_snapshot(
-            manager.summary[ticker_name],
-            f"data/{ticker_name}_{args.start}_{args.end}.csv",
-            asof=args.end or date.today(),
-        )
-        br
+        if hist is not None:
+            save_snapshot(
+                hist,
+                f"data/{ticker_name}_{args.start}_{args.end}.csv",
+                asof=args.end or date.today(),
+            )
 
     calculate_score(manager)
 
