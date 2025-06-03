@@ -8,6 +8,7 @@
 # Ignore compiled files
 *.o
 *.exe
+*.zip
 
 # Ignore Python cache files
 __pycache__/
@@ -34,3 +35,6 @@ analyze/share/
 # Bonus cuz secret
 lathund.md
 metrics.py
+
+data/
+

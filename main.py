@@ -9,6 +9,9 @@ from importlib.metadata import version
 import pyotp
 import hashlib
 
+from datetime import date
+import argparse
+
 
 def setup_env():
     username = os.getenv("USERNAME")
@@ -37,6 +40,14 @@ def main():
     pd.set_option("display.max_colwidth", None)  # Show full cell content
     print("Avanza API version: ", version("avanza-api"))
     print("yfinance version: ", version("yfinance"))
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--start", type=lambda s: pd.to_datetime(s).date(), help="YYYY-MM-DD"
+    )
+    ap.add_argument("--end", type=lambda s: pd.to_datetime(s).date(), help="YYYY-MM-DD")
+    args = ap.parse_args()
+    os.makedirs("data", exist_ok=True)
+
     manager = SummaryManager()
     avanza = setup_env()
     ticker_ids = next(
@@ -49,7 +60,25 @@ def main():
         None,
     )["orderbookIds"]
 
-    get_data(ticker_ids, manager, avanza)
+    for ticker_id in tqdm(ticker_ids, desc="Processing tickers"):
+        ticker_info = avanza.get_stock_info(ticker_id)
+
+        if not ticker_info["sectors"] or ticker_id == "1640718":
+            continue
+        ticker_name = get_data(
+            ticker_id,
+            ticker_info,
+            manager,
+            avanza,
+            start_date=args.start,
+            end_date=args.end,
+        )
+        save_snapshot(
+            manager.summary[ticker_name],
+            f"data/{ticker_name}_{args.start}_{args.end}.csv",
+            asof=args.end or date.today(),
+        )
+        br
 
     calculate_score(manager)
 

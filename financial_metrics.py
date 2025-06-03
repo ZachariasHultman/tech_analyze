@@ -244,6 +244,12 @@ def calculate_ebitda(yahoo_ticker):
         return None
 
 
+def get_price_series(yahoo_ticker, start_date, end_date):
+    price = yahoo_ticker.history(start=start_date, end=end_date, auto_adjust=True)
+    price["sma200"] = price["Close"].rolling(200).mean()
+    return price["sma200"]
+
+
 def calculate_ebit(yahoo_ticker):
     income_statement = yahoo_ticker.financials
     try:
