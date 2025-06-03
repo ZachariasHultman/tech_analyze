@@ -5,6 +5,7 @@ import requests
 from avanza.avanza import Resolution, TimePeriod
 from helper import *
 from get_NAV_data import get_nav_data
+import yfinance as yf
 
 
 def calculate_sma200(avanza, ticker_id):
@@ -211,7 +212,7 @@ def calculate_free_cashflow_yield(yahoo_ticker):
 
         free_cash_flow = cash_flow.loc["Free Cash Flow"].iloc[0]
 
-    except (KeyError, IndexError) as e:
+    except (KeyError, IndexError, yf.exceptions.YFRateLimitError) as e:
         free_cash_flow = None
         market_cap = None
 
@@ -260,6 +261,7 @@ def calculate_ebit(yahoo_ticker):
 def calculate_net_debt(yahoo_ticker):
     balance_sheet = yahoo_ticker.balance_sheet
     net_debt = 0
+    total_debt = np.nan
     try:
         # Extract Total Debt
         if "Net Debt" in balance_sheet.index:
@@ -289,7 +291,7 @@ def calculate_net_debt(yahoo_ticker):
             net_debt = None
         return net_debt
 
-    except KeyError as e:
+    except (KeyError, yf.exceptions.YFRateLimitError) as e:
         print(e)
         return None
 
