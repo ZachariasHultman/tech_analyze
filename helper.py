@@ -1,6 +1,17 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from avanza.models import *
+import pandas as pd
+from pathlib import Path
+from datetime import date
+
+
+def save_snapshot(data: dict, csv_path, asof):
+    csv_path = Path(csv_path)  # convert string → Path
+    df = pd.DataFrame([data])
+    df.insert(0, "asof", asof)
+    header = not csv_path.exists()
+    df.to_csv(csv_path, mode="a", index=False, header=header)
 
 
 def z_score(data):
