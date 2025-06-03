@@ -6,23 +6,30 @@ from avanza.avanza import Resolution, TimePeriod
 from helper import *
 from get_NAV_data import get_nav_data
 import yfinance as yf
+from datetime import date, datetime
 
 
 def calculate_sma200(avanza, ticker_id):
     try:
         ticker_chart_data = avanza.get_chart_data(
             order_book_id=ticker_id,
-            period=TimePeriod.THREE_YEARS,
+            period=TimePeriod.FIVE_YEARS,
             resolution=Resolution.DAY,
-        )
+        )["ohlc"]
     except requests.exceptions.HTTPError:
         return None, None, None
 
     last_week_average_close = (
-        sum(entry["close"] for entry in ticker_chart_data["ohlc"][-7:]) / 7
+        sum(entry["close"] for entry in ticker_chart_data[-7:]) / 7
     )
 
-    closing_prices = [entry["close"] for entry in ticker_chart_data["ohlc"]]
+    df_hist = pd.DataFrame(ticker_chart_data)
+    df_hist["date"] = df_hist["timestamp"].apply(
+        lambda ts: datetime.utcfromtimestamp(ts / 1000).date()
+    )
+    df_hist = df_hist[["date", "open", "high", "low", "close", "totalVolumeTraded"]]
+
+    closing_prices = [entry["close"] for entry in ticker_chart_data]
     data = pd.DataFrame({"close": closing_prices})
     # Calculate the Rolling SMA200
     data["sma200"] = data["close"].rolling(window=200).mean()[-200:]
@@ -32,7 +39,7 @@ def calculate_sma200(avanza, ticker_id):
     sma200 = data["sma200"].to_list()[-1]
     slope = calculate_slope(data["sma200"].to_list())
 
-    return sma200, last_week_average_close, float(slope)
+    return sma200, last_week_average_close, float(slope), df_hist
 
 
 def calculate_profit_per_share(ticker_analysis):
@@ -49,24 +56,25 @@ def calculate_profit_per_share_trend(ticker_analysis, ticker_id=None):
         entry["value"]
         for entry in ticker_analysis["companyKeyRatiosByYear"]["earningsPerShare"]
         if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
-    ][-5:]
+    ]
+
     if len(ticker_profit_per_share) > 1:
-        slope = calculate_slope(ticker_profit_per_share, ticker_id)
-        return float(slope)
+        slope = calculate_slope(ticker_profit_per_share[-5:], ticker_id)
+        return float(slope), ticker_profit_per_share
     else:
-        return None
+        return None, None
 
 
-def calculate_average_profit_margin(ticker_analysis):
+def calculate_profit_margin(ticker_analysis):
     ticker_profit_margin = [
         entry["value"]
         for entry in ticker_analysis["companyFinancialsByYear"]["profitMargin"]
         if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
     ]
     if ticker_profit_margin:
-        return float(ticker_profit_margin[-1])
+        return float(ticker_profit_margin[-1]), ticker_profit_margin
     else:
-        return None
+        return None, None
 
 
 def calculate_profit_margin_trend(ticker_analysis, ticker_id=None):
@@ -88,18 +96,23 @@ def calculate_revenue_trend(ticker_analysis, ticker_id=None):
         entry["value"]
         for entry in ticker_analysis["companyFinancialsByYear"]["sales"]
         if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
-    ][-5:]
+    ]
     ticker_revenue_by_quarter = [
         entry["value"]
         for entry in ticker_analysis["companyFinancialsByQuarter"]["sales"]
         if "value" in entry
     ]
     if len(ticker_revenue_by_quarter) > 1 and len(ticker_revenue_by_year) > 1:
-        slope_year = calculate_slope(ticker_revenue_by_year)
+        slope_year = calculate_slope(ticker_revenue_by_year[-5:])
         slope_quarter = calculate_slope(ticker_revenue_by_quarter)
-        return float(slope_year), float(slope_quarter)
+        return (
+            float(slope_year),
+            float(slope_quarter),
+            ticker_revenue_by_year,
+            ticker_revenue_by_quarter,
+        )
     else:
-        return None, None
+        return None, None, None, None
 
 
 def calculate_PE(ticker_analysis):
@@ -107,12 +120,12 @@ def calculate_PE(ticker_analysis):
         entry["value"]
         for entry in ticker_analysis["stockKeyRatiosByYear"]["priceEarningsRatio"]
         if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
-    ][-5:]
+    ]
 
     if len(pe) >= 1:
-        return pe
+        return pe[-5:], pe
     else:
-        return None
+        return None, None
 
 
 def calculate_CAGR_helper(df, years):
@@ -244,12 +257,6 @@ def calculate_ebitda(yahoo_ticker):
         return None
 
 
-def get_price_series(yahoo_ticker, start_date, end_date):
-    price = yahoo_ticker.history(start=start_date, end=end_date, auto_adjust=True)
-    price["sma200"] = price["Close"].rolling(200).mean()
-    return price["sma200"]
-
-
 def calculate_ebit(yahoo_ticker):
     income_statement = yahoo_ticker.financials
     try:
@@ -320,6 +327,9 @@ def calculate_NAV_discount(ticker_name):
         float(nav_discount[-30:].mean()),
         float(calculated_nav_discount[-30:].mean()),
         float(nav_trend),
+        nav_discount,
+        calculated_nav_discount,
+        nav_trend,
     )
 
 
@@ -330,7 +340,7 @@ def calculate_de(ticker_analysis, ticker_id=None):
         if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
     ]
     if debt_to_equity:
-        return float(debt_to_equity[-1])
+        return float(debt_to_equity[-1]), debt_to_equity
     else:
         return None
 
@@ -361,6 +371,6 @@ def calculate_roe(ticker_analysis, ticker_id=None):
     shareholder_equity = total_assets - total_liabilities
     roe = net_profit / shareholder_equity
     if roe.size > 1:
-        return float(roe[-1])
+        return float(roe[-1]), roe
     else:
         return None

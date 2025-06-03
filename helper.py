@@ -6,9 +6,73 @@ from pathlib import Path
 from datetime import date
 
 
-def save_snapshot(data: dict, csv_path, asof):
-    csv_path = Path(csv_path)  # convert string → Path
-    df = pd.DataFrame([data])
+# helper.py
+from pathlib import Path
+import json
+
+
+from pathlib import Path
+import json
+import pandas as pd
+from datetime import date, datetime
+import numpy as np
+
+
+def save_snapshot(data, csv_path, asof):
+    csv_path = Path(csv_path)
+
+    # If data is a DataFrame, convert any datetime columns to ISO strings and write directly.
+    if isinstance(data, pd.DataFrame):
+        df = data.copy()
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]) or (
+                df[col].dtype == object
+                and df[col]
+                .dropna()
+                .apply(lambda x: isinstance(x, (date, datetime)))
+                .all()
+            ):
+                df[col] = df[col].astype(str)
+        df.insert(0, "asof", asof)
+        header = not csv_path.exists()
+        df.to_csv(csv_path, mode="a", index=False, header=header)
+        return
+
+    # Otherwise, data is a dict. Build a one‐row dict of JSON‐encoded strings.
+    row = {}
+    for k, v in data.items():
+        # 1) If v is a DataFrame → convert to list of records, stringify dates
+        if isinstance(v, pd.DataFrame):
+            records = v.to_dict("records")
+            for rec in records:
+                for entry_k, entry_v in rec.items():
+                    if isinstance(entry_v, (date, datetime)):
+                        rec[entry_k] = entry_v.isoformat()
+            row[k] = json.dumps(records)
+            continue
+
+        # 2) If v is a numpy array → convert to Python list
+        if isinstance(v, np.ndarray):
+            v = v.tolist()
+
+        # 3) If v is a list of dicts → stringify any dates inside each dict
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            normalized = []
+            for entry in v:
+                new_entry = {}
+                for entry_k, entry_v in entry.items():
+                    if isinstance(entry_v, (date, datetime)):
+                        new_entry[entry_k] = entry_v.isoformat()
+                    else:
+                        new_entry[entry_k] = entry_v
+                normalized.append(new_entry)
+            row[k] = json.dumps(normalized)
+            continue
+
+        # 4) Otherwise (scalar or list of scalars) → JSON‐encode directly
+        row[k] = json.dumps(v)
+
+    df = pd.DataFrame([row])
     df.insert(0, "asof", asof)
     header = not csv_path.exists()
     df.to_csv(csv_path, mode="a", index=False, header=header)

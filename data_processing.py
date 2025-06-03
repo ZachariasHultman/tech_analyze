@@ -27,6 +27,11 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
     investment = any(
         sector["sectorName"] == "Investmentbolag" for sector in ticker_info["sectors"]
     )
+    hist_bool = False
+
+    if start_date is not None or end_date is not None:
+        hist = {}
+        hist_bool = True
 
     ticker_name = ticker_info["name"] + " " + ticker_info["orderbookId"]
 
@@ -34,12 +39,16 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
         sector = [sector for sector in ticker_info["sectors"]]
         manager._initialize_template(ticker_name, sector)
         # Calculate sma200
-        sma200, weekly_average_close, sma200_slope = calculate_sma200(avanza, ticker_id)
+        sma200, weekly_average_close, sma200_slope, closing_hist_data = (
+            calculate_sma200(avanza, ticker_id)
+        )
 
         manager._update(ticker_name, sector, "sma200 slope status", sma200_slope)
 
         # Calculate profit per share trend
-        profit_per_share_trend = calculate_profit_per_share_trend(ticker_analysis)
+        profit_per_share_trend, profit_per_share_hist = (
+            calculate_profit_per_share_trend(ticker_analysis)
+        )
         manager._update(
             ticker_name,
             sector,
@@ -47,7 +56,7 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
             profit_per_share_trend,
         )
         # Calculate profit margin trend.
-        profit_margin = calculate_average_profit_margin(ticker_analysis)
+        profit_margin, profit_margin_hist = calculate_profit_margin(ticker_analysis)
         profit_margin_trend = calculate_profit_margin_trend(ticker_analysis)
         manager._update(ticker_name, sector, "profit margin status", profit_margin)
         manager._update(
@@ -57,9 +66,12 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
             profit_margin_trend,
         )
         # Calculate Revenue trend for last years.
-        revenue_trend_year, revenue_trend_quarter = calculate_revenue_trend(
-            ticker_analysis
-        )
+        (
+            revenue_trend_year,
+            revenue_trend_quarter,
+            revenue_year_hist,
+            revenue_quarter_hist,
+        ) = calculate_revenue_trend(ticker_analysis)
         manager._update(
             ticker_name, sector, "revenue trend year status", revenue_trend_year
         )
@@ -70,7 +82,7 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
             revenue_trend_quarter,
         )
         # Calculate P/E
-        pe = calculate_PE(ticker_analysis)
+        pe, pe_hist = calculate_PE(ticker_analysis)
 
         # Calculate The PEG ratio (Price/Earnings-to-Growth)
         cagr = calculate_closing_CAGR(avanza, ticker_id)
@@ -94,22 +106,35 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
             ticker_name, sector, "net debt - ebitda status", [net_debt, ebitda]
         )
         # Calculate debt to equity ratio
-        de_ratio = calculate_de(ticker_analysis)
+        de_ratio, de_ratio_hist = calculate_de(ticker_analysis)
         manager._update(ticker_name, sector, "de status", de_ratio)
         # Calculate debt to equity ratio
-        roe = calculate_roe(ticker_analysis)
+        roe, roe_hist = calculate_roe(ticker_analysis)
         manager._update(ticker_name, sector, "roe status", roe)
+        if hist_bool:
+            hist["ohlc"] = closing_hist_data
+            hist["profit_per_share"] = profit_per_share_hist
+            hist["pe"] = pe_hist
+            hist["roe"] = roe_hist
+            hist["profit_margin"] = profit_margin_hist
+            hist["revenue_year"] = revenue_year_hist
+            hist["revenue_quarter"] = revenue_quarter_hist
+            hist["de_ratio"] = de_ratio_hist
 
     else:
         sector = [{"sectorId": "51", "sectorName": "Investmentbolag"}]
         manager._initialize_template(ticker_name, sector)
         # Calculate sma200
-        sma200, weekly_average_close, sma200_slope = calculate_sma200(avanza, ticker_id)
+        sma200, weekly_average_close, sma200_slope, closing_hist_data = (
+            calculate_sma200(avanza, ticker_id)
+        )
 
         manager._update(ticker_name, sector, "sma200 slope status", sma200_slope)
 
         # Calculate profit per share trend
-        profit_per_share_trend = calculate_profit_per_share_trend(ticker_analysis)
+        profit_per_share_trend, profit_per_share_hist = (
+            calculate_profit_per_share_trend(ticker_analysis)
+        )
         manager._update(
             ticker_name,
             sector,
@@ -117,7 +142,7 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
             profit_per_share_trend,
         )
         # Calculate P/E trend
-        pe = calculate_PE(ticker_analysis)
+        pe, pe_hist = calculate_PE(ticker_analysis)
 
         cagr = calculate_closing_CAGR(avanza, ticker_id)
         # The combination of CAGR
@@ -132,9 +157,14 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
         net_debt = calculate_net_debt(yahoo_ticker)
         manager._update(ticker_name, sector, "net debt - ebit status", [net_debt, ebit])
         # Check NAV discount and trend.
-        nav_discount, calculated_nav_discount, nav_discount_trend = (
-            calculate_NAV_discount(ticker_info["listing"]["tickerSymbol"])
-        )
+        (
+            nav_discount,
+            calculated_nav_discount,
+            nav_discount_trend,
+            nav_discount_hist,
+            calculated_nav_discount_hist,
+            nav_discount_trend_hist,
+        ) = calculate_NAV_discount(ticker_info["listing"]["tickerSymbol"])
         manager._update(ticker_name, sector, "nav discount status", nav_discount)
         manager._update(
             ticker_name,
@@ -147,9 +177,20 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
         )
         free_cashflow_yield, free_cashflow = calculate_free_cashflow_yield(yahoo_ticker)
         manager._update(ticker_name, sector, "fcf status", free_cashflow)
-        roe = calculate_roe(ticker_analysis)
+        roe, roe_hist = calculate_roe(ticker_analysis)
         manager._update(ticker_name, sector, "roe status", roe)
-    return ticker_name
+        if hist_bool:
+            hist["ohlc"] = closing_hist_data
+            hist["profit_per_share"] = profit_per_share_hist
+            hist["pe"] = pe_hist
+            hist["roe"] = roe_hist
+            hist["nav_discount"] = nav_discount_hist
+            hist["calculated_nav_discount"] = calculated_nav_discount_hist
+            hist["nav_discount_trend"] = nav_discount_trend_hist
+    if hist_bool:
+        return ticker_name, hist
+    else:
+        return ticker_name, None
 
 
 def calculate_score(manager):
