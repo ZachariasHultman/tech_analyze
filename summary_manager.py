@@ -131,92 +131,84 @@ class SummaryManager:
             weight = 1
         return weight
 
-    def _assign_points(self, df, metric):
-        """Assigns points based on thresholds and updates the existing DataFrame in place."""
+    def _assign_points(self, row, metric):
+        """
+        Compute the score (−weight, 0, +weight) for *metric* on one DataFrame row.
+
+        `row[metric]` is expected to be
+            • a scalar, or
+            • a tuple/list whose element-0 is the *latest* value and element-1 the history.
+        """
         weight = self._assign_weight(metric)
 
-        # Get threshold values using the first row's sector
-        result = get_metrics_threshold(metric, df["sector"])
-
-        if result:
-            [OK_threshold, NOK_threshold] = result["thresholds"]
-            good_if_high = result["good_if_high"]
-        else:
-            # df[metric + "_score"] = 0
+        # ── Thresholds & direction ────────────────────────────────────────────────
+        cfg = get_metrics_threshold(metric, row["sector"])
+        if not cfg:  # no rule defined → no points
             return 0
 
-        # print(
-        #     f"Processing {metric}: OK={OK_threshold}, NOK={NOK_threshold}, , good if high = {good_if_high}, sector ={df['sector']}"
-        # )
+        ok, nok = cfg["thresholds"]  # upper / lower band
+        good_if_high = cfg["good_if_high"]
 
-        value = df[metric]
-        # Apply scoring logic and store it in a new column
+        value = row[metric]
+        latest = value[0] if isinstance(value, (tuple, list)) else value
+
+        # ── Metric-specific rules ────────────────────────────────────────────────
         if metric == "cagr-pe compare status":
-            score = (
-                (1 * weight)
-                if (
-                    (value[0][0] is not None and value[0][0] >= OK_threshold[0])
-                    or (value[0][1] is not None and value[0][1] <= OK_threshold[1])
-                )
-                and not (
-                    (value[0][0] is not None and value[0][0] <= NOK_threshold[0])
-                    and (value[0][1] is not None and value[0][1] >= NOK_threshold[1])
-                )
-                else (
-                    -1 * weight
-                    if (
-                        (value[0][0] is not None and value[0][0] <= NOK_threshold[0])
-                        and (
-                            value[0][1] is not None and value[0][1] >= NOK_threshold[1]
-                        )
-                    )
-                    else 0
-                )
-            )
-        elif metric == "net debt - ebitda status" or metric == "net debt - ebit status":
-            score = (
-                1 * weight
-                if value[0][0]
-                and value[0][1] is not None
-                and value[0][0] <= 2 * value[0][1]
-                else (
-                    -1 * weight
-                    if value[0][0]
-                    and value[0][1] is not None
-                    and value[0][0] >= 2.5 * value[0][1]
-                    else 0
-                )
-            )
-        elif metric == "sma200 status":
-            score = (
-                1 * weight
-                if value[0][0]
-                and value[0][1] is not None
-                and value[0][0] >= value[0][1]
-                else (-1 * weight)
-            )
-        else:
-            if good_if_high:
-                score = (
-                    (1 * weight)
-                    if (value[0] is not None and value[0] >= OK_threshold)
-                    else (
-                        (-1 * weight)
-                        if (value[0] is not None and value[0] <= NOK_threshold)
-                        else 0
-                    )
-                )
+            # here `value` is (cagr, pe)
+            cagr, pe = value[0]
+            if cagr is None or pe is None:
+                return 0
+
+            good = (cagr >= ok[0]) or (pe <= ok[1])
+            bad = (cagr <= nok[0]) and (pe >= nok[1])
+
+            if good and not bad:
+                return weight
+            elif bad:
+                return -weight
             else:
-                score = (
-                    1 * weight
-                    if value[0] is not None and value[0] <= OK_threshold
-                    else (
-                        -1 * weight
-                        if value[0] is not None and value[0] >= NOK_threshold
-                        else 0
-                    )
-                )
-        return score
+                return 0
+
+        elif metric == "net debt - ebitda status":
+            if latest is None:
+                return 0
+            if latest <= 2:
+                return weight
+            if latest >= 2.5:
+                return -weight
+            return 0
+
+        elif metric == "net debt - ebit status":
+            if latest is None:
+                return 0
+            if latest <= 8:
+                return weight
+            if latest >= 12:
+                return -weight
+            return 0
+
+        elif metric == "sma200 status":
+            # value = (last_close, sma200)
+            last_close, sma200 = value
+            if last_close is None or sma200 is None:
+                return -weight  # treat missing SMA as a negative signal
+            return weight if last_close >= sma200 else -weight
+
+        # ── Generic rule ─────────────────────────────────────────────────────────
+        if latest is None:
+            return 0
+
+        if good_if_high:
+            if latest >= ok:
+                return weight
+            elif latest <= nok:
+                return -weight
+        else:
+            if latest <= ok:
+                return weight
+            elif latest >= nok:
+                return -weight
+        return 0
 
     def _display(self):
         """Displays DataFrame with tabulate formatting for a cleaner output."""

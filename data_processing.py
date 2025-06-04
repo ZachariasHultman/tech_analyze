@@ -6,22 +6,18 @@ from helper import *
 from financial_metrics import *
 
 
-def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=None):
+def get_data(
+    ticker_id,
+    ticker_info,
+    manager,
+    avanza,
+    yahoo_ticker,
+    start_date=None,
+    end_date=None,
+):
     # print(ticker_info["listing"]["tickerSymbol"])
 
     ticker_analysis = avanza.get_analysis(ticker_id)
-
-    yahoo_ticker_name = ticker_info["listing"]["tickerSymbol"]
-    if ticker_info["listing"]["countryCode"] == "SE":
-        yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".ST"
-    elif ticker_info["listing"]["countryCode"] == "DK":
-        yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".CO"
-    elif ticker_info["listing"]["countryCode"] == "NO":
-        yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".OL"
-    elif ticker_info["listing"]["countryCode"] == "DE":
-        yahoo_ticker_name = re.match(r"^[A-Z]+", yahoo_ticker_name)
-        yahoo_ticker_name = yahoo_ticker_name.group() + ".DE"
-    yahoo_ticker = yf.Ticker(yahoo_ticker_name)
 
     investment = any(
         sector["sectorName"] == "Investmentbolag" for sector in ticker_info["sectors"]
@@ -94,17 +90,24 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
             [cagr[-1], pe[-1]] if cagr and pe else [None, None],
         )
         # Calculate free cashflow yield.
-        free_cashflow_yield, free_cashflow = calculate_free_cashflow_yield(
-            yahoo_ticker, ticker_info
-        )
+        (
+            free_cashflow_yield,
+            free_cashflow,
+            free_cashflow_yield_hist,
+            free_cashflow_hist,
+        ) = calculate_free_cashflow_yield(yahoo_ticker, ticker_info, closing_hist_data)
         manager._update(ticker_name, sector, "fcfy status", free_cashflow_yield)
         manager._update(ticker_name, sector, "fcf status", free_cashflow)
 
         # Calculate ebitda and net debt.
-        ebitda = calculate_ebitda(yahoo_ticker)
-        net_debt = calculate_net_debt(yahoo_ticker)
+        netDebtEbitdaRatio, netDebtEbitdaRatio_hist = extract_netdebt_ebitda_ratio(
+            ticker_analysis
+        )
         manager._update(
-            ticker_name, sector, "net debt - ebitda status", [net_debt, ebitda]
+            ticker_name,
+            sector,
+            "net debt - ebitda status",
+            netDebtEbitdaRatio,
         )
         # Calculate debt to equity ratio
         de_ratio, de_ratio_hist = calculate_de(ticker_analysis)
@@ -121,6 +124,9 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
             hist["revenue_year"] = revenue_year_hist
             hist["revenue_quarter"] = revenue_quarter_hist
             hist["de_ratio"] = de_ratio_hist
+            hist["free_cashflow_yield"] = free_cashflow_yield_hist
+            hist["free_cashflow"] = free_cashflow_hist
+            hist["netDebtEbitdaRatio"] = netDebtEbitdaRatio_hist
 
     else:
         sector = [{"sectorId": "51", "sectorName": "Investmentbolag"}]
@@ -154,9 +160,8 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
             [cagr[-1], pe[-1]] if cagr else [None, None],
         )
         # Calculate ebitda and net debt.
-        ebit = calculate_ebit(yahoo_ticker)
-        net_debt = calculate_net_debt(yahoo_ticker)
-        manager._update(ticker_name, sector, "net debt - ebit status", [net_debt, ebit])
+        evEbit, evEbit_hist = extract_ev_ebit_ratio(ticker_analysis)
+        manager._update(ticker_name, sector, "net debt - ebit status", evEbit)
         # Check NAV discount and trend.
         (
             nav_discount,
@@ -164,7 +169,6 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
             nav_discount_trend,
             nav_discount_hist,
             calculated_nav_discount_hist,
-            nav_discount_trend_hist,
         ) = calculate_NAV_discount(ticker_info["listing"]["tickerSymbol"])
         manager._update(ticker_name, sector, "nav discount status", nav_discount)
         manager._update(
@@ -176,12 +180,16 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
         manager._update(
             ticker_name, sector, "nav discount trend status", nav_discount_trend
         )
-        free_cashflow_yield, free_cashflow = calculate_free_cashflow_yield(
-            yahoo_ticker, ticker_info
-        )
+        (
+            free_cashflow_yield,
+            free_cashflow,
+            free_cashflow_yield_hist,
+            free_cashflow_hist,
+        ) = calculate_free_cashflow_yield(yahoo_ticker, ticker_info)
         manager._update(ticker_name, sector, "fcf status", free_cashflow)
         roe, roe_hist = calculate_roe(ticker_analysis)
         manager._update(ticker_name, sector, "roe status", roe)
+
         if hist_bool:
             hist["ohlc"] = closing_hist_data
             hist["profit_per_share"] = profit_per_share_hist
@@ -189,7 +197,10 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
             hist["roe"] = roe_hist
             hist["nav_discount"] = nav_discount_hist
             hist["calculated_nav_discount"] = calculated_nav_discount_hist
-            hist["nav_discount_trend"] = nav_discount_trend_hist
+            hist["evEbit"] = evEbit_hist
+            hist["free_cashflow_yield"] = free_cashflow_yield_hist
+            hist["free_cashflow"] = free_cashflow_hist
+
     if hist_bool:
         return ticker_name, hist
     else:
