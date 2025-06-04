@@ -12,9 +12,6 @@ import hashlib
 from datetime import date
 import argparse
 
-# TODO Add history saving for yahoo stuff
-# TODO Analyze historical data and create tuning params from that
-
 
 def setup_env():
     username = os.getenv("USERNAME")
@@ -68,11 +65,24 @@ def main():
 
         if not ticker_info["sectors"] or ticker_id == "1640718":
             continue
+        yahoo_ticker_name = ticker_info["listing"]["tickerSymbol"]
+        if ticker_info["listing"]["countryCode"] == "SE":
+            yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".ST"
+        elif ticker_info["listing"]["countryCode"] == "DK":
+            yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".CO"
+        elif ticker_info["listing"]["countryCode"] == "NO":
+            yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".OL"
+        elif ticker_info["listing"]["countryCode"] == "DE":
+            yahoo_ticker_name = re.match(r"^[A-Z]+", yahoo_ticker_name)
+            yahoo_ticker_name = yahoo_ticker_name.group() + ".DE"
+        yahoo = yf.Ticker(yahoo_ticker_name)
+
         ticker_name, hist = get_data(
             ticker_id,
             ticker_info,
             manager,
             avanza,
+            yahoo,
             start_date=args.start,
             end_date=args.end,
         )

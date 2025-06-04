@@ -225,106 +225,143 @@ def sync_currency(from_currency: str, to_currency: str = "SEK"):
     return currency_match, convert_to_sek, exchange_rate, sek_rate
 
 
-def calculate_free_cashflow_yield(yahoo_ticker, stock_info):
+import pandas as pd
+import math
+
+import pandas as pd
+
+
+def calculate_free_cashflow_yield(yahoo_ticker, stock_info, df_hist=None):
     try:
-        from_currency = ticker_reporting_currency_map.get(
-            yahoo_ticker.ticker
-        )  # Reporting currency
-        # Get market cap and its currency from Avanza stock_info
-        market_cap = stock_info["keyIndicators"]["marketCapital"]["value"]
+        from_currency = ticker_reporting_currency_map.get(yahoo_ticker.ticker)
         to_currency = stock_info["keyIndicators"]["marketCapital"]["currency"]
+        market_cap = stock_info["keyIndicators"]["marketCapital"]["value"]
 
-        # Get free cash flow from Yahoo
-        cash_flow = yahoo_ticker.cashflow
-        free_cash_flow = cash_flow.loc["Free Cash Flow"].iloc[0]
+        # Infer shares outstanding from Avanza market‐cap + last close in df_hist
+        try:
+            last_close_price = df_hist["close"].iloc[-1]
+            shares_outstanding = market_cap / last_close_price
+        except (KeyError, TypeError, ZeroDivisionError):
+            return None, None, None, None
 
-        # Handle currency conversion
-        currency_match, convert_to_sek, exchange_rate, sek_rate = sync_currency(
+        #  Fetch FCF history
+        cash_flow_df = yahoo_ticker.cashflow
+        if "Free Cash Flow" not in cash_flow_df.index:
+            print(" 'Free Cash Flow' not found for", yahoo_ticker.ticker)
+            return None, None, None, None
+
+        free_cash_flow_hist = cash_flow_df.loc["Free Cash Flow"]
+
+        # Currency conversion
+        currency_match, convert_to_sek, ex_rate, sek_rate = sync_currency(
             from_currency=from_currency, to_currency=to_currency
         )
-
-    except (KeyError, IndexError, TypeError) as e:
-        return None, None
-
-    if (
-        market_cap is not None
-        and free_cash_flow is not None
-        and not math.isnan(market_cap)
-        and not math.isnan(free_cash_flow)
-    ):
-        # Adjust FCF if needed
         if not currency_match:
-            free_cash_flow *= exchange_rate
+            free_cash_flow_hist = free_cash_flow_hist * ex_rate
         if convert_to_sek:
-            free_cash_flow *= sek_rate
+            free_cash_flow_hist = free_cash_flow_hist * sek_rate
 
-        free_cash_flow_yield = free_cash_flow / market_cap
-        return free_cash_flow_yield, free_cash_flow
+        # Build historical FCF‐yield dict (if price history provided)
+        fcf_yield_hist = {}
+        if df_hist is not None:
+            df_hist.index = pd.to_datetime(df_hist.index)
+            for dt, fcf in free_cash_flow_hist.items():
+                if pd.isna(fcf):
+                    continue
+                try:
+                    close_price = df_hist.loc[:dt]["close"].iloc[-1]
+                    market_cap_hist = close_price * shares_outstanding
+                    fcf_yield_hist[dt.strftime("%Y-%m-%d")] = float(
+                        fcf / market_cap_hist
+                    )
+                except (KeyError, IndexError):
+                    continue
 
-    return None, None
+        # Latest values
+        latest_fcf = float(free_cash_flow_hist.iloc[0])
+        fcf_yield_now = latest_fcf / market_cap
+
+        # Serialize free_cash_flow_hist to dict with ISO dates + floats
+        free_cf_hist_dict = {
+            dt.strftime("%Y-%m-%d"): (None if pd.isna(val) else float(val))
+            for dt, val in free_cash_flow_hist.items()
+        }
+
+        return (
+            fcf_yield_now,  # scalar
+            latest_fcf,  # scalar
+            fcf_yield_hist,  # dict  { "YYYY-MM-DD": float }
+            free_cf_hist_dict,  # dict  { "YYYY-MM-DD": float | None }
+        )
+
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        print("calculate_free_cashflow_yield failed:", e)
+        return None, None, None, None
 
 
-def calculate_ebitda(yahoo_ticker):
-    income_statement = yahoo_ticker.financials
-    try:
-        ebitda = income_statement.loc["EBITDA"].iloc[0]
+def extract_ev_ebit_ratio(avanza_data):
+    """
+    Extracts the EV/EBIT ratio from Avanza’s `stockKeyRatiosByYear`.
 
-        return ebitda if not np.isnan(ebitda) else None
+    Returns:
+        latest_ev_ebit (float or None): The most recent EV/EBIT value.
+        ev_ebit_hist (dict[str, float]): Mapping from "YYYY-MM-DD" to EV/EBIT.
+    """
+    ev_ebit_list = avanza_data.get("stockKeyRatiosByYear", {}).get("evEbitRatio", [])
+    ev_ebit_hist_raw = {}
+    for entry in ev_ebit_list:
+        try:
+            date_ts = pd.Timestamp(entry["date"])
+            ev_ebit_hist_raw[date_ts] = entry["value"]
+        except (KeyError, ValueError):
+            continue
 
-    except KeyError as e:
-        return None
+    # Determine latest
+    if ev_ebit_hist_raw:
+        latest_date = max(ev_ebit_hist_raw.keys())
+        latest_ev_ebit = ev_ebit_hist_raw[latest_date]
+    else:
+        latest_ev_ebit = None
+
+    # Convert keys to ISO‐string
+    ev_ebit_hist = {
+        dt.strftime("%Y-%m-%d"): float(val) for dt, val in ev_ebit_hist_raw.items()
+    }
+
+    return latest_ev_ebit, ev_ebit_hist
 
 
-def calculate_ebit(yahoo_ticker):
-    income_statement = yahoo_ticker.financials
-    try:
-        net_income = income_statement.loc["Net Income"].iloc[0]
-        interest_expense = income_statement.loc["Interest Expense"].iloc[0]
-        tax_provision = income_statement.loc["Tax Provision"].iloc[0]
-        # Calculate EBITDA
-        ebit = net_income + interest_expense + tax_provision
-        return ebit if not np.isnan(ebit) else None
+def extract_netdebt_ebitda_ratio(avanza_data):
+    """
+    Extracts the Net Debt/EBITDA ratio from Avanza’s `companyKeyRatiosByYear`.
 
-    except KeyError as e:
-        return None
+    Returns:
+        latest_nd_ebitda (float or None): The most recent Net Debt/EBITDA value.
+        nd_ebitda_hist (dict[str, float]): Mapping from "YYYY-MM-DD" to Net Debt/EBITDA.
+    """
+    nd_ebitda_list = avanza_data.get("companyKeyRatiosByYear", {}).get(
+        "netDebtEbitdaRatio", []
+    )
+    nd_ebitda_hist_raw = {}
+    for entry in nd_ebitda_list:
+        try:
+            date_ts = pd.Timestamp(entry["date"])
+            nd_ebitda_hist_raw[date_ts] = entry["value"]
+        except (KeyError, ValueError):
+            continue
 
+    # Determine latest
+    if nd_ebitda_hist_raw:
+        latest_date = max(nd_ebitda_hist_raw.keys())
+        latest_nd_ebitda = nd_ebitda_hist_raw[latest_date]
+    else:
+        latest_nd_ebitda = None
 
-def calculate_net_debt(yahoo_ticker):
-    balance_sheet = yahoo_ticker.balance_sheet
-    net_debt = 0
-    total_debt = np.nan
-    try:
-        # Extract Total Debt
-        if "Net Debt" in balance_sheet.index:
-            net_debt = balance_sheet.loc["Net Debt"].iloc[0]
-            if pd.notna(net_debt):
-                return net_debt
-
-        if "Total Debt" in balance_sheet.index:
-            total_debt = balance_sheet.loc["Total Debt"].iloc[0]
-        elif "Total Liabilities Net Minority Interest" in balance_sheet.index:
-            total_debt = balance_sheet.loc[
-                "Total Liabilities Net Minority Interest"
-            ].iloc[0]
-        if np.isnan(total_debt):
-            # Manually calculate Total Debt if necessary
-            long_term_debt = balance_sheet.loc["Long Term Debt"].iloc[0]
-            current_debt = balance_sheet.loc["Current Debt"].iloc[0]
-            total_debt = long_term_debt + current_debt
-
-        # Extract Cash and Cash Equivalents
-        cash_and_equivalents = balance_sheet.loc["Cash And Cash Equivalents"].iloc[0]
-
-        # Calculate Net Debt
-        net_debt = total_debt - cash_and_equivalents
-
-        if np.isnan(net_debt):
-            net_debt = None
-        return net_debt
-
-    except (KeyError, yf.exceptions.YFRateLimitError) as e:
-        print(e)
-        return None
+    # Convert keys to ISO‐string
+    nd_ebitda_hist = {
+        dt.strftime("%Y-%m-%d"): float(val) for dt, val in nd_ebitda_hist_raw.items()
+    }
+    return latest_nd_ebitda, nd_ebitda_hist
 
 
 def calculate_NAV_discount(ticker_name):
@@ -335,19 +372,16 @@ def calculate_NAV_discount(ticker_name):
 
     nav_discount = (price - nav) / nav
     calculated_nav_discount = (price - calculated_nav) / calculated_nav
-
     if nav_discount.size > 0:
         nav_trend = calculate_slope(nav_discount.tolist())
     else:
-        return None, None, None
-
+        return None, None, None, None, None
     return (
         float(nav_discount[-30:].mean()),
         float(calculated_nav_discount[-30:].mean()),
         float(nav_trend),
         nav_discount,
         calculated_nav_discount,
-        nav_trend,
     )
 
 
