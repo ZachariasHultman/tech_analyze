@@ -10,6 +10,7 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
     # print(ticker_info["listing"]["tickerSymbol"])
 
     ticker_analysis = avanza.get_analysis(ticker_id)
+
     yahoo_ticker_name = ticker_info["listing"]["tickerSymbol"]
     if ticker_info["listing"]["countryCode"] == "SE":
         yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".ST"
@@ -20,10 +21,8 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
     elif ticker_info["listing"]["countryCode"] == "DE":
         yahoo_ticker_name = re.match(r"^[A-Z]+", yahoo_ticker_name)
         yahoo_ticker_name = yahoo_ticker_name.group() + ".DE"
-
-    # print(yahoo_ticker_name)
     yahoo_ticker = yf.Ticker(yahoo_ticker_name)
-    # print("ticker analysis keys",ticker_analysis.keys())
+
     investment = any(
         sector["sectorName"] == "Investmentbolag" for sector in ticker_info["sectors"]
     )
@@ -95,7 +94,9 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
             [cagr[-1], pe[-1]] if cagr and pe else [None, None],
         )
         # Calculate free cashflow yield.
-        free_cashflow_yield, free_cashflow = calculate_free_cashflow_yield(yahoo_ticker)
+        free_cashflow_yield, free_cashflow = calculate_free_cashflow_yield(
+            yahoo_ticker, ticker_info
+        )
         manager._update(ticker_name, sector, "fcfy status", free_cashflow_yield)
         manager._update(ticker_name, sector, "fcf status", free_cashflow)
 
@@ -175,7 +176,9 @@ def get_data(ticker_id, ticker_info, manager, avanza, start_date=None, end_date=
         manager._update(
             ticker_name, sector, "nav discount trend status", nav_discount_trend
         )
-        free_cashflow_yield, free_cashflow = calculate_free_cashflow_yield(yahoo_ticker)
+        free_cashflow_yield, free_cashflow = calculate_free_cashflow_yield(
+            yahoo_ticker, ticker_info
+        )
         manager._update(ticker_name, sector, "fcf status", free_cashflow)
         roe, roe_hist = calculate_roe(ticker_analysis)
         manager._update(ticker_name, sector, "roe status", roe)
