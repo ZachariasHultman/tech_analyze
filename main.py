@@ -12,6 +12,9 @@ import hashlib
 from datetime import date
 import argparse
 
+# TODO Add history saving for yahoo stuff
+# TODO Analyze historical data and create tuning params from that
+
 
 def setup_env():
     username = os.getenv("USERNAME")

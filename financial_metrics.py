@@ -7,6 +7,8 @@ from helper import *
 from get_NAV_data import get_nav_data
 import yfinance as yf
 from datetime import date, datetime
+from metrics import ticker_reporting_currency_map, ticker_currency_map
+import time
 
 
 def calculate_sma200(avanza, ticker_id):
@@ -196,54 +198,70 @@ def calculate_PEG(pe, cagr):
     return peg[-1]
 
 
-def sync_currency(yahoo_ticker_info):
+from currency_converter import CurrencyConverter
+import math
+
+
+def sync_currency(from_currency: str, to_currency: str = "SEK"):
+    """
+    Converts between reporting and trading currencies.
+    Returns:
+        currency_match (bool)
+        convert_to_sek (bool)
+        exchange_rate (float)
+        sek_rate (float)
+    """
     c = CurrencyConverter()
-    to_currency = yahoo_ticker_info.get("currency")
-    from_currency = yahoo_ticker_info.get("financialCurrency")
+
+    if not from_currency or not to_currency:
+        return False, False, None, None
+
     exchange_rate = c.convert(1, from_currency, to_currency)
     sek_rate = c.convert(1, from_currency, "SEK")
 
-    if to_currency != "SEK":
-        conv_to_sek = True
-    else:
-        conv_to_sek = False
-    if to_currency != from_currency:
-        return False, conv_to_sek, exchange_rate, sek_rate
-    else:
-        return True, conv_to_sek, 0, sek_rate
+    currency_match = from_currency == to_currency
+    convert_to_sek = to_currency != "SEK"
+
+    return currency_match, convert_to_sek, exchange_rate, sek_rate
 
 
-def calculate_free_cashflow_yield(yahoo_ticker):
+def calculate_free_cashflow_yield(yahoo_ticker, stock_info):
     try:
-        yahoo_ticker_info = yahoo_ticker.info
-        market_cap = yahoo_ticker_info["marketCap"]
+        from_currency = ticker_reporting_currency_map.get(
+            yahoo_ticker.ticker
+        )  # Reporting currency
+        # Get market cap and its currency from Avanza stock_info
+        market_cap = stock_info["keyIndicators"]["marketCapital"]["value"]
+        to_currency = stock_info["keyIndicators"]["marketCapital"]["currency"]
+
+        # Get free cash flow from Yahoo
         cash_flow = yahoo_ticker.cashflow
-
-        currency_match, convert_to_sek, exchange_rate, sek_rate = sync_currency(
-            yahoo_ticker_info
-        )
-
         free_cash_flow = cash_flow.loc["Free Cash Flow"].iloc[0]
 
-    except (KeyError, IndexError, yf.exceptions.YFRateLimitError) as e:
-        free_cash_flow = None
-        market_cap = None
+        # Handle currency conversion
+        currency_match, convert_to_sek, exchange_rate, sek_rate = sync_currency(
+            from_currency=from_currency, to_currency=to_currency
+        )
+
+    except (KeyError, IndexError, TypeError) as e:
+        return None, None
 
     if (
-        market_cap
+        market_cap is not None
         and free_cash_flow is not None
         and not math.isnan(market_cap)
         and not math.isnan(free_cash_flow)
     ):
-        free_cash_flow_yield = free_cash_flow / market_cap
+        # Adjust FCF if needed
         if not currency_match:
-            free_cash_flow = free_cash_flow * exchange_rate
+            free_cash_flow *= exchange_rate
         if convert_to_sek:
-            free_cash_flow = free_cash_flow * sek_rate
+            free_cash_flow *= sek_rate
 
+        free_cash_flow_yield = free_cash_flow / market_cap
         return free_cash_flow_yield, free_cash_flow
-    else:
-        return None, None
+
+    return None, None
 
 
 def calculate_ebitda(yahoo_ticker):
