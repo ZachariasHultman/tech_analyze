@@ -9,6 +9,7 @@
 *.o
 *.exe
 *.zip
+*.csv
 
 # Ignore Python cache files
 __pycache__/
