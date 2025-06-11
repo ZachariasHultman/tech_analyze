@@ -12,8 +12,7 @@ def get_data(
     manager,
     avanza,
     yahoo_ticker,
-    start_date=None,
-    end_date=None,
+    get_hist=False,
 ):
     # print(ticker_info["listing"]["tickerSymbol"])
 
@@ -22,11 +21,9 @@ def get_data(
     investment = any(
         sector["sectorName"] == "Investmentbolag" for sector in ticker_info["sectors"]
     )
-    hist_bool = False
 
-    if start_date is not None or end_date is not None:
+    if get_hist:
         hist = {}
-        hist_bool = True
 
     ticker_name = ticker_info["name"] + " " + ticker_info["orderbookId"]
 
@@ -115,7 +112,8 @@ def get_data(
         # Calculate debt to equity ratio
         roe, roe_hist = calculate_roe(ticker_analysis)
         manager._update(ticker_name, sector, "roe status", roe)
-        if hist_bool:
+        if get_hist:
+            hist["sector"] = sector
             hist["ohlc"] = closing_hist_data
             hist["profit_per_share"] = profit_per_share_hist
             hist["pe"] = pe_hist
@@ -190,7 +188,8 @@ def get_data(
         roe, roe_hist = calculate_roe(ticker_analysis)
         manager._update(ticker_name, sector, "roe status", roe)
 
-        if hist_bool:
+        if get_hist:
+            hist["sector"] = sector
             hist["ohlc"] = closing_hist_data
             hist["profit_per_share"] = profit_per_share_hist
             hist["pe"] = pe_hist
@@ -201,7 +200,7 @@ def get_data(
             hist["free_cashflow_yield"] = free_cashflow_yield_hist
             hist["free_cashflow"] = free_cashflow_hist
 
-    if hist_bool:
+    if get_hist:
         return ticker_name, hist
     else:
         return ticker_name, None
