@@ -8,9 +8,11 @@ from data_processing import *
 from importlib.metadata import version
 import pyotp
 import hashlib
-
+from historical_calc import calculate_metrics_given_hist
 from datetime import date
 import argparse
+
+# TODO Analyze historical data and create tuning params from that
 
 
 def setup_env():
@@ -42,60 +44,70 @@ def main():
     print("yfinance version: ", version("yfinance"))
     ap = argparse.ArgumentParser()
     ap.add_argument(
-        "--start", type=lambda s: pd.to_datetime(s).date(), help="YYYY-MM-DD"
+        "--use_hist",
+        type=bool,
+        help="true/false. Get and stor historical data for tickers",
+        default=False,
     )
-    ap.add_argument("--end", type=lambda s: pd.to_datetime(s).date(), help="YYYY-MM-DD")
+    ap.add_argument(
+        "--get_hist",
+        type=bool,
+        help="true/false. Use historical data to run the script",
+        default=False,
+    )
     args = ap.parse_args()
     os.makedirs("data", exist_ok=True)
 
     manager = SummaryManager()
-    avanza = setup_env()
-    ticker_ids = next(
-        (
-            item
-            for item in avanza.get_watchlists()
-            if item.get("name")
-            == "Äger"  # "Mina favoritaktier"  # "Berkshire"   # "Mina favoritaktier"  # "Äger"
-        ),
-        None,
-    )["orderbookIds"]
+    if not args.use_hist:
+        avanza = setup_env()
+        ticker_ids = next(
+            (
+                item
+                for item in avanza.get_watchlists()
+                if item.get("name")
+                == "Äger"  # "Mina favoritaktier"  # "Berkshire"   # "Mina favoritaktier"  # "Äger"
+            ),
+            None,
+        )["orderbookIds"]
 
-    for ticker_id in tqdm(ticker_ids, desc="Processing tickers"):
-        ticker_info = avanza.get_stock_info(ticker_id)
+        for ticker_id in tqdm(ticker_ids, desc="Processing tickers"):
+            ticker_info = avanza.get_stock_info(ticker_id)
 
-        if not ticker_info["sectors"] or ticker_id == "1640718":
-            continue
-        yahoo_ticker_name = ticker_info["listing"]["tickerSymbol"]
-        if ticker_info["listing"]["countryCode"] == "SE":
-            yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".ST"
-        elif ticker_info["listing"]["countryCode"] == "DK":
-            yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".CO"
-        elif ticker_info["listing"]["countryCode"] == "NO":
-            yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".OL"
-        elif ticker_info["listing"]["countryCode"] == "DE":
-            yahoo_ticker_name = re.match(r"^[A-Z]+", yahoo_ticker_name)
-            yahoo_ticker_name = yahoo_ticker_name.group() + ".DE"
-        yahoo = yf.Ticker(yahoo_ticker_name)
+            if not ticker_info["sectors"] or ticker_id == "1640718":
+                continue
+            yahoo_ticker_name = ticker_info["listing"]["tickerSymbol"]
+            if ticker_info["listing"]["countryCode"] == "SE":
+                yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".ST"
+            elif ticker_info["listing"]["countryCode"] == "DK":
+                yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".CO"
+            elif ticker_info["listing"]["countryCode"] == "NO":
+                yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".OL"
+            elif ticker_info["listing"]["countryCode"] == "DE":
+                yahoo_ticker_name = re.match(r"^[A-Z]+", yahoo_ticker_name)
+                yahoo_ticker_name = yahoo_ticker_name.group() + ".DE"
+            yahoo = yf.Ticker(yahoo_ticker_name)
 
-        ticker_name, hist = get_data(
-            ticker_id,
-            ticker_info,
-            manager,
-            avanza,
-            yahoo,
-            start_date=args.start,
-            end_date=args.end,
-        )
-        if hist is not None:
-            save_snapshot(
-                hist,
-                f"data/{ticker_name}_{args.start}_{args.end}.csv",
-                asof=args.end or date.today(),
+            ticker_name, hist = get_data(
+                ticker_id,
+                ticker_info,
+                manager,
+                avanza,
+                yahoo,
+                get_hist=args.get_hist,
             )
+            if args.get_hist:
+                save_snapshot(
+                    hist,
+                    f"data/{ticker_name}_{date.today()}.csv",
+                    asof=date.today(),
+                )
 
-    calculate_score(manager)
+        calculate_score(manager)
 
-    manager._display()
+        manager._display()
+    else:
+        calculate_metrics_given_hist()
 
     return 0
 

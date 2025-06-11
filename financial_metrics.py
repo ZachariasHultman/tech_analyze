@@ -53,30 +53,33 @@ def calculate_profit_per_share(ticker_analysis):
     return ticker_profit_per_share
 
 
+# -------------------------------------------------------------------
 def calculate_profit_per_share_trend(ticker_analysis, ticker_id=None):
-    ticker_profit_per_share = [
-        entry["value"]
-        for entry in ticker_analysis["companyKeyRatiosByYear"]["earningsPerShare"]
-        if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
+    raw = [
+        {"date": e["date"], "value": e["value"]}
+        for e in ticker_analysis["companyKeyRatiosByYear"]["earningsPerShare"]
+        if e.get("reportType") == "FULL_YEAR"
     ]
-
-    if len(ticker_profit_per_share) > 1:
-        slope = calculate_slope(ticker_profit_per_share[-5:], ticker_id)
-        return float(slope), ticker_profit_per_share
-    else:
+    if len(raw) < 2:
         return None, None
 
+    values = [d["value"] for d in raw][-5:]  # last five EPS numbers
+    slope = calculate_slope(values, ticker_id)  # expects numeric list
+    return float(slope), raw  # (slope, full record list)
 
+
+# -------------------------------------------------------------------
 def calculate_profit_margin(ticker_analysis):
-    ticker_profit_margin = [
-        entry["value"]
-        for entry in ticker_analysis["companyFinancialsByYear"]["profitMargin"]
-        if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
+    raw = [
+        {"date": e["date"], "value": e["value"]}
+        for e in ticker_analysis["companyFinancialsByYear"]["profitMargin"]
+        if e.get("reportType") == "FULL_YEAR"
     ]
-    if ticker_profit_margin:
-        return float(ticker_profit_margin[-1]), ticker_profit_margin
-    else:
+    if not raw:
         return None, None
+
+    latest = float(raw[-1]["value"])  # newest numeric margin
+    return latest, raw  # (value, full record list)
 
 
 def calculate_profit_margin_trend(ticker_analysis, ticker_id=None):
@@ -94,38 +97,41 @@ def calculate_profit_margin_trend(ticker_analysis, ticker_id=None):
 
 
 def calculate_revenue_trend(ticker_analysis, ticker_id=None):
-    ticker_revenue_by_year = [
-        entry["value"]
-        for entry in ticker_analysis["companyFinancialsByYear"]["sales"]
-        if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
+    # --- build dict-lists --------------------------------------------------
+    yr = [
+        {"date": e["date"], "value": e["value"]}
+        for e in ticker_analysis["companyFinancialsByYear"]["sales"]
+        if e.get("reportType") == "FULL_YEAR"
     ]
-    ticker_revenue_by_quarter = [
-        entry["value"]
-        for entry in ticker_analysis["companyFinancialsByQuarter"]["sales"]
-        if "value" in entry
+    qtr = [
+        {"date": e["date"], "value": e["value"]}
+        for e in ticker_analysis["companyFinancialsByQuarter"]["sales"]
+        if "value" and "date" in e
     ]
-    if len(ticker_revenue_by_quarter) > 1 and len(ticker_revenue_by_year) > 1:
-        slope_year = calculate_slope(ticker_revenue_by_year[-5:])
-        slope_quarter = calculate_slope(ticker_revenue_by_quarter)
-        return (
-            float(slope_year),
-            float(slope_quarter),
-            ticker_revenue_by_year,
-            ticker_revenue_by_quarter,
-        )
-    else:
-        return None, None, None, None
+
+    if len(qtr) > 1 and len(yr) > 1:
+        # last five annual values
+        y_vals = [d["value"] for d in yr][-5:]
+        # all quarterly values
+        q_vals = [d["value"] for d in qtr]
+
+        slope_year = float(calculate_slope(y_vals))
+        slope_quarter = float(calculate_slope(q_vals))
+
+        return slope_year, slope_quarter, yr, qtr
+
+    return None, None, None, None
 
 
 def calculate_PE(ticker_analysis):
     pe = [
-        entry["value"]
+        {"date": entry["date"], "value": entry["value"]}
         for entry in ticker_analysis["stockKeyRatiosByYear"]["priceEarningsRatio"]
         if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
     ]
-
+    latest_vals = [d["value"] for d in pe][-5:]
     if len(pe) >= 1:
-        return pe[-5:], pe
+        return latest_vals, pe
     else:
         return None, None
 
@@ -223,12 +229,6 @@ def sync_currency(from_currency: str, to_currency: str = "SEK"):
     convert_to_sek = to_currency != "SEK"
 
     return currency_match, convert_to_sek, exchange_rate, sek_rate
-
-
-import pandas as pd
-import math
-
-import pandas as pd
 
 
 def calculate_free_cashflow_yield(yahoo_ticker, stock_info, df_hist=None):
@@ -386,43 +386,50 @@ def calculate_NAV_discount(ticker_name):
 
 
 def calculate_de(ticker_analysis, ticker_id=None):
-    debt_to_equity = [
-        entry["value"]
-        for entry in ticker_analysis["companyFinancialsByYear"]["debtToEquityRatio"]
-        if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
+    raw = [
+        {"date": e["date"], "value": e["value"]}
+        for e in ticker_analysis["companyFinancialsByYear"]["debtToEquityRatio"]
+        if e.get("reportType") == "FULL_YEAR"
     ]
-    if debt_to_equity:
-        return float(debt_to_equity[-1]), debt_to_equity
-    else:
-        return None
+    if not raw:
+        return None, None
+    latest = float(raw[-1]["value"])
+    return latest, raw
 
 
 def calculate_roe(ticker_analysis, ticker_id=None):
-    net_profit = np.array(
-        [
-            entry["value"]
-            for entry in ticker_analysis["companyFinancialsByYear"]["netProfit"]
-            if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
-        ]
-    )
-    total_assets = np.array(
-        [
-            entry["value"]
-            for entry in ticker_analysis["companyFinancialsByYear"]["totalAssets"]
-            if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
-        ]
-    )
-    total_liabilities = np.array(
-        [
-            entry["value"]
-            for entry in ticker_analysis["companyFinancialsByYear"]["totalLiabilities"]
-            if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
-        ]
-    )
+    # --- pull yearly series -------------------------------------------------
+    net_profit = [
+        {"date": e["date"], "value": e["value"]}
+        for e in ticker_analysis["companyFinancialsByYear"]["netProfit"]
+        if e.get("reportType") == "FULL_YEAR"
+    ]
+    total_assets = [
+        e["value"]
+        for e in ticker_analysis["companyFinancialsByYear"]["totalAssets"]
+        if e.get("reportType") == "FULL_YEAR"
+    ]
+    total_liab = [
+        e["value"]
+        for e in ticker_analysis["companyFinancialsByYear"]["totalLiabilities"]
+        if e.get("reportType") == "FULL_YEAR"
+    ]
 
-    shareholder_equity = total_assets - total_liabilities
-    roe = net_profit / shareholder_equity
-    if roe.size > 1:
-        return float(roe[-1]), roe
-    else:
-        return None
+    if not (net_profit and total_assets and total_liab):
+        return None, None  # missing data somewhere
+
+    # --- calculate ROE year-by-year ----------------------------------------
+    roe_series = []
+    for i, np_entry in enumerate(net_profit):
+        try:
+            equity = total_assets[i] - total_liab[i]
+            roe_val = np_entry["value"] / equity if equity else None
+        except IndexError:  # unequal list lengths → skip
+            continue
+        roe_series.append({"date": np_entry["date"], "value": roe_val})
+
+    if not roe_series:
+        return None, None
+
+    latest = roe_series[-1]["value"]
+    return float(latest) if latest is not None else None, roe_series
