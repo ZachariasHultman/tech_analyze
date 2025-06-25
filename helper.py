@@ -129,27 +129,6 @@ def calculate_slope(data, ticker=None):
     x = np.arange(len(data))
     y = np.array(data)
 
-    slope_deg1 = np.polyfit(x, y, 1)
-    slope_deg2 = np.polyfit(x, y, 2)
-    slope_deg3 = np.polyfit(x, y, 3)
+    slope_deg1 = np.polyfit(x, y, 1)[0]
 
-    # only use the highest degree coeficcient to get the trend
-    slopes = [slope_deg1[0], slope_deg2[0], slope_deg3[0]]
-
-    if len(data) <= 20:
-        return slope_deg1[0]
-
-    # Count positive and negative slopes
-    positive_count = sum(1 for slope in slopes if slope >= 0)
-
-    # Check if 2 or more slopes are positive or negative
-    if positive_count >= 2:
-        # Return the highest-degree slope that is positive
-        for slope in reversed(slopes):  # Iterate from degree 3 to 1
-            if slope >= 0:
-                return slope
-    else:
-        # Return the highest-degree slope that is negative
-        for slope in reversed(slopes):  # Iterate from degree 3 to 1
-            if slope < 0:
-                return slope
+    return slope_deg1
