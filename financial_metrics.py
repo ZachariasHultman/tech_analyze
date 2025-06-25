@@ -398,69 +398,87 @@ def calculate_free_cashflow_yield(yahoo_ticker, stock_info, df_hist=None):
         return None, None, None, None
 
 
+# ------------------------------------------------------------------
+# EV / EBIT  – latest value + tidy history
+# ------------------------------------------------------------------
 def extract_ev_ebit_ratio(avanza_data):
     """
-    Extracts the EV/EBIT ratio from Avanza’s `stockKeyRatiosByYear`.
+    Parameters
+    ----------
+    avanza_data : dict
+        Raw JSON block from Avanza's /stock endpoint.
 
-    Returns:
-        latest_ev_ebit (float or None): The most recent EV/EBIT value.
-        ev_ebit_hist (dict[str, float]): Mapping from "YYYY-MM-DD" to EV/EBIT.
+    Returns
+    -------
+    latest_ev_ebit : float | None
+        The single most-recent EV/EBIT value.
+    ev_ebit_hist : list[dict] | None
+        Full history, each item:
+            {"date": "YYYY-MM-DD", "value": <float>}
+        If nothing valid is found → (None, None)
     """
-    ev_ebit_list = avanza_data.get("stockKeyRatiosByYear", {}).get("evEbitRatio", [])
-    ev_ebit_hist_raw = {}
-    for entry in ev_ebit_list:
+    raw = avanza_data.get("stockKeyRatiosByYear", {}).get("evEbitRatio", [])
+
+    records = []
+    for e in raw:
+        if e.get("reportType") != "FULL_YEAR" or "date" not in e:
+            continue
         try:
-            date_ts = pd.Timestamp(entry["date"])
-            ev_ebit_hist_raw[date_ts] = entry["value"]
-        except (KeyError, ValueError):
+            date_iso = pd.to_datetime(e["date"]).strftime("%Y-%m-%d")
+            records.append({"date": date_iso, "value": float(e["value"])})
+        except Exception:  # malformed date or non-numeric value
             continue
 
-    # Determine latest
-    if ev_ebit_hist_raw:
-        latest_date = max(ev_ebit_hist_raw.keys())
-        latest_ev_ebit = ev_ebit_hist_raw[latest_date]
-    else:
-        latest_ev_ebit = None
+    if not records:
+        return None, None
 
-    # Convert keys to ISO‐string
-    ev_ebit_hist = {
-        dt.strftime("%Y-%m-%d"): float(val) for dt, val in ev_ebit_hist_raw.items()
-    }
+    records.sort(key=lambda r: r["date"])  # chronological
+    latest_ev_ebit = records[-1]["value"]
 
-    return latest_ev_ebit, ev_ebit_hist
+    return latest_ev_ebit, records
+
+
+# ------------------------------------------------------------------
+# Net-Debt / EBITDA  – tidy list + latest-five helper
+# ------------------------------------------------------------------
 
 
 def extract_netdebt_ebitda_ratio(avanza_data):
     """
-    Extracts the Net Debt/EBITDA ratio from Avanza’s `companyKeyRatiosByYear`.
+    Parameters
+    ----------
+    avanza_data : dict
+        Raw JSON from Avanza’s /company endpoint.
 
-    Returns:
-        latest_nd_ebitda (float or None): The most recent Net Debt/EBITDA value.
-        nd_ebitda_hist (dict[str, float]): Mapping from "YYYY-MM-DD" to Net Debt/EBITDA.
+    Returns
+    -------
+    latest_val : float | None
+        The single most-recent Net-Debt / EBITDA value.
+    nd_ebitda_hist : list[dict] | None
+        Full history, each item:
+            {"date": "YYYY-MM-DD", "value": <float>}
+        If no valid entries exist → (None, None)
     """
-    nd_ebitda_list = avanza_data.get("companyKeyRatiosByYear", {}).get(
-        "netDebtEbitdaRatio", []
-    )
-    nd_ebitda_hist_raw = {}
-    for entry in nd_ebitda_list:
+    raw = avanza_data.get("companyKeyRatiosByYear", {}).get("netDebtEbitdaRatio", [])
+
+    records = []
+    for e in raw:
+        if e.get("reportType") != "FULL_YEAR" or "date" not in e:
+            continue
         try:
-            date_ts = pd.Timestamp(entry["date"])
-            nd_ebitda_hist_raw[date_ts] = entry["value"]
-        except (KeyError, ValueError):
+            date_iso = pd.to_datetime(e["date"]).strftime("%Y-%m-%d")
+            records.append({"date": date_iso, "value": float(e["value"])})
+        except Exception:  # bad date or non-numeric value
             continue
 
-    # Determine latest
-    if nd_ebitda_hist_raw:
-        latest_date = max(nd_ebitda_hist_raw.keys())
-        latest_nd_ebitda = nd_ebitda_hist_raw[latest_date]
-    else:
-        latest_nd_ebitda = None
+    if not records:
+        return None, None
 
-    # Convert keys to ISO‐string
-    nd_ebitda_hist = {
-        dt.strftime("%Y-%m-%d"): float(val) for dt, val in nd_ebitda_hist_raw.items()
-    }
-    return latest_nd_ebitda, nd_ebitda_hist
+    # sort chronologically to identify the latest
+    records.sort(key=lambda r: r["date"])
+    latest_val = records[-1]["value"]
+
+    return latest_val, records
 
 
 def calculate_NAV_discount(ticker_name):
