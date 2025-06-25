@@ -210,7 +210,7 @@ class SummaryManager:
                 return -weight
         return 0
 
-    def _display(self):
+    def _display(self, save_df=False):
         """Displays DataFrame with tabulate formatting for a cleaner output."""
 
         def colorize_row(row):
@@ -236,6 +236,7 @@ class SummaryManager:
 
         def process_dataframe(df):
             """Applies row-wise coloring, then drops `_score` and 'sector' columns."""
+
             if df.empty:
                 return df
             df_colored = df.apply(colorize_row, axis=1)
@@ -254,6 +255,10 @@ class SummaryManager:
             summary_colored = process_dataframe(self.summary).sort_values(
                 by="points", ascending=False
             )
+            if save_df:
+                # Save the summary to a CSV file
+                self.summary.to_csv("summary.csv")
+
             print(
                 tabulate(
                     summary_colored,
@@ -268,6 +273,10 @@ class SummaryManager:
             summary_investment_colored = process_dataframe(
                 self.summary_investment
             ).sort_values(by="points", ascending=False)
+            if save_df:
+                # Save the investment summary to a CSV file
+                self.summary_investment.to_csv("summary_investment.csv")
+
             print(
                 tabulate(
                     summary_investment_colored,

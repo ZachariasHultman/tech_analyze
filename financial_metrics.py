@@ -11,37 +11,123 @@ from metrics import ticker_reporting_currency_map, ticker_currency_map
 import time
 
 
-def calculate_sma200(avanza, ticker_id):
+import requests
+from datetime import datetime, timedelta
+from enum import Enum
+import pandas as pd
+import numpy as np
+
+
+def get_ohlc_dataframe(
+    *,
+    ticker_id: str,
+    avanza=None,
+    use_hist: bool = False,
+    hist_row: pd.Series | None = None,
+    years_back: int = 5,
+) -> pd.DataFrame | None:
+    """
+    Return a tidy OHLC DataFrame with columns:
+        [date, open, high, low, close, totalVolumeTraded]
+
+    Parameters
+    ----------
+    ticker_id   : str
+        Avanza order-book id **or** the same key you use in your historical store.
+    avanza      : Avanza client (needed only when use_hist is False)
+    use_hist    : bool (default False)
+        * False → live fetch via Avanza
+        * True  → use `hist_row["ohlc"]` that you already loaded with get_hist_data()
+    hist_row    : pd.Series
+        The row from your historical DataFrame containing the `"ohlc"` field.
+        Required when use_hist is True.
+    years_back  : int
+        How many years of history you want (default 5).
+    """
+    if use_hist:
+        if hist_row is None or "ohlc" not in hist_row or hist_row["ohlc"] is None:
+            return None
+        ohlc = hist_row["ohlc"].copy()
+        # keep last `years_back` of data
+        cutoff = ohlc.index.max() - pd.Timedelta(days=365 * years_back)
+        ohlc = ohlc[ohlc.index >= cutoff]
+        ohlc = ohlc.rename(columns={"close": "close"})  # already correct
+        ohlc = ohlc.reset_index().rename(columns={"date": "date"})
+        ohlc["totalVolumeTraded"] = np.nan  # not available in hist store
+        return ohlc[["date", "open", "high", "low", "close", "totalVolumeTraded"]]
+
+    # ------------------------------------------------------------------
+    # live fetch via Avanza REST
+    if avanza is None:
+        raise ValueError("`avanza` client must be supplied when use_hist=False")
+
     try:
-        ticker_chart_data = avanza.get_chart_data(
+        raw = avanza.get_chart_data(
             order_book_id=ticker_id,
-            period=TimePeriod.FIVE_YEARS,
+            period=TimePeriod.FIVE_YEARS if years_back >= 5 else TimePeriod.ONE_YEAR,
             resolution=Resolution.DAY,
         )["ohlc"]
     except requests.exceptions.HTTPError:
-        return None, None, None
+        return None
 
-    last_week_average_close = (
-        sum(entry["close"] for entry in ticker_chart_data[-7:]) / 7
-    )
-
-    df_hist = pd.DataFrame(ticker_chart_data)
-    df_hist["date"] = df_hist["timestamp"].apply(
+    df = pd.DataFrame(raw)
+    df["date"] = df["timestamp"].apply(
         lambda ts: datetime.utcfromtimestamp(ts / 1000).date()
     )
-    df_hist = df_hist[["date", "open", "high", "low", "close", "totalVolumeTraded"]]
+    return df[["date", "open", "high", "low", "close", "totalVolumeTraded"]]
 
-    closing_prices = [entry["close"] for entry in ticker_chart_data]
-    data = pd.DataFrame({"close": closing_prices})
-    # Calculate the Rolling SMA200
-    data["sma200"] = data["close"].rolling(window=200).mean()[-200:]
-    # Drop rows with NaN (first 199 rows won't have SMA200)
-    data = data.dropna()
 
-    sma200 = data["sma200"].to_list()[-1]
-    slope = calculate_slope(data["sma200"].to_list())
+def calc_sma200_metrics(
+    df_hist: pd.DataFrame,
+) -> tuple[float | None, float | None, float | None]:
+    """
+    Parameters
+    ----------
+    df_hist : tidy OHLC dataframe (see get_ohlc_dataframe)
 
-    return sma200, last_week_average_close, float(slope), df_hist
+    Returns
+    -------
+    sma200                : float | None  – latest SMA-200 value
+    last_week_avg_close   : float | None  – mean close of last 7 trading days
+    sma200_slope          : float | None  – slope of entire SMA-200 series
+    """
+    if df_hist is None or df_hist.empty:
+        return None, None, None
+
+    close_ser = df_hist["close"].astype(float).reset_index(drop=True)
+
+    # --- 200-day simple moving average ---------------------------------
+    sma200_ser = close_ser.rolling(window=200, min_periods=200).mean().dropna()
+    if sma200_ser.empty:
+        return None, None, None
+
+    sma200_latest = float(sma200_ser.iloc[-1])
+    last_week_avg = float(close_ser.tail(7).mean())
+
+    # slope helper (your existing function)
+    sma200_slope = calculate_slope(sma200_ser.tolist())
+
+    return sma200_latest, last_week_avg, float(sma200_slope)
+
+
+# ----------------------------------------------------------------------
+# Convenience wrapper (keeps the old signature working)
+# ----------------------------------------------------------------------
+def calculate_sma200(avanza, ticker_id, *, use_hist: bool = False, hist_row=None):
+    """
+    Back-compatible wrapper so existing callers need not change.
+
+    Returns (sma200, last_week_avg_close, slope, df_hist)
+    """
+    df_hist = get_ohlc_dataframe(
+        ticker_id=ticker_id,
+        avanza=avanza,
+        use_hist=use_hist,
+        hist_row=hist_row,
+        years_back=5,
+    )
+    sma200, last_week_avg, slope = calc_sma200_metrics(df_hist)
+    return sma200, last_week_avg, slope, df_hist
 
 
 def calculate_profit_per_share(ticker_analysis):
@@ -58,7 +144,7 @@ def calculate_profit_per_share_trend(ticker_analysis, ticker_id=None):
     raw = [
         {"date": e["date"], "value": e["value"]}
         for e in ticker_analysis["companyKeyRatiosByYear"]["earningsPerShare"]
-        if e.get("reportType") == "FULL_YEAR"
+        if e.get("reportType") == "FULL_YEAR" and "date" in e
     ]
     if len(raw) < 2:
         return None, None
@@ -73,7 +159,7 @@ def calculate_profit_margin(ticker_analysis):
     raw = [
         {"date": e["date"], "value": e["value"]}
         for e in ticker_analysis["companyFinancialsByYear"]["profitMargin"]
-        if e.get("reportType") == "FULL_YEAR"
+        if e.get("reportType") == "FULL_YEAR" and "date" in e
     ]
     if not raw:
         return None, None
@@ -101,7 +187,7 @@ def calculate_revenue_trend(ticker_analysis, ticker_id=None):
     yr = [
         {"date": e["date"], "value": e["value"]}
         for e in ticker_analysis["companyFinancialsByYear"]["sales"]
-        if e.get("reportType") == "FULL_YEAR"
+        if e.get("reportType") == "FULL_YEAR" and "date" in e
     ]
     qtr = [
         {"date": e["date"], "value": e["value"]}
@@ -127,7 +213,9 @@ def calculate_PE(ticker_analysis):
     pe = [
         {"date": entry["date"], "value": entry["value"]}
         for entry in ticker_analysis["stockKeyRatiosByYear"]["priceEarningsRatio"]
-        if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
+        if "reportType" in entry
+        and entry["reportType"] == "FULL_YEAR"
+        and "date" in entry
     ]
     latest_vals = [d["value"] for d in pe][-5:]
     if len(pe) >= 1:
@@ -137,71 +225,82 @@ def calculate_PE(ticker_analysis):
 
 
 def calculate_CAGR_helper(df, years):
-    """Calculates CAGR for the given number of years."""
-
-    # Ensure the DataFrame index is sorted
     df = df.sort_index()
 
-    # Define end date as the last available date in the dataset
     end_date = df.index[-1]
-
-    # Define start date based on the number of years
     start_date = end_date - pd.DateOffset(years=years)
 
-    # Find the closest available price **on or after** start_date
     closest_start_idx = df.index.get_indexer([start_date], method="backfill")[0]
     closest_start = df.iloc[closest_start_idx]["close"]
-
-    # Get the closing price at the end date
     end_price = df["close"].iloc[-1]
 
-    # Compute CAGR
     cagr = (end_price / closest_start) ** (1 / years) - 1
-
     return float(cagr)
 
 
-def calculate_closing_CAGR(avanza, ticker):
+def calculate_closing_CAGR(
+    avanza,
+    ticker,
+    *,
+    use_hist: bool = False,
+    hist_row: pd.Series | None = None,
+    years_tuple: tuple[int, ...] = (3, 2, 1),
+) -> list[float] | None:
+    """
+    Return [CAGR_3Y, CAGR_2Y, CAGR_1Y] by default (old behaviour).
+
+    Parameters
+    ----------
+    use_hist : bool (default False)
+        • False → live fetch via Avanza (unchanged)
+        • True  → derive from hist_row["ohlc"] that you loaded with get_hist_data()
+    hist_row : pd.Series
+        The row from your historical DataFrame; required when use_hist=True.
+    years_tuple : tuple[int,...]
+        Which year-spans to calculate (defaults to (3,2,1) → old behaviour).
+    """
+    # ── HISTORICAL MODE ────────────────────────────────────────────────
+    if use_hist:
+        if hist_row is None or "ohlc" not in hist_row or hist_row["ohlc"] is None:
+            return None
+
+        df = hist_row["ohlc"].copy()
+        df = df.rename(columns={"close": "close"}).astype(float)
+        df = df.sort_index()
+
+        cagr_vals = [calculate_CAGR_helper(df, y) for y in years_tuple]
+        return cagr_vals if any(v is not None for v in cagr_vals) else None
+
+    # ── LIVE (old) MODE ────────────────────────────────────────────────
     try:
         ticker_chart_data = avanza.get_chart_data(
             order_book_id=ticker,
             period=TimePeriod.FIVE_YEARS,
             resolution=Resolution.DAY,
         )
-    except requests.exceptions.HTTPError as e:
+    except requests.exceptions.HTTPError:
         return None
-    # Extract timestamps and closing prices
-    timestamps = [entry["timestamp"] for entry in ticker_chart_data["ohlc"]]
-    closing_prices = [entry["close"] for entry in ticker_chart_data["ohlc"]]
 
-    # Convert timestamps to pandas datetime format (milliseconds since 1970)
+    timestamps = [e["timestamp"] for e in ticker_chart_data["ohlc"]]
+    closing_prices = [e["close"] for e in ticker_chart_data["ohlc"]]
     dates = pd.to_datetime(timestamps, unit="ms")
+    data = pd.DataFrame({"close": closing_prices}, index=dates).sort_index()
 
-    # Create DataFrame with both Date and Closing Price
-    data = pd.DataFrame({"Date": dates, "close": closing_prices})
-
-    # Set the date as index
-    data.set_index("Date", inplace=True)
-    data = data.sort_index()
-    years = [3, 2, 1]
-    cagr = [calculate_CAGR_helper(data, y) for y in years]
-
-    return cagr
+    return [calculate_CAGR_helper(data, y) for y in years_tuple]
 
 
-def calculate_PEG(pe, cagr):
-    # PEG is orderd as CAGR, which is [oldest, ... , newest]
-    if cagr == None or not pe:
+def calculate_PEG(pe: list[float], cagr: list[float] | None):
+    """
+    PEG = PE / CAGR
+    • `pe`    list of the last 3 PE values  (oldest → newest)
+    • `cagr`  list of matching CAGR values (ditto)
+    """
+    if cagr is None or not pe:
         return None
 
     pe = pe[-3:]
-    peg = []
-    for p, c in zip(pe, cagr):
-        if c != 0:  # Avoid division by zero
-            peg.append(float(p / c))
-        else:
-            peg.append(None)  # Handle cases where CAGR is 0 or negative
-    return peg[-1]
+    peg = [float(p / c) if c else None for p, c in zip(pe, cagr)]
+    return peg[-1]  # return most recent PEG
 
 
 from currency_converter import CurrencyConverter
@@ -365,23 +464,64 @@ def extract_netdebt_ebitda_ratio(avanza_data):
 
 
 def calculate_NAV_discount(ticker_name):
-    df_nav = get_nav_data(ticker_name)
-    nav = df_nav.iloc[-300:]["SUBSTANSVÄRDE"].to_numpy()
-    calculated_nav = df_nav.iloc[-300:]["BERÄKNAT_SUBSTANSVÄRDE"].to_numpy()
-    price = df_nav.iloc[-300:]["PRIS"].to_numpy()
+    """
+    Return:
+        nav_discount_mean_30           – float
+        calculated_nav_discount_mean_30– float
+        nav_trend_slope                – float
+        nav_discount_raw               – list[dict{date,value}]
+        calc_nav_discount_raw          – list[dict{date,value}]
+    """
+    import numpy as np
+    import pandas as pd
 
-    nav_discount = (price - nav) / nav
-    calculated_nav_discount = (price - calculated_nav) / calculated_nav
-    if nav_discount.size > 0:
-        nav_trend = calculate_slope(nav_discount.tolist())
-    else:
+    df_nav = get_nav_data(ticker_name)
+    if df_nav is None or df_nav.empty:
         return None, None, None, None, None
+
+    # --- keep last 300 records & ensure we have real datetimes ----------
+    df_nav = df_nav.tail(300).copy()
+    df_nav["DATUM"] = pd.to_datetime(df_nav["DATUM"], errors="coerce")
+    df_nav = df_nav.dropna(subset=["DATUM"])
+
+    # --- core columns ---------------------------------------------------
+    nav = df_nav["SUBSTANSVÄRDE"].astype(float)
+    nav_calc = df_nav["BERÄKNAT_SUBSTANSVÄRDE"].astype(float)
+    price = df_nav["PRIS"].astype(float)
+
+    # avoid division-by-zero → replace 0 with NaN
+    nav_discount_series = (price - nav) / nav.replace(0, np.nan)
+    calc_discount_series = (price - nav_calc) / nav_calc.replace(0, np.nan)
+
+    # --- build raw [{"date": …, "value": …}, …] -------------------------
+    nav_discount_raw = [
+        {"date": dt.strftime("%Y-%m-%d"), "value": float(val)}
+        for dt, val in zip(df_nav["DATUM"], nav_discount_series)
+        if pd.notna(val)
+    ]
+    calc_nav_discount_raw = [
+        {"date": dt.strftime("%Y-%m-%d"), "value": float(val)}
+        for dt, val in zip(df_nav["DATUM"], calc_discount_series)
+        if pd.notna(val)
+    ]
+
+    # need at least two points for a trend
+    if len(nav_discount_raw) < 2:
+        return None, None, None, None, None
+
+    # --- 30-day means ---------------------------------------------------
+    nav_mean_30 = float(nav_discount_series.tail(30).mean())
+    calc_nav_mean_30 = float(calc_discount_series.tail(30).mean())
+
+    # --- slope of the last 5 discount values (similar to EPS trend) -----
+    nav_trend_slope = calculate_slope([d["value"] for d in nav_discount_raw[-5:]])
+
     return (
-        float(nav_discount[-30:].mean()),
-        float(calculated_nav_discount[-30:].mean()),
-        float(nav_trend),
-        nav_discount,
-        calculated_nav_discount,
+        nav_mean_30,
+        calc_nav_mean_30,
+        float(nav_trend_slope),
+        nav_discount_raw,
+        calc_nav_discount_raw,
     )
 
 
@@ -389,7 +529,7 @@ def calculate_de(ticker_analysis, ticker_id=None):
     raw = [
         {"date": e["date"], "value": e["value"]}
         for e in ticker_analysis["companyFinancialsByYear"]["debtToEquityRatio"]
-        if e.get("reportType") == "FULL_YEAR"
+        if e.get("reportType") == "FULL_YEAR" and "date" in e
     ]
     if not raw:
         return None, None
@@ -402,17 +542,17 @@ def calculate_roe(ticker_analysis, ticker_id=None):
     net_profit = [
         {"date": e["date"], "value": e["value"]}
         for e in ticker_analysis["companyFinancialsByYear"]["netProfit"]
-        if e.get("reportType") == "FULL_YEAR"
+        if e.get("reportType") == "FULL_YEAR" and "date" in e
     ]
     total_assets = [
         e["value"]
         for e in ticker_analysis["companyFinancialsByYear"]["totalAssets"]
-        if e.get("reportType") == "FULL_YEAR"
+        if e.get("reportType") == "FULL_YEAR" and "date" in e
     ]
     total_liab = [
         e["value"]
         for e in ticker_analysis["companyFinancialsByYear"]["totalLiabilities"]
-        if e.get("reportType") == "FULL_YEAR"
+        if e.get("reportType") == "FULL_YEAR" and "date" in e
     ]
 
     if not (net_profit and total_assets and total_liab):

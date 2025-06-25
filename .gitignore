@@ -20,6 +20,8 @@ __pycache__/
 # Ignore environment files
 .env
 
+.vscode/
+
 # Ignore virtual environments and installed Python packages
 venv/
 analyze/lib/

@@ -44,13 +44,13 @@ def main():
     print("yfinance version: ", version("yfinance"))
     ap = argparse.ArgumentParser()
     ap.add_argument(
-        "--use_hist",
+        "--get_hist",
         type=bool,
-        help="true/false. Get and stor historical data for tickers",
+        help="true/false. Get and store historical data for tickers",
         default=False,
     )
     ap.add_argument(
-        "--get_hist",
+        "--use_hist",
         type=bool,
         help="true/false. Use historical data to run the script",
         default=False,
@@ -105,7 +105,7 @@ def main():
 
         calculate_score(manager)
 
-        manager._display()
+        manager._display(save_df=True)
     else:
         calculate_metrics_given_hist()
 
