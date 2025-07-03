@@ -71,6 +71,33 @@ def refine_thresholds(current_thresholds, step=0.05):
 def iterate_thresholds_by_sector(
     df, sector_grid, usable_metrics_per_sector, summary_class=SummaryManager
 ):
+    """
+    Iteratively evaluates metric thresholds per sector and timespan to optimize correlation
+    between computed score (points) and historical total return.
+
+    For each (sector, timespan, metric) combination, it:
+    - Applies a range of threshold pairs to calculate scores.
+    - Computes average score, average return, and their correlation.
+    - Tracks and refines the best-performing thresholds across multiple iterations
+      if correlation is below a configured threshold (CORRELATION_THRESHOLD).
+    - Returns all tested configurations sorted by descending correlation.
+
+    Parameters:
+        df (pd.DataFrame): Cleaned input dataset containing sectors, metrics, and returns.
+        sector_grid (dict): Precomputed dictionary of threshold pairs per sector and metric.
+        usable_metrics_per_sector (dict): Mapping of valid metrics per sector.
+        summary_class (class): A class to handle score processing, defaults to SummaryManager.
+
+    Returns:
+        list of tuples: Each tuple contains:
+            - timespan (str)
+            - sector (str)
+            - thresholds (dict): Metric to threshold pair
+            - summary object
+            - average score (float)
+            - average return (float)
+            - correlation (float)
+    """
     results = []
     best_thresholds = {}
 
@@ -215,6 +242,29 @@ def iterate_thresholds_by_sector(
 
 
 def consolidate_best_thresholds(results):
+    """
+    Consolidates the best performing threshold combinations per sector and timespan.
+
+    For each (timespan, sector) pair, this function identifies the best threshold
+    configuration for each metric based on the highest correlation between score and return.
+    It aggregates the thresholds and computes average statistics across selected metrics.
+
+    Parameters:
+        results (list of tuples): Each tuple contains:
+            - timespan (str)
+            - sector (str)
+            - threshold_dict (dict): threshold values for a single metric
+            - summary_manager (SummaryManager): object containing processed summaries
+            - avg_points (float): average score across companies
+            - avg_return (float): average return across companies
+            - correlation (float): correlation between score and return
+
+    Returns:
+        pd.DataFrame: A DataFrame with one row per (timespan, sector) containing:
+            - combined thresholds for all metrics
+            - average points, returns, correlation
+            - number of companies considered
+    """
     grouped = defaultdict(dict)
 
     for timespan, sector, threshold_dict, sm, avg_points, avg_return, corr in results:
@@ -285,6 +335,7 @@ def consolidate_best_thresholds(results):
 
 
 def sanity_checks(df, df_final):
+
     # 1. Expected rows = unique sectors * unique timespans
     expected_rows = df["sector"].nunique() * df["timespan"].nunique()
     actual_rows = len(df_final)
@@ -328,6 +379,25 @@ def sanity_checks(df, df_final):
 def build_sector_threshold_grid(
     metrics, sector_threshold_grid, sector_thresholds_old, usable_metrics_per_sector
 ):
+    """
+    Constructs a grid of threshold combinations for each metric and sector.
+
+    This function expands the predefined thresholds for each metric by generating
+    a range of possible threshold combinations based on STEP_SIZE and STEP_PER_DIRECTION.
+    It handles both simple numeric thresholds and complex tuple thresholds (like CAGR-PE pairs).
+    Valid metrics for each sector are tracked for later use.
+
+    Parameters:
+        metrics (list): List of metric names to generate thresholds for.
+        sector_threshold_grid (dict): Dictionary to populate with threshold grids.
+        sector_thresholds_old (dict): Original base thresholds per sector and metric.
+        usable_metrics_per_sector (dict): Dictionary to populate with valid metrics per sector.
+
+    Returns:
+        tuple:
+            - sector_threshold_grid (dict): Populated grid of threshold combinations.
+            - usable_metrics_per_sector (dict): Metrics that are valid for each sector.
+    """
     step_range = range(-STEP_PER_DIRECTION, STEP_PER_DIRECTION + 1)
 
     for metric in metrics:
