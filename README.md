@@ -6,6 +6,24 @@ A simple Python script that uses a VERY INSECURE, UNOFFICIAL API FROM A SWEDISH 
 
 Before using this program, you’ll need to configure a few things related to this UNSECURE, UNOFFICIAL API. I won’t spell it out, but if you read the code, you’ll get an idea of what to search for to find it.
 
+## Instructions
+Run analyzer
+```bash
+python3 analyzer/main.py 
+```
+Run analyzer and store data
+```bash
+python3 analyzer/main.py --get_hist True
+```
+Run analyzer and use stored data
+```bash
+python3 analyzer/main.py --use_hist True
+```
+Run metric optimizer
+```bash
+python3 optimize_metric_generation/optimize_metric_generation.py 
+```
+
 # Secret Sauce
 
 The metrics.py file is missing on purpose—it’s where all the magic happens. It contains my secret formula for what makes a stock “good” (or at least what I think makes it good).
