@@ -1,9 +1,9 @@
 import yfinance as yf
 from tqdm import tqdm
 import re
-from metrics import HIGHEST_WEIGHT_METRICS
-from helper import *
-from financial_metrics import *
+from analyzer.metrics import HIGHEST_WEIGHT_METRICS
+from analyzer.helper import *
+from analyzer.financial_metrics import *
 
 
 def get_data(
