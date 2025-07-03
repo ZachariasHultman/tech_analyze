@@ -43,6 +43,7 @@ sector_threshold_grid, usable_metrics_per_sector = build_sector_threshold_grid(
 results = iterate_thresholds_by_sector(
     df, sector_threshold_grid, usable_metrics_per_sector
 )
+
 df_final = consolidate_best_thresholds(results)
 df_final.to_csv("top_thresholds_combined.csv", index=False)
 sanity_checks(df, df_final)

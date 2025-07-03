@@ -243,38 +243,29 @@ def iterate_thresholds_by_sector(
 
 def consolidate_best_thresholds(results):
     """
-    Consolidates the best performing threshold combinations per sector and timespan.
+    Consolidates the best threshold for each metric per sector and timespan.
 
-    For each (timespan, sector) pair, this function identifies the best threshold
-    configuration for each metric based on the highest correlation between score and return.
-    It aggregates the thresholds and computes average statistics across selected metrics.
-
-    Parameters:
-        results (list of tuples): Each tuple contains:
-            - timespan (str)
-            - sector (str)
-            - threshold_dict (dict): threshold values for a single metric
-            - summary_manager (SummaryManager): object containing processed summaries
-            - avg_points (float): average score across companies
-            - avg_return (float): average return across companies
-            - correlation (float): correlation between score and return
+    Keeps one best-performing threshold per metric in every (sector, timespan) combination,
+    based on maximum correlation.
 
     Returns:
-        pd.DataFrame: A DataFrame with one row per (timespan, sector) containing:
-            - combined thresholds for all metrics
-            - average points, returns, correlation
-            - number of companies considered
+        pd.DataFrame: One row per (timespan, sector) with all best metric thresholds.
     """
+    from collections import defaultdict
+    import numpy as np
+    import json
+
     grouped = defaultdict(dict)
 
     for timespan, sector, threshold_dict, sm, avg_points, avg_return, corr in results:
         metric = list(threshold_dict.keys())[0]
-        current_best = grouped[(timespan, sector)].get(metric)
+        current = grouped[(timespan, sector)].get(metric)
 
+        # Replace only if better correlation
         if (
-            current_best is None
-            or current_best["correlation"] is None
-            or (corr is not None and corr > current_best["correlation"])
+            current is None
+            or current["correlation"] is None
+            or (corr is not None and corr > current["correlation"])
         ):
             grouped[(timespan, sector)][metric] = {
                 "threshold": threshold_dict[metric],
@@ -289,45 +280,39 @@ def consolidate_best_thresholds(results):
         combined_thresholds = {
             metric: data["threshold"] for metric, data in metric_data.items()
         }
-        # Optionally, avg_points/returns could be averages across metrics
+
+        avg_points = np.mean(
+            [
+                data["avg_points"]
+                for data in metric_data.values()
+                if data["avg_points"] is not None
+            ]
+        )
+        avg_return = np.mean(
+            [
+                data["avg_return"]
+                for data in metric_data.values()
+                if data["avg_return"] is not None
+            ]
+        )
+        avg_corr = np.mean(
+            [
+                data["correlation"]
+                for data in metric_data.values()
+                if data["correlation"] is not None
+            ]
+        )
+        num_companies = max(data["num_companies"] for data in metric_data.values())
+
         final.append(
             {
                 "timespan": timespan,
                 "sector": sector,
                 "thresholds": json.dumps(combined_thresholds),
-                "avg_points": round(
-                    np.mean(
-                        [
-                            data["avg_points"]
-                            for data in metric_data.values()
-                            if data["avg_points"] is not None
-                        ]
-                    ),
-                    2,
-                ),
-                "avg_return": round(
-                    np.mean(
-                        [
-                            data["avg_return"]
-                            for data in metric_data.values()
-                            if data["avg_return"] is not None
-                        ]
-                    ),
-                    2,
-                ),
-                "avg_correlation": round(
-                    np.mean(
-                        [
-                            data["correlation"]
-                            for data in metric_data.values()
-                            if data["correlation"] is not None
-                        ]
-                    ),
-                    2,
-                ),
-                "num_companies": max(
-                    [data["num_companies"] for data in metric_data.values()]
-                ),
+                "avg_points": round(avg_points, 2),
+                "avg_return": round(avg_return, 2),
+                "avg_correlation": round(avg_corr, 2),
+                "num_companies": num_companies,
             }
         )
 
@@ -376,38 +361,33 @@ def sanity_checks(df, df_final):
         print(low_corr[["sector", "timespan", "avg_correlation"]])
 
 
+from analyzer.metrics import (
+    get_metrics_threshold,
+)  # Import where the function is defined
+
+
 def build_sector_threshold_grid(
     metrics, sector_threshold_grid, sector_thresholds_old, usable_metrics_per_sector
 ):
     """
     Constructs a grid of threshold combinations for each metric and sector.
 
-    This function expands the predefined thresholds for each metric by generating
-    a range of possible threshold combinations based on STEP_SIZE and STEP_PER_DIRECTION.
-    It handles both simple numeric thresholds and complex tuple thresholds (like CAGR-PE pairs).
-    Valid metrics for each sector are tracked for later use.
-
-    Parameters:
-        metrics (list): List of metric names to generate thresholds for.
-        sector_threshold_grid (dict): Dictionary to populate with threshold grids.
-        sector_thresholds_old (dict): Original base thresholds per sector and metric.
-        usable_metrics_per_sector (dict): Dictionary to populate with valid metrics per sector.
+    Expands base thresholds using STEP_SIZE and STEP_PER_DIRECTION.
+    Automatically handles direction of thresholds using metric naming.
 
     Returns:
-        tuple:
-            - sector_threshold_grid (dict): Populated grid of threshold combinations.
-            - usable_metrics_per_sector (dict): Metrics that are valid for each sector.
+        - sector_threshold_grid (dict): Populated threshold combinations per metric/sector
+        - usable_metrics_per_sector (dict): Metrics applicable per sector
     """
     step_range = range(-STEP_PER_DIRECTION, STEP_PER_DIRECTION + 1)
+    bad_if_high_keywords = ["de status", "peg status", "net debt - ebitda status"]
 
     for metric in metrics:
-        m = metric
-        sector_threshold_grid[m] = {}
+        sector_threshold_grid[metric] = {}
 
         for sector, thresholds in sector_thresholds_old[metric].items():
             try:
                 if metric == "cagr-pe compare status":
-                    # Each threshold is a tuple: [(ok_cagr, ok_pe), (nok_cagr, nok_pe)]
                     ok_base = (float(thresholds[0][0]), float(thresholds[0][1]))
                     nok_base = (float(thresholds[1][0]), float(thresholds[1][1]))
 
@@ -426,29 +406,34 @@ def build_sector_threshold_grid(
 
                     ok_pairs = list(product(ok_cagr_values, ok_pe_values))
                     nok_pairs = list(product(nok_cagr_values, nok_pe_values))
-                    sector_threshold_grid[m][sector] = list(
+                    sector_threshold_grid[metric][sector] = list(
                         product(ok_pairs, nok_pairs)
                     )
 
                 elif isinstance(thresholds, tuple):
-                    high = float(thresholds[0])
-                    low = float(thresholds[1])
+                    high, low = float(thresholds[0]), float(thresholds[1])
                     if (not high and not low) or (high == 0 and low == 0):
                         continue
+
+                    good_if_high = not any(k in metric for k in bad_if_high_keywords)
+                    ok_val, nok_val = (high, low) if good_if_high else (low, high)
+
                     ok_values = [
-                        round(high * (1 + STEP_SIZE * i), 4) for i in step_range
+                        round(ok_val * (1 + STEP_SIZE * i), 4) for i in step_range
                     ]
                     nok_values = [
-                        round(low * (1 + STEP_SIZE * j), 4) for j in step_range
+                        round(nok_val * (1 + STEP_SIZE * j), 4) for j in step_range
                     ]
-                    sector_threshold_grid[m][sector] = list(
+                    sector_threshold_grid[metric][sector] = list(
                         product(ok_values, nok_values)
                     )
+
                 else:
                     continue
 
-                usable_metrics_per_sector.setdefault(sector, []).append(m)
+                usable_metrics_per_sector.setdefault(sector, []).append(metric)
 
             except (ValueError, TypeError, IndexError):
                 continue
+
     return sector_threshold_grid, usable_metrics_per_sector
