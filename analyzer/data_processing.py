@@ -206,79 +206,58 @@ def get_data(
         return ticker_name, None
 
 
-def calculate_score(manager):
-    excluded_columns = {"sector", "points"}  # Set of columns to exclude
+def calculate_score(manager, metrics_to_score=None):
 
-    if bool(manager.summary):
-        manager.summary = pd.DataFrame(manager.summary).T
-        # Filter only existing `_score` columns to avoid KeyErrors
-        bonus_score_columns = [
-            col for col in HIGHEST_WEIGHT_METRICS if col in manager.summary.columns
+    def apply_scores(summary, template, manager, metrics_to_score=None):
+        excluded_columns = {"sector", "points"}
+
+        if isinstance(summary, dict):
+            summary = pd.DataFrame(summary).T
+        if summary.empty:
+            return pd.DataFrame()
+
+        score_data = {}
+
+        for col in template:
+            if col in excluded_columns or col not in summary.columns:
+                continue
+
+            if metrics_to_score is not None and col not in metrics_to_score:
+                continue
+
+            def assign(row):
+                value = row.get(col)
+                return manager._assign_points(row, col)
+
+            score_data[col + "_score"] = summary.apply(assign, axis=1)
+
+        for key, val in score_data.items():
+            summary[key] = val
+
+        score_cols = [c for c in score_data if c.endswith("_score")]
+        summary["points"] = summary[score_cols].sum(axis=1)
+
+        bonus_metrics = [
+            col for col in HIGHEST_WEIGHT_METRICS if col in summary.columns
         ]
-        # Create a list of the corresponding `_score` column names
-        existing_bonus_score_columns = [col + "_score" for col in bonus_score_columns]
-        for col in manager.template:
-            if col not in excluded_columns:
-                manager.summary[col + "_score"] = manager.summary.apply(
-                    lambda row: manager._assign_points(row, col), axis=1
+        existing_bonus_score_cols = [col + "_score" for col in bonus_metrics]
+
+        if metrics_to_score is None or set(HIGHEST_WEIGHT_METRICS).issubset(
+            metrics_to_score
+        ):
+            if all(col in summary.columns for col in existing_bonus_score_cols):
+                summary["points"] += (
+                    (summary[existing_bonus_score_cols] > 0).all(axis=1).astype(int)
                 )
 
-        # Calculate total points based on the newly created *_score columns
-        manager.summary["points"] = manager.summary[
-            [col + "_score" for col in manager.template if col not in excluded_columns]
-        ].sum(axis=1)
+        return summary
 
-        # Give bonus point of 1 if all high weight columns are green
-        if existing_bonus_score_columns:
-            print("checks bonus score")
-            manager.summary["points"] += (
-                (manager.summary[existing_bonus_score_columns] > 0)
-                .all(axis=1)
-                .astype(int)
-            )
-    else:
-        manager.summary = pd.DataFrame()
-
-    if bool(manager.summary_investment):
-        manager.summary_investment = pd.DataFrame(manager.summary_investment).T
-
-        bonus_score_columns_investment = [
-            col
-            for col in HIGHEST_WEIGHT_METRICS
-            if col in manager.summary_investment.columns
-        ]
-        # Create a list of the corresponding `_score` column names
-        existing_bonus_score_columns_investment = [
-            col + "_score" for col in bonus_score_columns_investment
-        ]
-        # Apply scoring logic and create new columns for each metric
-        for col in manager.template_investment:
-            if col not in excluded_columns:
-                manager.summary_investment[col + "_score"] = (
-                    manager.summary_investment.apply(
-                        lambda row: manager._assign_points(row, col), axis=1
-                    )
-                )
-
-        # Calculate total points based on the newly created *_score columns
-        manager.summary_investment["points"] = manager.summary_investment[
-            [
-                col + "_score"
-                for col in manager.template_investment
-                if col not in excluded_columns
-            ]
-        ].sum(axis=1)
-
-        # Give bonus point of 1 if all high weight columns are green
-        if existing_bonus_score_columns_investment:
-            print("checks bonus score")
-            manager.summary_investment["points"] += (
-                (
-                    manager.summary_investment[existing_bonus_score_columns_investment]
-                    > 0
-                )
-                .all(axis=1)
-                .astype(int)
-            )
-    else:
-        manager.summary_investment = pd.DataFrame()
+    manager.summary = apply_scores(
+        manager.summary, manager.template, manager, metrics_to_score
+    )
+    manager.summary_investment = apply_scores(
+        manager.summary_investment,
+        manager.template_investment,
+        manager,
+        metrics_to_score,
+    )

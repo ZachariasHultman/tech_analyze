@@ -192,7 +192,7 @@ def calculate_revenue_trend(ticker_analysis, ticker_id=None):
     qtr = [
         {"date": e["date"], "value": e["value"]}
         for e in ticker_analysis["companyFinancialsByQuarter"]["sales"]
-        if "value" and "date" in e
+        if "value" in e and "date" in e
     ]
 
     if len(qtr) > 1 and len(yr) > 1:
