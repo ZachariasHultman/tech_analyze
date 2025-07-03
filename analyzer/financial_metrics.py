@@ -3,11 +3,11 @@ from currency_converter import CurrencyConverter
 import math
 import requests
 from avanza.avanza import Resolution, TimePeriod
-from helper import *
-from get_NAV_data import get_nav_data
+from analyzer.helper import *
+from analyzer.get_NAV_data import get_nav_data
 import yfinance as yf
 from datetime import date, datetime
-from metrics import ticker_reporting_currency_map, ticker_currency_map
+from analyzer.metrics import ticker_reporting_currency_map, ticker_currency_map
 import time
 
 

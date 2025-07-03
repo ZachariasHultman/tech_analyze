@@ -1,12 +1,12 @@
-from metrics import (
+from analyzer.metrics import (
     HIGHEST_WEIGHT_METRICS,
     HIGH_WEIGHT_METRICS,
     LOW_WEIGHT_METRICS,
     get_metrics_threshold,
+    extract_sector,
 )
 from tabulate import tabulate
 from itertools import product
-from metrics import extract_sector
 
 
 class SummaryManager:

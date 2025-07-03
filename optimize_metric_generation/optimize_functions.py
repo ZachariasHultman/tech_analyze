@@ -1,8 +1,8 @@
 import pandas as pd
 import json
 from itertools import product
-from summary_manager import SummaryManager
-from data_processing import calculate_score
+from analyzer.summary_manager import SummaryManager
+from analyzer.data_processing import calculate_score
 import ast
 import numpy as np
 from collections import defaultdict
