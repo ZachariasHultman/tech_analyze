@@ -263,7 +263,6 @@ def calculate_metrics_given_hist() -> None:
             else pd.Timestamp.today()
         )
 
-        # ----- iterate windows (1Y / 3Y / 5Y TOTAL + YoY-k) ------------
         for span in (1, 3, 5):
             for label, start_d, end_d, yrs_span in make_windows(max_d, span):
 
@@ -272,6 +271,16 @@ def calculate_metrics_given_hist() -> None:
                 }
                 ohlc_win = slice_df_between(ohlc_df, start_d, end_d)
 
+                # ---- Total return calculation ----
+                try:
+                    price_start = ohlc_win["close"].iloc[0]
+                    price_end = ohlc_win["close"].iloc[-1]
+                    total_return = (
+                        (price_end / price_start) - 1 if price_start > 0 else None
+                    )
+                except Exception:
+                    total_return = None
+
                 sma_val, _, sma_slope = calc_sma200_metrics(ohlc_win)
                 sma_status = (
                     (ohlc_win["close"].iloc[-1] - sma_val) / sma_val
@@ -279,7 +288,6 @@ def calculate_metrics_given_hist() -> None:
                     else None
                 )
 
-                # PE & PEG
                 pe_ser = _series_from_df(filtered.get("pe"))
                 pe_val = float(pe_ser.iloc[-1]) if not pe_ser.empty else None
                 peg_val = calculate_PEG(
@@ -293,14 +301,18 @@ def calculate_metrics_given_hist() -> None:
                     ),
                 )
 
-                # window-aware price CAGR
                 price_cagr = price_cagr_window(
                     ohlc_df["close"], start_d, end_d, yrs_span
                 )
                 if isinstance(price_cagr, np.floating):
                     price_cagr = float(price_cagr)
 
-                entry = {"company": company, "sector": sector, "timespan": label}
+                entry = {
+                    "company": company,
+                    "sector": sector,
+                    "timespan": label,
+                    "total_return": total_return,  # <-- Added return here
+                }
 
                 for m in metrics:
                     if "trend" in m:

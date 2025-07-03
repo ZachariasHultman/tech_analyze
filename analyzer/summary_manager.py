@@ -5,12 +5,15 @@ from metrics import (
     get_metrics_threshold,
 )
 from tabulate import tabulate
+from itertools import product
+from metrics import extract_sector
 
 
 class SummaryManager:
     def __init__(self):
         # Initialize the attributes
         self.summary = {}
+        self._threshold_overrides = {}  # dict to hold custom thresholds
         self.template = {
             "sector": None,
             "points": 0,
@@ -131,7 +134,7 @@ class SummaryManager:
             weight = 1
         return weight
 
-    def _assign_points(self, row, metric):
+    def _assign_points(self, row, metric, threshold_override=None):
         """
         Compute the score (−weight, 0, +weight) for *metric* on one DataFrame row.
 
@@ -143,24 +146,48 @@ class SummaryManager:
 
         # ── Thresholds & direction ────────────────────────────────────────────────
         cfg = get_metrics_threshold(metric, row["sector"])
-        if not cfg:  # no rule defined → no points
+        if not cfg:
             return 0
 
-        ok, nok = cfg["thresholds"]  # upper / lower band
+        # Threshold override
+        override = self._threshold_overrides.get(metric)
+        if override is not None:
+            ok, nok = override
+        else:
+            ok, nok = cfg["thresholds"]
+
         good_if_high = cfg["good_if_high"]
 
-        value = row[metric]
+        value = row.get(metric)
+        # if value is None:
+        #     print(f"[WARN] {metric} is None in company {row.name}")
         latest = value[0] if isinstance(value, (tuple, list)) else value
 
         # ── Metric-specific rules ────────────────────────────────────────────────
         if metric == "cagr-pe compare status":
-            # here `value` is (cagr, pe)
-            cagr, pe = value[0]
+            sec = extract_sector(row["sector"])
+            if (
+                isinstance(value, list)
+                and len(value) == 2
+                and all(isinstance(x, (int, float, type(None))) for x in value)
+            ):
+                # Assume it's a flat [cagr, pe] list and wrap it
+                value = [value]
+            if (
+                isinstance(value, list)
+                and len(value) == 1
+                and isinstance(value[0], list)
+            ):
+                value = value[0]
+            cagr, pe = value
             if cagr is None or pe is None:
                 return 0
 
-            good = (cagr >= ok[0]) or (pe <= ok[1])
-            bad = (cagr <= nok[0]) and (pe >= nok[1])
+            ok_cagr, ok_pe = ok
+            nok_cagr, nok_pe = nok
+
+            good = (cagr >= ok_cagr) or (pe <= ok_pe)
+            bad = (cagr <= nok_cagr) and (pe >= nok_pe)
 
             if good and not bad:
                 return weight
@@ -285,3 +312,37 @@ class SummaryManager:
                     showindex=True,
                 )
             )
+
+    def process_historical(
+        self, historical_df, metrics_to_use, thresholds=None, sector_column="sector"
+    ):
+        """
+        Process historical data into summary using optional thresholds.
+        thresholds: dict of {metric: threshold}
+        """
+        # Store threshold overrides for use in _assign_points
+        self._threshold_overrides = thresholds if thresholds else {}
+
+        for _, row in historical_df.iterrows():
+            ticker = row.get("company", "UNKNOWN")
+            sector = row.get(sector_column, "UNKNOWN")
+
+            sector_name = row.get(sector_column, "")
+            sector_info = [{"sectorName": sector_name}]
+            self._initialize_template(ticker, sector_info)
+            for metric in metrics_to_use:
+                template = (
+                    self.template
+                    if sector != "Investmentbolag"
+                    else self.template_investment
+                )
+                if metric not in template:
+                    continue  # skip metrics not valid for this sector
+
+                value = (
+                    row.get(metric)
+                    or row.get(metric.strip())
+                    or row.get(metric.strip().lower())
+                )
+
+                self._update(ticker, sector_info, metric, value)
