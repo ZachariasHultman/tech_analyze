@@ -228,6 +228,7 @@ def calculate_CAGR_helper(df, years):
     df = df.sort_index()
 
     end_date = df.index[-1]
+
     start_date = end_date - pd.DateOffset(years=years)
 
     closest_start_idx = df.index.get_indexer([start_date], method="backfill")[0]
@@ -261,13 +262,17 @@ def calculate_closing_CAGR(
     """
     # ── HISTORICAL MODE ────────────────────────────────────────────────
     if use_hist:
-        if hist_row is None or "ohlc" not in hist_row or hist_row["ohlc"] is None:
+        if (
+            hist_row is None
+            or "ohlc" not in hist_row
+            or hist_row["ohlc"].empty
+            or hist_row["ohlc"] is None
+        ):
             return None
 
         df = hist_row["ohlc"].copy()
         df = df.rename(columns={"close": "close"}).astype(float)
         df = df.sort_index()
-
         cagr_vals = [calculate_CAGR_helper(df, y) for y in years_tuple]
         return cagr_vals if any(v is not None for v in cagr_vals) else None
 
