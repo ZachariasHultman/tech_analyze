@@ -26,6 +26,8 @@ df = pd.read_csv("metrics_by_timespan.csv")
 df.columns = df.columns.str.strip().str.lower()
 
 metrics = list(sector_thresholds_old.keys())
+
+metrics = ["de status"]
 metric_cols = [m.lower() for m in metrics]
 required_cols = ["company", "sector", "total_return", "timespan"] + metric_cols
 df = df[[col for col in required_cols if col in df.columns]]

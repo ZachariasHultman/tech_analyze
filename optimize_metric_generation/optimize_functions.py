@@ -7,6 +7,7 @@ import ast
 import numpy as np
 from collections import defaultdict
 from optimize_config import *
+from collections import defaultdict
 
 
 def safe_parse(val):
@@ -107,128 +108,87 @@ def iterate_thresholds_by_sector(
         for sector in df_timespan["sector"].unique():
             sector_df = df_timespan[df_timespan["sector"] == sector].copy()
             valid_metrics = usable_metrics_per_sector.get(sector, [])
-            print(
-                f"Processing sector: {sector} | timespan: {timespan} | rows: {len(sector_df)} | metrics: {valid_metrics}"
-            )
-
-            for col in valid_metrics:
-                if col in sector_df.columns:
-                    if col == "cagr-pe compare status":
-                        sector_df[col] = sector_df[col].apply(safe_parse)
-                    else:
-                        sector_df[col] = sector_df[col].apply(
-                            lambda x: (
-                                ast.literal_eval(x)
-                                if isinstance(x, str) and x.startswith("[")
-                                else x
-                            )
-                        )
 
             for metric in valid_metrics:
-                if sector not in sector_grid.get(metric, {}):
+                thresholds_list = sector_grid.get(metric, {}).get(sector, [])
+                if not thresholds_list:
                     continue
 
-                initial_thresholds = sector_grid[metric][sector]
                 explored = set()
+                best_score = -np.inf
+                best_threshold = None
 
                 for iteration in range(MAX_ITERATIONS):
-                    key = (timespan, sector, metric)
-                    if iteration == 0 or best_thresholds.get(key) is None:
-                        threshold_list = initial_thresholds
-                    else:
-                        best_threshold, best_corr = best_thresholds[key]
-                        if best_corr is not None and best_corr >= CORRELATION_THRESHOLD:
-                            break  # good enough, stop iterating
-                        print(f"Refining thresholds for {key} for sector {sector}")
-                        threshold_list = refine_thresholds(best_threshold)
+                    threshold_candidates = (
+                        thresholds_list
+                        if iteration == 0 or best_threshold is None
+                        else refine_thresholds(best_threshold)
+                    )
 
-                    for threshold_pair in threshold_list:
-                        threshold_key = json.dumps(threshold_pair)
+                    for threshold in threshold_candidates:
+                        threshold_key = json.dumps(threshold)
                         if threshold_key in explored:
                             continue
                         explored.add(threshold_key)
 
-                        thresholds = {metric: threshold_pair}
-
+                        thresholds = {metric: threshold}
                         sm = summary_class()
                         sm.process_historical(
                             sector_df, [metric], thresholds=thresholds
                         )
                         calculate_score(sm, metrics_to_score=[metric])
 
-                        company_scores = []
-                        returns = []
-                        for _, row in sm.summary.iterrows():
-                            company = row.name
-                            if (
-                                "points" in row
-                                and row["points"] not in [None, [None]]
-                                and company in sector_df["company"].values
-                            ):
-                                score = row["points"]
-                                total_return = sector_df.loc[
-                                    sector_df["company"] == company, "total_return"
-                                ].values[0]
-                                if total_return not in [None, [None]]:
-                                    company_scores.append(score)
-                                    returns.append(total_return)
+                        df_eval = sm.summary.copy()
+                        if df_eval.empty or "points" not in df_eval.columns:
+                            continue
 
-                        avg_points = (
-                            sum(company_scores) / len(company_scores)
-                            if company_scores
-                            else None
+                        scores = df_eval["points"]
+                        returns = df_eval.index.to_series().map(
+                            sector_df.set_index("company")["total_return"]
                         )
-                        avg_return = sum(returns) / len(returns) if returns else None
 
-                        correlation = None
-                        company_scores = [
-                            float(x)
-                            for x in company_scores
-                            if isinstance(x, (int, float, np.number))
-                        ]
-                        returns = [
-                            float(x)
-                            for x in returns
-                            if isinstance(x, (int, float, np.number))
-                        ]
-                        if (
-                            company_scores
-                            and returns
-                            and len(company_scores) == len(returns)
-                        ):
-                            try:
-                                correlation = np.corrcoef(company_scores, returns)[0, 1]
-                                if np.isnan(correlation):
-                                    correlation = None
-                            except Exception:
-                                pass
+                        valid_mask = (~scores.isna()) & (~returns.isna())
+                        scores = scores[valid_mask]
+                        returns = returns[valid_mask]
 
-                        if correlation is None:
-                            print(
-                                f"[INFO] Skipped correlation: {timespan}, {sector}, thresholds={thresholds}"
-                            )
+                        if len(scores) < 3:
+                            continue
+
+                        correlation = scores.corr(returns)
+                        avg_points = scores.mean()
+                        avg_return = returns.mean()
+                        spread = (
+                            returns[scores > 0].mean() - returns[scores <= 0].mean()
+                        )
+                        sign_corr = np.sign(scores).corr(np.sign(returns))
+
+                        composite_score = (
+                            (correlation if not np.isnan(correlation) else 0) * 0.4
+                            + (spread if not np.isnan(spread) else 0) * 0.4
+                            + (sign_corr if not np.isnan(sign_corr) else 0) * 0.2
+                        )
 
                         key = (timespan, sector, metric)
-                        best_corr = best_thresholds.get(key, None)
-                        _, best_corr_value = (
-                            best_corr if best_corr is not None else (None, None)
-                        )
+                        _, best_corr_value = best_thresholds.get(key, (None, None))
                         if correlation is not None and (
                             best_corr_value is None or correlation > best_corr_value
                         ):
-                            best_thresholds[key] = (threshold_pair, correlation)
+                            best_thresholds[key] = (threshold, correlation)
 
                         results.append(
                             (
                                 timespan,
                                 sector,
-                                {metric: threshold_pair},
+                                {metric: threshold},
                                 sm,
                                 avg_points,
                                 avg_return,
                                 correlation,
                             )
                         )
+
+                    if best_score >= CORRELATION_THRESHOLD:
+                        break
 
     return sorted(
         results,
@@ -251,9 +211,6 @@ def consolidate_best_thresholds(results):
     Returns:
         pd.DataFrame: One row per (timespan, sector) with all best metric thresholds.
     """
-    from collections import defaultdict
-    import numpy as np
-    import json
 
     grouped = defaultdict(dict)
 
@@ -359,11 +316,6 @@ def sanity_checks(df, df_final):
             f"[INFO] {len(low_corr)} rows have weak correlation ({CORRELATION_THRESHOLD}):"
         )
         print(low_corr[["sector", "timespan", "avg_correlation"]])
-
-
-from analyzer.metrics import (
-    get_metrics_threshold,
-)  # Import where the function is defined
 
 
 def build_sector_threshold_grid(
