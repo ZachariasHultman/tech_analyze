@@ -55,7 +55,7 @@ sanity_checks(df, df_final)
 misaligned = detect_misaligned_scoring(df_final)
 
 if not misaligned.empty:
-    print("⚠️ Potential scoring misalignments detected:\n")
+    print("Potential scoring misalignments detected:\n")
     print(
         misaligned[
             [

@@ -402,22 +402,48 @@ def build_sector_threshold_grid(
                     )
 
                 elif isinstance(thresholds, tuple):
-                    high, low = float(thresholds[0]), float(thresholds[1])
-                    if (not high and not low) or (high == 0 and low == 0):
+                    try:
+                        nok_val, ok_val = float(thresholds[0]), float(thresholds[1])
+
+                        # Skip completely empty thresholds
+                        if nok_val == 0 and ok_val == 0:
+                            continue
+
+                        # Determine direction of metric
+                        good_if_high = not any(
+                            k in metric for k in bad_if_high_keywords
+                        )
+
+                        # Sanity check: correct flipped thresholds
+                        if good_if_high and nok_val < ok_val:
+                            print(
+                                f"[WARN] NOK < OK for good-if-high '{metric}' in {sector}. Skipping."
+                            )
+                            continue
+                        elif not good_if_high and nok_val > ok_val:
+                            print(
+                                f"[WARN] NOK > OK for bad-if-high '{metric}' in {sector}. Skipping."
+                            )
+                            continue
+
+                        # Create threshold value ranges
+                        ok_values = [
+                            round(ok_val * (1 + STEP_SIZE * i), 4) for i in step_range
+                        ]
+                        nok_values = [
+                            round(nok_val * (1 + STEP_SIZE * j), 4) for j in step_range
+                        ]
+
+                        # Populate the grid
+                        sector_threshold_grid[metric][sector] = list(
+                            product(ok_values, nok_values)
+                        )
+
+                        # Track usable metrics
+                        usable_metrics_per_sector.setdefault(sector, []).append(metric)
+
+                    except (ValueError, TypeError):
                         continue
-
-                    good_if_high = not any(k in metric for k in bad_if_high_keywords)
-                    ok_val, nok_val = (high, low) if good_if_high else (low, high)
-
-                    ok_values = [
-                        round(ok_val * (1 + STEP_SIZE * i), 4) for i in step_range
-                    ]
-                    nok_values = [
-                        round(nok_val * (1 + STEP_SIZE * j), 4) for j in step_range
-                    ]
-                    sector_threshold_grid[metric][sector] = list(
-                        product(ok_values, nok_values)
-                    )
 
                 else:
                     continue
