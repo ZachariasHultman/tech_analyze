@@ -24,6 +24,11 @@ Run metric optimizer
 python3 optimize_metric_generation/optimize_metric_generation.py 
 ```
 
+Run plot functions to investigate the result
+```bash
+python3 optimize_metric_generation/plot_thresholds.py --metric "de status" --file metrics_by_timespan.csv
+```
+
 # Secret Sauce
 
 The metrics.py file is missing on purpose—it’s where all the magic happens. It contains my secret formula for what makes a stock “good” (or at least what I think makes it good).

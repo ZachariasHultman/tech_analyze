@@ -94,7 +94,6 @@ def get_data(
             free_cashflow_hist,
         ) = calculate_free_cashflow_yield(yahoo_ticker, ticker_info, closing_hist_data)
         manager._update(ticker_name, sector, "fcfy status", free_cashflow_yield)
-        manager._update(ticker_name, sector, "fcf status", free_cashflow)
 
         # Calculate ebitda and net debt.
         netDebtEbitdaRatio, netDebtEbitdaRatio_hist = extract_netdebt_ebitda_ratio(
@@ -184,7 +183,6 @@ def get_data(
             free_cashflow_yield_hist,
             free_cashflow_hist,
         ) = calculate_free_cashflow_yield(yahoo_ticker, ticker_info)
-        manager._update(ticker_name, sector, "fcf status", free_cashflow)
         roe, roe_hist = calculate_roe(ticker_analysis)
         manager._update(ticker_name, sector, "roe status", roe)
 

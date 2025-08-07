@@ -18,7 +18,6 @@ class SummaryManager:
             "sector": None,
             "points": 0,
             "cagr-pe compare status": None,
-            "fcf status": None,
             "roe status": None,
             "de status": None,
             "peg status": None,
@@ -36,7 +35,6 @@ class SummaryManager:
             "sector": None,
             "points": 0,
             "cagr-pe compare status": None,
-            "fcf status": None,
             "roe status": None,
             "nav discount status": None,
             "calculated nav discount status": None,
@@ -152,9 +150,9 @@ class SummaryManager:
         # Threshold override
         override = self._threshold_overrides.get(metric)
         if override is not None:
-            ok, nok = override
+            nok, ok = override
         else:
-            ok, nok = cfg["thresholds"]
+            nok, ok = cfg["thresholds"]
 
         good_if_high = cfg["good_if_high"]
 
