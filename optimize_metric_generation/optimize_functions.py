@@ -73,15 +73,14 @@ def iterate_thresholds_by_sector(
     df, sector_grid, usable_metrics_per_sector, summary_class=SummaryManager
 ):
     """
-    Iteratively evaluates metric thresholds per sector and timespan to optimize correlation
-    between computed score (points) and historical total return.
+    Iteratively evaluates metric thresholds per sector and timespan to optimize
+    the relationship between score and return using a composite metric.
 
     For each (sector, timespan, metric) combination, it:
     - Applies a range of threshold pairs to calculate scores.
-    - Computes average score, average return, and their correlation.
-    - Tracks and refines the best-performing thresholds across multiple iterations
-      if correlation is below a configured threshold (CORRELATION_THRESHOLD).
-    - Returns all tested configurations sorted by descending correlation.
+    - Computes average score, average return, correlation, and composite score.
+    - Saves only results where composite score exceeds COMPOSITE_SCORE_THRESHOLD.
+    - Tracks best-performing thresholds by correlation for reference.
 
     Parameters:
         df (pd.DataFrame): Cleaned input dataset containing sectors, metrics, and returns.
@@ -98,9 +97,11 @@ def iterate_thresholds_by_sector(
             - average score (float)
             - average return (float)
             - correlation (float)
+            - composite_score (float)
     """
     results = []
     best_thresholds = {}
+    debug_rows = []
 
     for timespan in df["timespan"].unique():
         df_timespan = df[df["timespan"] == timespan]
@@ -115,7 +116,6 @@ def iterate_thresholds_by_sector(
                     continue
 
                 explored = set()
-                best_score = -np.inf
                 best_threshold = None
 
                 for iteration in range(MAX_ITERATIONS):
@@ -143,9 +143,9 @@ def iterate_thresholds_by_sector(
                             continue
 
                         scores = df_eval["points"]
-                        returns = df_eval.index.to_series().map(
-                            sector_df.set_index("company")["total_return"]
-                        )
+                        returns = sector_df.set_index("company")[
+                            "total_return"
+                        ].reindex(df_eval.index)
 
                         valid_mask = (~scores.isna()) & (~returns.isna())
                         scores = scores[valid_mask]
@@ -156,7 +156,7 @@ def iterate_thresholds_by_sector(
 
                         correlation = scores.corr(returns)
                         avg_points = scores.mean()
-                        avg_return = returns.mean()
+                        avg_return = returns.median()
                         spread = (
                             returns[scores > 0].mean() - returns[scores <= 0].mean()
                         )
@@ -168,6 +168,7 @@ def iterate_thresholds_by_sector(
                             + (sign_corr if not np.isnan(sign_corr) else 0) * 0.2
                         )
 
+                        # Track best thresholds by correlation
                         key = (timespan, sector, metric)
                         _, best_corr_value = best_thresholds.get(key, (None, None))
                         if correlation is not None and (
@@ -175,29 +176,57 @@ def iterate_thresholds_by_sector(
                         ):
                             best_thresholds[key] = (threshold, correlation)
 
-                        results.append(
-                            (
-                                timespan,
-                                sector,
-                                {metric: threshold},
-                                sm,
-                                avg_points,
-                                avg_return,
-                                correlation,
+                        # Save only good-performing results
+                        if composite_score >= COMPOSITE_SCORE_THRESHOLD:
+                            results.append(
+                                (
+                                    timespan,
+                                    sector,
+                                    {metric: threshold},
+                                    sm,
+                                    avg_points,
+                                    avg_return,
+                                    correlation,
+                                    composite_score,
+                                )
                             )
-                        )
+                            # Debug scoring buckets vs returns
+                            df_debug = pd.DataFrame(
+                                {"score": scores, "return": returns, "sector": sector}
+                            )
+                            debug_summary = (
+                                df_debug.groupby("score")["return"]
+                                .agg(["count", "mean", "median", "std"])
+                                .reset_index()
+                            )
+                            for _, row in debug_summary.iterrows():
+                                debug_rows.append(
+                                    {
+                                        "timespan": timespan,
+                                        "sector": sector,
+                                        "metric": metric,
+                                        "threshold": str(
+                                            threshold
+                                        ),  # Serialize threshold dict for CSV
+                                        "composite_score": round(composite_score, 2),
+                                        "score_bucket": row["score"],
+                                        "count": int(row["count"]),
+                                        "mean_return": round(row["mean"], 4),
+                                        "median_return": round(row["median"], 4),
+                                        "std_return": round(row["std"], 4),
+                                    }
+                                )
 
-                    if best_score >= CORRELATION_THRESHOLD:
-                        break
-
-    return sorted(
-        results,
-        key=lambda x: (
-            x[4] is not None,
-            x[6] is not None,
-            x[6] if x[6] is not None else float("-inf"),
+    return (
+        sorted(
+            results,
+            key=lambda x: (
+                x[4] is not None,
+                x[7] if x[7] is not None else float("-inf"),  # sort by composite_score
+            ),
+            reverse=True,
         ),
-        reverse=True,
+        debug_rows,
     )
 
 
@@ -206,7 +235,7 @@ def consolidate_best_thresholds(results):
     Consolidates the best threshold for each metric per sector and timespan.
 
     Keeps one best-performing threshold per metric in every (sector, timespan) combination,
-    based on maximum correlation.
+    based on the maximum composite score (not just correlation).
 
     Returns:
         pd.DataFrame: One row per (timespan, sector) with all best metric thresholds.
@@ -214,21 +243,31 @@ def consolidate_best_thresholds(results):
 
     grouped = defaultdict(dict)
 
-    for timespan, sector, threshold_dict, sm, avg_points, avg_return, corr in results:
+    for (
+        timespan,
+        sector,
+        threshold_dict,
+        sm,
+        avg_points,
+        avg_return,
+        corr,
+        comp_score,
+    ) in results:
         metric = list(threshold_dict.keys())[0]
         current = grouped[(timespan, sector)].get(metric)
 
-        # Replace only if better correlation
+        # Replace only if better composite score
         if (
             current is None
-            or current["correlation"] is None
-            or (corr is not None and corr > current["correlation"])
+            or current["composite_score"] is None
+            or (comp_score is not None and comp_score > current["composite_score"])
         ):
             grouped[(timespan, sector)][metric] = {
                 "threshold": threshold_dict[metric],
                 "avg_points": avg_points,
                 "avg_return": avg_return,
                 "correlation": corr,
+                "composite_score": comp_score,
                 "num_companies": len(sm.summary),
             }
 
@@ -245,7 +284,7 @@ def consolidate_best_thresholds(results):
                 if data["avg_points"] is not None
             ]
         )
-        avg_return = np.mean(
+        avg_return = np.median(
             [
                 data["avg_return"]
                 for data in metric_data.values()
@@ -259,6 +298,13 @@ def consolidate_best_thresholds(results):
                 if data["correlation"] is not None
             ]
         )
+        avg_comp = np.mean(
+            [
+                data["composite_score"]
+                for data in metric_data.values()
+                if data["composite_score"] is not None
+            ]
+        )
         num_companies = max(data["num_companies"] for data in metric_data.values())
 
         final.append(
@@ -269,6 +315,7 @@ def consolidate_best_thresholds(results):
                 "avg_points": round(avg_points, 2),
                 "avg_return": round(avg_return, 2),
                 "avg_correlation": round(avg_corr, 2),
+                "avg_composite_score": round(avg_comp, 2),
                 "num_companies": num_companies,
             }
         )
@@ -308,14 +355,6 @@ def sanity_checks(df, df_final):
         df_final["avg_correlation"] < -1
     ).any():
         print("[WARN] Correlation values outside expected [-1, 1] range.")
-
-    # 5. Optional: Print top low-correlation rows for manual review
-    low_corr = df_final[df_final["avg_correlation"] < CORRELATION_THRESHOLD]
-    if not low_corr.empty:
-        print(
-            f"[INFO] {len(low_corr)} rows have weak correlation ({CORRELATION_THRESHOLD}):"
-        )
-        print(low_corr[["sector", "timespan", "avg_correlation"]])
 
 
 def build_sector_threshold_grid(
@@ -389,3 +428,25 @@ def build_sector_threshold_grid(
                 continue
 
     return sector_threshold_grid, usable_metrics_per_sector
+
+
+def detect_misaligned_scoring(results_df, correlation_threshold=CORRELATION_THRESHOLD):
+    """
+    Flags rows where the scoring direction contradicts return direction.
+
+    Conditions:
+    - Correlation is high (>= threshold)
+    - But avg_points and avg_return have opposite signs (e.g. negative score but positive return)
+
+    Args:
+        results_df (pd.DataFrame): Output from consolidate_best_thresholds()
+        correlation_threshold (float): Minimum correlation to consider for flagging
+
+    Returns:
+        pd.DataFrame: Filtered rows with potential scoring misalignment
+    """
+    misaligned = results_df[
+        (results_df["avg_correlation"] >= correlation_threshold)
+        & (results_df["avg_points"] * results_df["avg_return"] < 0)
+    ]
+    return misaligned
