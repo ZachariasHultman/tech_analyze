@@ -134,105 +134,142 @@ class SummaryManager:
 
     def _assign_points(self, row, metric, threshold_override=None):
         """
-        Compute the score (−weight, 0, +weight) for *metric* on one DataFrame row.
+        Score one metric for one row using canonical (NOK, OK) thresholds.
 
-        `row[metric]` is expected to be
-            • a scalar, or
-            • a tuple/list whose element-0 is the *latest* value and element-1 the history.
+        Conventions:
+        - Threshold tuple is ALWAYS (NOK, OK).
+        - Boundary is inclusive on the 'good' side:
+            higher-is-better:  x >= OK  => +weight;  x <= NOK => -weight
+            lower-is-better:   x <= OK  => +weight;  x >= NOK => -weight
+        - Neutral zone between NOK and OK (strictly between).
         """
+        # --- weight ---
         weight = self._assign_weight(metric)
-
-        # ── Thresholds & direction ────────────────────────────────────────────────
-        cfg = get_metrics_threshold(metric, row["sector"])
-        if not cfg:
+        if weight == 0:
             return 0
 
-        # Threshold override
-        override = self._threshold_overrides.get(metric)
-        if override is not None:
-            nok, ok = override
-        else:
-            nok, ok = cfg["thresholds"]
+        # --- direction map ---
+        BAD_IF_HIGH = {
+            "de status",
+            "peg status",
+            "net debt - ebitda status",
+        }  # lower is better
+        direction = (
+            -1 if any(k in metric for k in BAD_IF_HIGH) else +1
+        )  # +1 => higher-better, -1 => lower-better
 
-        good_if_high = cfg["good_if_high"]
+        # --- thresholds source ---
+        sector = row.get("sector") or row.get("sectorName") or extract_sector(row)
+        cfg = (
+            threshold_override
+            if threshold_override is not None
+            else get_metrics_threshold(metric, sector)
+        )
+        if cfg is None:
+            return 0
 
-        value = row.get(metric)
-        # if value is None:
-        #     print(f"[WARN] {metric} is None in company {row.name}")
-        latest = value[0] if isinstance(value, (tuple, list)) else value
+        # --- helpers ---
+        def _normalize_pair(nok, ok):
+            nok, ok = float(nok), float(ok)
+            if direction == +1 and nok > ok:
+                nok, ok = min(nok, ok), max(nok, ok)
+            elif direction == -1 and nok < ok:
+                nok, ok = max(nok, ok), min(nok, ok)
+            return nok, ok
 
-        # ── Metric-specific rules ────────────────────────────────────────────────
-        if metric == "cagr-pe compare status":
-            sec = extract_sector(row["sector"])
+        def _score_scalar(x, nok, ok):
+            if direction == +1:  # higher is better
+                if x >= ok:
+                    return +weight
+                if x <= nok:
+                    return -weight
+                return 0
+            else:  # lower is better
+                if x <= ok:
+                    return +weight
+                if x >= nok:
+                    return -weight
+                return 0
+
+        def _extract_pair(cfg_obj):
+            """Return (pair, is_composite) where:
+            - pair is (nok, ok) or ((nok1,nok2),(ok1,ok2))
+            - is_composite is True for the latter
+            """
+            # tuple/list (simple)
+            if isinstance(cfg_obj, (list, tuple)) and len(cfg_obj) == 2:
+                a, b = cfg_obj[0], cfg_obj[1]
+                # composite if both sides are pairs
+                if (
+                    isinstance(a, (list, tuple))
+                    and isinstance(b, (list, tuple))
+                    and len(a) == 2
+                    and len(b) == 2
+                ):
+                    return ((a[0], a[1]), (b[0], b[1])), True
+                # simple numeric
+                if all(isinstance(t, (int, float)) for t in (a, b)):
+                    return (a, b), False
+                return None, False
+
+            # dict shapes
+            if isinstance(cfg_obj, dict):
+                if "thresholds" in cfg_obj:
+                    return _extract_pair(cfg_obj["thresholds"])
+                if {"nok", "ok"} <= set(cfg_obj.keys()):
+                    return (cfg_obj["nok"], cfg_obj["ok"]), False
+                if metric in cfg_obj:
+                    return _extract_pair(cfg_obj[metric])
+
+            # anything else -> not supported
+            return None, False
+
+        # --- get the value x to score ---
+        v = row.get(metric)
+        if isinstance(v, (list, tuple)) and len(v) >= 1:
+            v = v[0]
+        if v is None:
+            return 0
+        try:
+            x = float(v)
+        except Exception:
+            return 0
+
+        # --- extract thresholds (handles dict or tuple) ---
+        pair, is_composite = _extract_pair(cfg)
+        if pair is None:
+            return 0
+
+        # --- simple (nok, ok) ---
+        if not is_composite and isinstance(pair, (list, tuple)) and len(pair) == 2:
+            nok, ok = _normalize_pair(pair[0], pair[1])
+            return _score_scalar(x, nok, ok)
+
+        # --- composite: ((nok_a, nok_b), (ok_a, ok_b)) ---
+        if is_composite:
+            (nok1, nok2), (ok1, ok2) = pair
+            nok1, ok1 = _normalize_pair(nok1, ok1)
+            nok2, ok2 = _normalize_pair(nok2, ok2)
+
+            # try to pull a 2-tuple value, else reuse x for both
+            xv1, xv2 = x, x
+            rv = row.get(metric)
             if (
-                isinstance(value, list)
-                and len(value) == 2
-                and all(isinstance(x, (int, float, type(None))) for x in value)
+                isinstance(rv, (list, tuple))
+                and len(rv) >= 1
+                and isinstance(rv[0], (list, tuple))
+                and len(rv[0]) >= 2
             ):
-                # Assume it's a flat [cagr, pe] list and wrap it
-                value = [value]
-            if (
-                isinstance(value, list)
-                and len(value) == 1
-                and isinstance(value[0], list)
-            ):
-                value = value[0]
-            cagr, pe = value
-            if cagr is None or pe is None:
-                return 0
+                xv1, xv2 = rv[0][0], rv[0][1]
 
-            ok_cagr, ok_pe = ok
-            nok_cagr, nok_pe = nok
-
-            good = (cagr >= ok_cagr) or (pe <= ok_pe)
-            bad = (cagr <= nok_cagr) and (pe >= nok_pe)
-
-            if good and not bad:
-                return weight
-            elif bad:
-                return -weight
-            else:
-                return 0
-
-        elif metric == "net debt - ebitda status":
-            if latest is None:
-                return 0
-            if latest <= 2:
-                return weight
-            if latest >= 2.5:
+            s1 = _score_scalar(float(xv1), nok1, ok1)
+            s2 = _score_scalar(float(xv2), nok2, ok2)
+            if s1 > 0 and s2 > 0:
+                return +weight
+            if s1 < 0 and s2 < 0:
                 return -weight
             return 0
 
-        elif metric == "net debt - ebit status":
-            if latest is None:
-                return 0
-            if latest <= 8:
-                return weight
-            if latest >= 12:
-                return -weight
-            return 0
-
-        elif metric == "sma200 status":
-            # value = (last_close, sma200)
-            last_close, sma200 = value
-            if last_close is None or sma200 is None:
-                return -weight  # treat missing SMA as a negative signal
-            return weight if last_close >= sma200 else -weight
-
-        # ── Generic rule ─────────────────────────────────────────────────────────
-        if latest is None:
-            return 0
-
-        if good_if_high:
-            if latest >= ok:
-                return weight
-            elif latest <= nok:
-                return -weight
-        else:
-            if latest <= ok:
-                return weight
-            elif latest >= nok:
-                return -weight
         return 0
 
     def _display(self, save_df=False):
