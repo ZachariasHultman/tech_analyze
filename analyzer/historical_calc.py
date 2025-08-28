@@ -5,18 +5,15 @@
 
 from pathlib import Path
 import json
-from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from metrics import extract_sector, sector_thresholds_berkshire
-from helper import calculate_slope  # your util
+from metrics import extract_sector
 from financial_metrics import (  # your util
     calc_sma200_metrics,
-    calculate_closing_CAGR,
-    calculate_PEG,
-    calculate_CAGR_helper,
 )
+from analyzer.metrics import RATIO_SPECS  # single source of truth
+
 
 # ----------------------------------------------------------------------
 # Metric ↔ datapoint map
@@ -246,9 +243,66 @@ def get_hist_data():
 
 
 # ------------------------------------------------------------------ main
+
+
+# helpers (window calc already exists in your file)
+def _unwrap1(x):
+    return x[0] if isinstance(x, (list, tuple)) and len(x) == 1 else x
+
+
+def _to_pct(x):
+    x = _unwrap1(x)
+    if x is None:
+        return None
+    try:
+        x = float(x)
+    except Exception:
+        return None
+    # normalize rate fractions (0.12 -> 12.0)
+    return x * 100.0 if 0 < abs(x) < 1 else x
+
+
+def _safe_last(series):
+    try:
+        if series is None:
+            return None
+        s = _series_from_df(series)
+        if s is None or s.empty:
+            return None
+        v = s.dropna()
+        return float(v.iloc[-1]) if not v.empty else None
+    except Exception:
+        return None
+
+
+def _safe_div(a, b):
+    try:
+        if a is None or b is None:
+            return None
+        a = float(a)
+        b = float(b)
+        if b == 0:
+            return None
+        return a / b
+    except Exception:
+        return None
+
+
 def calculate_metrics_given_hist() -> None:
     df = get_hist_data()
-    metrics = list(sector_thresholds_berkshire.keys())
+
+    # metrics to compute (sector-agnostic)
+    ratio_keys = list(RATIO_SPECS.keys())
+    other_keys = [
+        "revenue trend quarter status",
+        "revenue trend year status",
+        "profit margin trend status",
+        "profit per share trend status",
+        "sma200 slope status",
+        # keep "sma200 status" if you still want it
+    ]
+    metrics = ratio_keys + other_keys
+
     excl_cols = {"name", "sector", "ohlc", "market_cap", "currency"}
     pre_metrics = [c for c in df.columns if c not in excl_cols]
 
@@ -266,21 +320,25 @@ def calculate_metrics_given_hist() -> None:
         for span in (1, 3, 5):
             for label, start_d, end_d, yrs_span in make_windows(max_d, span):
 
+                # window slices for all available datapoints
                 filtered = {
-                    k: slice_df_between(row[k], start_d, end_d) for k in pre_metrics
+                    k: slice_df_between(row[k], start_d, end_d)
+                    for k in pre_metrics
+                    if k in row
                 }
                 ohlc_win = slice_df_between(ohlc_df, start_d, end_d)
 
-                # ---- Total return calculation ----
+                # ---- Total return ----
                 try:
                     price_start = ohlc_win["close"].iloc[0]
                     price_end = ohlc_win["close"].iloc[-1]
                     total_return = (
-                        (price_end / price_start) - 1 if price_start > 0 else None
+                        ((price_end / price_start) - 1) if price_start > 0 else None
                     )
                 except Exception:
                     total_return = None
 
+                # ---- SMA(200) + slope ----
                 sma_val, _, sma_slope = calc_sma200_metrics(ohlc_win)
                 sma_status = (
                     (ohlc_win["close"].iloc[-1] - sma_val) / sma_val
@@ -288,55 +346,76 @@ def calculate_metrics_given_hist() -> None:
                     else None
                 )
 
-                pe_ser = _series_from_df(filtered.get("pe"))
-                pe_val = float(pe_ser.iloc[-1]) if not pe_ser.empty else None
-                peg_val = calculate_PEG(
-                    pe_ser.dropna().tolist()[-3:],
-                    calculate_closing_CAGR(
-                        None,
-                        company,
-                        use_hist=True,
-                        hist_row=pd.Series({"ohlc": ohlc_win[["close"]]}),
-                        years_tuple=(3, 2, 1),
-                    ),
-                )
+                # ---- Base fields for ratios: last values in the window ----
+                pe_val = _safe_last(filtered.get("pe"))
+                de_val = _safe_last(filtered.get("de"))
+                roe_val = _safe_last(filtered.get("roe"))
+                fcfy_val = _safe_last(filtered.get("fcfy"))
 
+                # CAGR proxy inside window (price-based), normalized to %
                 price_cagr = price_cagr_window(
                     ohlc_df["close"], start_d, end_d, yrs_span
                 )
                 if isinstance(price_cagr, np.floating):
                     price_cagr = float(price_cagr)
 
+                # ---- Build row ----
                 entry = {
                     "company": company,
                     "sector": sector,
                     "timespan": label,
-                    "total_return": total_return,  # <-- Added return here
+                    "total_return": total_return,
+                    # base fields (optional but useful to inspect)
+                    "pe": pe_val,
+                    "de": de_val,
+                    "roe": roe_val,
+                    "fcfy": fcfy_val,
+                    "cagr": price_cagr,
+                    "sma200 status": sma_status,
+                    "sma200 slope status": sma_slope,
                 }
 
-                for m in metrics:
+                # ---- Trends (same logic as before) ----
+                for m in other_keys:
                     if "trend" in m:
                         col = METRIC_TO_DATAPOINT[m]
                         entry[m] = (
                             _trend_metric_yoy(row[col], start_d)
                             if yrs_span == 1 and "_YoY-" in label
-                            else _trend_metric(filtered[col])
+                            else _trend_metric(filtered.get(col))
                         )
-                    elif m == "sma200 status":
-                        entry[m] = sma_status
-                    elif m == "sma200 slope status":
-                        entry[m] = sma_slope
-                    elif m == "peg status":
-                        entry[m] = peg_val
-                    elif m == "cagr-pe compare status":
-                        entry[m] = [price_cagr, pe_val]
+
+                # ---- Ratios (sector-agnostic, using RATIO_SPECS) ----
+                # num_is_rate=True => convert to percent before dividing
+                for rk, spec in RATIO_SPECS.items():
+                    num_name = spec["num"]
+                    den_name = spec["den"]
+                    num_is_rate = spec.get("num_is_rate", False)
+
+                    # choose the right base value from the window
+                    if num_name == "cagr":
+                        num_val = price_cagr
+                    elif num_name == "roe":
+                        num_val = roe_val
+                    elif num_name == "fcfy":
+                        num_val = fcfy_val
                     else:
-                        col = METRIC_TO_DATAPOINT.get(m)
-                        entry[m] = (
-                            _aggregate_for_timespan(m, filtered.get(col))
-                            if col
-                            else None
+                        num_val = _safe_last(filtered.get(num_name))
+
+                    den_val = (
+                        pe_val
+                        if den_name == "pe"
+                        else (
+                            de_val
+                            if den_name == "de"
+                            else _safe_last(filtered.get(den_name))
                         )
+                    )
+
+                    if num_is_rate:
+                        num_val = _to_pct(num_val)
+
+                    entry[rk] = _safe_div(num_val, den_val)
 
                 results.append(entry)
 
