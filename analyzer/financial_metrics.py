@@ -532,7 +532,6 @@ def extract_netdebt_ebitda_ratio(avanza_data):
     # sort chronologically to identify the latest
     records.sort(key=lambda r: r["date"])
     latest_val = records[-1]["value"]
-
     return latest_val, records
 
 

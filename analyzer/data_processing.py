@@ -41,6 +41,8 @@ def enrich_ratios(df: pd.DataFrame) -> pd.DataFrame:
         return df
     out = df.copy()
     for out_col, spec in RATIO_SPECS.items():
+        if out_col == "net debt - ebitda status":
+            continue
         num, den = spec["num"], spec["den"]
         num_is_rate = spec.get("num_is_rate", False)
         if num in out.columns and den in out.columns:
@@ -111,6 +113,7 @@ def get_data(
         )
         de_ratio, de_ratio_hist = calculate_de(ticker_analysis)
         roe, roe_hist = calculate_roe(ticker_analysis)
+        nd_ebitda_ratio, nd_ebitda_hist = extract_netdebt_ebitda_ratio(ticker_analysis)
 
         # write base inputs (SummaryManager accepts these even if not in template)
         manager._update(ticker_name, sector, "pe", pe[-1] if pe else None)
@@ -118,6 +121,9 @@ def get_data(
         manager._update(ticker_name, sector, "fcfy", fcfy)
         manager._update(ticker_name, sector, "de", de_ratio)
         manager._update(ticker_name, sector, "roe", roe)
+        manager._update(
+            ticker_name, sector, "net debt - ebitda status", nd_ebitda_ratio
+        )
 
         if get_hist:
             hist["sector"] = sector
@@ -130,6 +136,7 @@ def get_data(
             hist["de_ratio"] = de_ratio_hist
             hist["free_cashflow_yield"] = fcfy_hist
             hist["free_cashflow"] = free_cashflow_hist
+            hist["netDebtEbitdaRatio"] = nd_ebitda_hist
 
     else:
         sector = [{"sectorId": "51", "sectorName": "Investmentbolag"}]

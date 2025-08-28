@@ -49,6 +49,7 @@ class SummaryManager:
             "cagr_pe ratio status": None,
             "fcfy_pe ratio status": None,
             "roe_de ratio status": None,
+            "net debt - ebitda status": None,
             # sector-agnostic trends/technical
             "revenue trend quarter status": None,
             "revenue trend year status": None,
@@ -74,6 +75,7 @@ class SummaryManager:
             # trends/technical
             "profit per share trend status": None,
             "sma200 slope status": None,
+            "net debt - ebitda status": None,
         }
 
     def _initialize_template(self, key, sector):
@@ -262,7 +264,6 @@ class SummaryManager:
         """Displays DataFrame with tabulate formatting for a cleaner output."""
 
         def colorize_row(row):
-            """Applies color to metric values based on their *_score column."""
             colored_row = row.copy()
             for col in (
                 self.template
@@ -272,23 +273,25 @@ class SummaryManager:
                 score_col = col + "_score"
                 if score_col in row:
                     if row[score_col] > 0:
-                        colored_row[col] = (
-                            f"\033[92m{row[col]}\033[0m"  # Green for positive score
-                        )
+                        colored_row[col] = f"\033[92m{row[col]}\033[0m"
                     elif row[score_col] < 0:
-                        colored_row[col] = (
-                            f"\033[91m{row[col]}\033[0m"  # Red for negative score
-                        )
-
+                        colored_row[col] = f"\033[91m{row[col]}\033[0m"
             return colored_row
 
-        def process_dataframe(df):
-            """Applies row-wise coloring, then drops raw/base columns and helper scores."""
+        def _unwrap_cell(v):
+            # [x] -> x ; (x,) -> x
+            if isinstance(v, (list, tuple)) and len(v) == 1:
+                return v[0]
+            return v
 
+        def process_dataframe(df):
+            """Applies row-wise coloring, unwraps cells, then drops raw/base columns and helper scores."""
             if df.empty:
                 return df
 
             df_colored = df.apply(colorize_row, axis=1)
+
+            df_colored = df_colored.applymap(_unwrap_cell)
 
             # Columns to drop
             drop_cols = [
@@ -296,20 +299,28 @@ class SummaryManager:
                 for col in df_colored.columns
                 if col.endswith("_score")
                 or col == "sector"
-                or col.strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
+                or (
+                    isinstance(col, str)
+                    and col.strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
+                )
             ]
-
             df_colored = df_colored.drop(columns=drop_cols, errors="ignore")
+
+            # Optional: replace None/NaN with "N/A" for readability
+            df_colored = df_colored.where(df_colored.notna(), other="N/A")
+
             return df_colored
 
-        # Process and print `summary`
+        # --- summary ---
         if not self.summary.empty:
             summary_colored = process_dataframe(self.summary).sort_values(
                 by="points", ascending=False
             )
             if save_df:
-                # Save the summary to a CSV file
                 self.summary.to_csv("summary.csv")
+
+            # Optional debug: ensure the column is present
+            # print("Summary columns:", list(summary_colored.columns))
 
             print(
                 tabulate(
@@ -320,13 +331,12 @@ class SummaryManager:
                 )
             )
 
-        # Process and print `summary_investment`
+        # --- investment summary ---
         if not self.summary_investment.empty:
             summary_investment_colored = process_dataframe(
                 self.summary_investment
             ).sort_values(by="points", ascending=False)
             if save_df:
-                # Save the investment summary to a CSV file
                 self.summary_investment.to_csv("summary_investment.csv")
 
             print(
