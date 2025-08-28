@@ -1,5 +1,9 @@
 import sys
 import os
+import yfinance as yf
+from tqdm import tqdm
+import re
+
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
@@ -13,8 +17,7 @@ from helper import *
 from summary_manager import SummaryManager
 from data_processing import *
 from importlib.metadata import version
-import pyotp
-import hashlib
+
 from historical_calc import calculate_metrics_given_hist
 from datetime import date
 import argparse
@@ -73,7 +76,7 @@ def main():
                 item
                 for item in avanza.get_watchlists()
                 if item.get("name")
-                == "Test"  # "Mina favoritaktier"  # "Berkshire"   # "Mina favoritaktier"  # "Äger"
+                == "Äger"  # "Test"  # "Mina favoritaktier"  # "Berkshire"   # "Mina favoritaktier"  # "Äger"
             ),
             None,
         )["orderbookIds"]

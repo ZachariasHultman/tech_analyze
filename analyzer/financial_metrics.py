@@ -1,20 +1,11 @@
 import pandas as pd
 from currency_converter import CurrencyConverter
-import math
 import requests
 from avanza.avanza import Resolution, TimePeriod
 from analyzer.helper import *
 from analyzer.get_NAV_data import get_nav_data
-import yfinance as yf
-from datetime import date, datetime
-from analyzer.metrics import ticker_reporting_currency_map, ticker_currency_map
-import time
-
-
-import requests
-from datetime import datetime, timedelta
-from enum import Enum
-import pandas as pd
+from datetime import datetime
+from analyzer.metrics import ticker_reporting_currency_map
 import numpy as np
 
 
@@ -308,10 +299,6 @@ def calculate_PEG(pe: list[float], cagr: list[float] | None):
     return peg[-1]  # return most recent PEG
 
 
-from currency_converter import CurrencyConverter
-import math
-
-
 def sync_currency(from_currency: str, to_currency: str = "SEK"):
     """
     Converts between reporting and trading currencies.
@@ -337,65 +324,128 @@ def sync_currency(from_currency: str, to_currency: str = "SEK"):
 
 def calculate_free_cashflow_yield(yahoo_ticker, stock_info, df_hist=None):
     try:
+        # --- base inputs ---
         from_currency = ticker_reporting_currency_map.get(yahoo_ticker.ticker)
-        to_currency = stock_info["keyIndicators"]["marketCapital"]["currency"]
-        market_cap = stock_info["keyIndicators"]["marketCapital"]["value"]
+        ki = stock_info.get("keyIndicators", {}) if isinstance(stock_info, dict) else {}
+        mc_obj = ki.get("marketCapital", {}) if isinstance(ki, dict) else {}
+        to_currency = mc_obj.get("currency")
+        market_cap = mc_obj.get("value")
 
-        # Infer shares outstanding from Avanza market‐cap + last close in df_hist
-        try:
-            last_close_price = df_hist["close"].iloc[-1]
-            shares_outstanding = market_cap / last_close_price
-        except (KeyError, TypeError, ZeroDivisionError):
+        # guard market_cap
+        if (
+            market_cap is None
+            or not isinstance(market_cap, (int, float))
+            or market_cap <= 0
+        ):
             return None, None, None, None
 
-        #  Fetch FCF history
-        cash_flow_df = yahoo_ticker.cashflow
+        # infer shares outstanding
+        shares_outstanding = None
+        if (
+            df_hist is not None
+            and isinstance(df_hist, pd.DataFrame)
+            and not df_hist.empty
+        ):
+            try:
+                last_close_price = float(df_hist["close"].iloc[-1])
+                if last_close_price > 0:
+                    shares_outstanding = market_cap / last_close_price
+            except Exception:
+                shares_outstanding = None
+
+        # fallback: try yfinance info
+        if shares_outstanding is None:
+            try:
+                so = getattr(yahoo_ticker, "info", {}).get("sharesOutstanding")
+                if isinstance(so, (int, float)) and so > 0:
+                    shares_outstanding = float(so)
+            except Exception:
+                shares_outstanding = None
+
+        # if still missing, we can compute current FCFY via market_cap, but no hist yields
+        # --- fetch cash flow ---
+        cash_flow_df = getattr(yahoo_ticker, "cashflow", None)
+        if (
+            cash_flow_df is None
+            or not isinstance(cash_flow_df, pd.DataFrame)
+            or cash_flow_df.empty
+        ):
+            return None, None, None, None
         if "Free Cash Flow" not in cash_flow_df.index:
             print(" 'Free Cash Flow' not found for", yahoo_ticker.ticker)
             return None, None, None, None
 
-        free_cash_flow_hist = cash_flow_df.loc["Free Cash Flow"]
+        free_cash_flow_hist = cash_flow_df.loc["Free Cash Flow"].copy()
 
-        # Currency conversion
+        # coerce to numeric
+        free_cash_flow_hist = pd.to_numeric(free_cash_flow_hist, errors="coerce")
+
+        # --- FX normalization ---
+        # sync_currency may return None for rates; treat None as 1.0 to avoid float * NoneType
         currency_match, convert_to_sek, ex_rate, sek_rate = sync_currency(
             from_currency=from_currency, to_currency=to_currency
         )
-        if not currency_match:
-            free_cash_flow_hist = free_cash_flow_hist * ex_rate
-        if convert_to_sek:
-            free_cash_flow_hist = free_cash_flow_hist * sek_rate
+        ex_rate = 1.0 if ex_rate is None else ex_rate
+        sek_rate = 1.0 if sek_rate is None else sek_rate
 
-        # Build historical FCF‐yield dict (if price history provided)
+        if not currency_match:
+            free_cash_flow_hist = free_cash_flow_hist * float(ex_rate)
+        if convert_to_sek:
+            free_cash_flow_hist = free_cash_flow_hist * float(sek_rate)
+
+        # --- historical FCF yield (requires shares_outstanding & df_hist) ---
         fcf_yield_hist = {}
-        if df_hist is not None:
-            df_hist.index = pd.to_datetime(df_hist.index)
+        if (
+            shares_outstanding
+            and df_hist is not None
+            and isinstance(df_hist, pd.DataFrame)
+            and not df_hist.empty
+        ):
+            try:
+                df_hist = df_hist.copy()
+                df_hist.index = pd.to_datetime(df_hist.index)
+            except Exception:
+                pass
             for dt, fcf in free_cash_flow_hist.items():
                 if pd.isna(fcf):
                     continue
                 try:
-                    close_price = df_hist.loc[:dt]["close"].iloc[-1]
-                    market_cap_hist = close_price * shares_outstanding
-                    fcf_yield_hist[dt.strftime("%Y-%m-%d")] = float(
-                        fcf / market_cap_hist
-                    )
-                except (KeyError, IndexError):
+                    # align to the latest price <= dt
+                    close_price = df_hist.loc[: pd.to_datetime(dt)]["close"].iloc[-1]
+                    market_cap_hist = float(close_price) * float(shares_outstanding)
+                    if market_cap_hist > 0:
+                        fcf_yield_hist[pd.to_datetime(dt).strftime("%Y-%m-%d")] = (
+                            float(fcf) / market_cap_hist
+                        )
+                except Exception:
                     continue
 
-        # Latest values
-        latest_fcf = float(free_cash_flow_hist.iloc[0])
-        fcf_yield_now = latest_fcf / market_cap
+        # --- latest values ---
+        latest_fcf = None
+        try:
+            latest_fcf = float(free_cash_flow_hist.dropna().iloc[0])
+        except Exception:
+            latest_fcf = None
 
-        # Serialize free_cash_flow_hist to dict with ISO dates + floats
+        fcf_yield_now = (
+            (latest_fcf / market_cap)
+            if (latest_fcf is not None and market_cap)
+            else None
+        )
+
+        # serialize FCF hist
         free_cf_hist_dict = {
-            dt.strftime("%Y-%m-%d"): (None if pd.isna(val) else float(val))
+            pd.to_datetime(dt).strftime("%Y-%m-%d"): (
+                None if pd.isna(val) else float(val)
+            )
             for dt, val in free_cash_flow_hist.items()
         }
 
         return (
-            fcf_yield_now,  # scalar
-            latest_fcf,  # scalar
-            fcf_yield_hist,  # dict  { "YYYY-MM-DD": float }
-            free_cf_hist_dict,  # dict  { "YYYY-MM-DD": float | None }
+            fcf_yield_now,  # scalar or None
+            latest_fcf,  # scalar or None
+            fcf_yield_hist,  # dict
+            free_cf_hist_dict,  # dict
         )
 
     except (KeyError, IndexError, TypeError, ValueError) as e:
@@ -495,8 +545,6 @@ def calculate_NAV_discount(ticker_name):
         nav_discount_raw               – list[dict{date,value}]
         calc_nav_discount_raw          – list[dict{date,value}]
     """
-    import numpy as np
-    import pandas as pd
 
     df_nav = get_nav_data(ticker_name)
     if df_nav is None or df_nav.empty:

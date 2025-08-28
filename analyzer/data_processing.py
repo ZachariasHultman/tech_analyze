@@ -1,9 +1,58 @@
-import yfinance as yf
-from tqdm import tqdm
-import re
-from analyzer.metrics import HIGHEST_WEIGHT_METRICS
+import numpy as np
+import pandas as pd
+from analyzer.metrics import HIGHEST_WEIGHT_METRICS, RATIO_SPECS
 from analyzer.helper import *
 from analyzer.financial_metrics import *
+
+
+def _unwrap(v):
+    return v[0] if isinstance(v, (list, tuple)) and len(v) == 1 else v
+
+
+def _to_pct(x):
+    x = _unwrap(x)
+    if x is None:
+        return None
+    try:
+        x = float(x)
+    except Exception:
+        return None
+    # if stored as fraction (0.12), convert to percent (12.0)
+    return x * 100.0 if 0 < abs(x) < 1 else x
+
+
+def _safe_div(a, b):
+    a = _unwrap(a)
+    b = _unwrap(b)
+    try:
+        if a is None or b is None:
+            return None
+        a = float(a)
+        b = float(b)
+        if b == 0 or np.isnan(a) or np.isnan(b):
+            return None
+        return a / b
+    except Exception:
+        return None
+
+
+def enrich_ratios(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for out_col, spec in RATIO_SPECS.items():
+        num, den = spec["num"], spec["den"]
+        num_is_rate = spec.get("num_is_rate", False)
+        if num in out.columns and den in out.columns:
+            vals = []
+            for i in out.index:
+                n = _to_pct(out.at[i, num]) if num_is_rate else _unwrap(out.at[i, num])
+                d = out.at[i, den]
+                vals.append(_safe_div(n, d))
+            out[out_col] = vals
+        else:
+            out[out_col] = None
+    return out
 
 
 def get_data(
@@ -14,8 +63,6 @@ def get_data(
     yahoo_ticker,
     get_hist=False,
 ):
-    # print(ticker_info["listing"]["tickerSymbol"])
-
     ticker_analysis = avanza.get_analysis(ticker_id)
 
     investment = any(
@@ -25,141 +72,93 @@ def get_data(
     if get_hist:
         hist = {}
 
-    ticker_name = ticker_info["name"] + " " + ticker_info["orderbookId"]
+    ticker_name = f'{ticker_info["name"]} {ticker_info["orderbookId"]}'
 
     if not investment:
         sector = [sector for sector in ticker_info["sectors"]]
         manager._initialize_template(ticker_name, sector)
-        # Calculate sma200
+
+        # --- technicals ---
         sma200, weekly_average_close, sma200_slope, closing_hist_data = (
             calculate_sma200(avanza, ticker_id)
         )
-
         manager._update(ticker_name, sector, "sma200 slope status", sma200_slope)
 
-        # Calculate profit per share trend
-        profit_per_share_trend, profit_per_share_hist = (
-            calculate_profit_per_share_trend(ticker_analysis)
-        )
-        manager._update(
-            ticker_name,
-            sector,
-            "profit per share trend status",
-            profit_per_share_trend,
-        )
-        # Calculate profit margin trend.
-        profit_margin, profit_margin_hist = calculate_profit_margin(ticker_analysis)
+        # --- trends ---
+        pps_trend, pps_hist = calculate_profit_per_share_trend(ticker_analysis)
+        manager._update(ticker_name, sector, "profit per share trend status", pps_trend)
+
         profit_margin_trend = calculate_profit_margin_trend(ticker_analysis)
-        manager._update(ticker_name, sector, "profit margin status", profit_margin)
         manager._update(
-            ticker_name,
-            sector,
-            "profit margin trend status",
-            profit_margin_trend,
+            ticker_name, sector, "profit margin trend status", profit_margin_trend
         )
-        # Calculate Revenue trend for last years.
-        (
-            revenue_trend_year,
-            revenue_trend_quarter,
-            revenue_year_hist,
-            revenue_quarter_hist,
-        ) = calculate_revenue_trend(ticker_analysis)
-        manager._update(
-            ticker_name, sector, "revenue trend year status", revenue_trend_year
+
+        rev_trend_year, rev_trend_quarter, rev_year_hist, rev_quarter_hist = (
+            calculate_revenue_trend(ticker_analysis)
         )
         manager._update(
-            ticker_name,
-            sector,
-            "revenue trend quarter status",
-            revenue_trend_quarter,
+            ticker_name, sector, "revenue trend year status", rev_trend_year
         )
-        # Calculate P/E
+        manager._update(
+            ticker_name, sector, "revenue trend quarter status", rev_trend_quarter
+        )
+
+        # --- valuation/growth/cashflow base fields (sector-agnostic ratios use these) ---
         pe, pe_hist = calculate_PE(ticker_analysis)
-
-        # Calculate The PEG ratio (Price/Earnings-to-Growth)
         cagr = calculate_closing_CAGR(avanza, ticker_id)
-        peg = calculate_PEG(pe, cagr)
-        manager._update(ticker_name, sector, "peg status", peg)
-        manager._update(
-            ticker_name,
-            sector,
-            "cagr-pe compare status",
-            [cagr[-1], pe[-1]] if cagr and pe else [None, None],
+        (fcfy, free_cashflow, fcfy_hist, free_cashflow_hist) = (
+            calculate_free_cashflow_yield(yahoo_ticker, ticker_info, closing_hist_data)
         )
-        # Calculate free cashflow yield.
-        (
-            free_cashflow_yield,
-            free_cashflow,
-            free_cashflow_yield_hist,
-            free_cashflow_hist,
-        ) = calculate_free_cashflow_yield(yahoo_ticker, ticker_info, closing_hist_data)
-        manager._update(ticker_name, sector, "fcfy status", free_cashflow_yield)
-
-        # Calculate ebitda and net debt.
-        netDebtEbitdaRatio, netDebtEbitdaRatio_hist = extract_netdebt_ebitda_ratio(
-            ticker_analysis
-        )
-        manager._update(
-            ticker_name,
-            sector,
-            "net debt - ebitda status",
-            netDebtEbitdaRatio,
-        )
-        # Calculate debt to equity ratio
         de_ratio, de_ratio_hist = calculate_de(ticker_analysis)
-        manager._update(ticker_name, sector, "de status", de_ratio)
-        # Calculate debt to equity ratio
         roe, roe_hist = calculate_roe(ticker_analysis)
-        manager._update(ticker_name, sector, "roe status", roe)
+
+        # write base inputs (SummaryManager accepts these even if not in template)
+        manager._update(ticker_name, sector, "pe", pe[-1] if pe else None)
+        manager._update(ticker_name, sector, "cagr", cagr[-1] if cagr else None)
+        manager._update(ticker_name, sector, "fcfy", fcfy)
+        manager._update(ticker_name, sector, "de", de_ratio)
+        manager._update(ticker_name, sector, "roe", roe)
+
         if get_hist:
             hist["sector"] = sector
             hist["ohlc"] = closing_hist_data
-            hist["profit_per_share"] = profit_per_share_hist
+            hist["profit_per_share"] = pps_hist
             hist["pe"] = pe_hist
             hist["roe"] = roe_hist
-            hist["profit_margin"] = profit_margin_hist
-            hist["revenue_year"] = revenue_year_hist
-            hist["revenue_quarter"] = revenue_quarter_hist
+            hist["revenue_year"] = rev_year_hist
+            hist["revenue_quarter"] = rev_quarter_hist
             hist["de_ratio"] = de_ratio_hist
-            hist["free_cashflow_yield"] = free_cashflow_yield_hist
+            hist["free_cashflow_yield"] = fcfy_hist
             hist["free_cashflow"] = free_cashflow_hist
-            hist["netDebtEbitdaRatio"] = netDebtEbitdaRatio_hist
 
     else:
         sector = [{"sectorId": "51", "sectorName": "Investmentbolag"}]
         manager._initialize_template(ticker_name, sector)
-        # Calculate sma200
+
+        # --- technicals ---
         sma200, weekly_average_close, sma200_slope, closing_hist_data = (
             calculate_sma200(avanza, ticker_id)
         )
-
         manager._update(ticker_name, sector, "sma200 slope status", sma200_slope)
 
-        # Calculate profit per share trend
-        profit_per_share_trend, profit_per_share_hist = (
-            calculate_profit_per_share_trend(ticker_analysis)
-        )
-        manager._update(
-            ticker_name,
-            sector,
-            "profit per share trend status",
-            profit_per_share_trend,
-        )
-        # Calculate P/E trend
-        pe, pe_hist = calculate_PE(ticker_analysis)
+        # --- trends ---
+        pps_trend, pps_hist = calculate_profit_per_share_trend(ticker_analysis)
+        manager._update(ticker_name, sector, "profit per share trend status", pps_trend)
 
+        # --- base fields for ratios ---
+        pe, pe_hist = calculate_PE(ticker_analysis)
         cagr = calculate_closing_CAGR(avanza, ticker_id)
-        # The combination of CAGR
-        manager._update(
-            ticker_name,
-            sector,
-            "cagr-pe compare status",
-            [cagr[-1], pe[-1]] if cagr else [None, None],
+        (fcfy, free_cashflow, fcfy_hist, free_cashflow_hist) = (
+            calculate_free_cashflow_yield(yahoo_ticker, ticker_info)
         )
-        # Calculate ebitda and net debt.
-        evEbit, evEbit_hist = extract_ev_ebit_ratio(ticker_analysis)
-        manager._update(ticker_name, sector, "net debt - ebit status", evEbit)
-        # Check NAV discount and trend.
+        roe, roe_hist = calculate_roe(ticker_analysis)
+
+        manager._update(ticker_name, sector, "pe", pe[-1] if pe else None)
+        manager._update(ticker_name, sector, "cagr", cagr[-1] if cagr else None)
+        manager._update(ticker_name, sector, "fcfy", fcfy)
+        manager._update(ticker_name, sector, "roe", roe)
+
+        # --- NAV fields kept in investment template ---
         (
             nav_discount,
             calculated_nav_discount,
@@ -177,25 +176,16 @@ def get_data(
         manager._update(
             ticker_name, sector, "nav discount trend status", nav_discount_trend
         )
-        (
-            free_cashflow_yield,
-            free_cashflow,
-            free_cashflow_yield_hist,
-            free_cashflow_hist,
-        ) = calculate_free_cashflow_yield(yahoo_ticker, ticker_info)
-        roe, roe_hist = calculate_roe(ticker_analysis)
-        manager._update(ticker_name, sector, "roe status", roe)
 
         if get_hist:
             hist["sector"] = sector
             hist["ohlc"] = closing_hist_data
-            hist["profit_per_share"] = profit_per_share_hist
+            hist["profit_per_share"] = pps_hist
             hist["pe"] = pe_hist
             hist["roe"] = roe_hist
             hist["nav_discount"] = nav_discount_hist
             hist["calculated_nav_discount"] = calculated_nav_discount_hist
-            hist["evEbit"] = evEbit_hist
-            hist["free_cashflow_yield"] = free_cashflow_yield_hist
+            hist["free_cashflow_yield"] = fcfy_hist
             hist["free_cashflow"] = free_cashflow_hist
 
     if get_hist:
@@ -214,17 +204,18 @@ def calculate_score(manager, metrics_to_score=None):
         if summary.empty:
             return pd.DataFrame()
 
+        # --- derive sector-agnostic ratios before scoring ---
+        summary = enrich_ratios(summary)
+
         score_data = {}
 
         for col in template:
             if col in excluded_columns or col not in summary.columns:
                 continue
-
             if metrics_to_score is not None and col not in metrics_to_score:
                 continue
 
             def assign(row):
-                value = row.get(col)
                 return manager._assign_points(row, col)
 
             score_data[col + "_score"] = summary.apply(assign, axis=1)
