@@ -124,6 +124,31 @@ def get_data(
         manager._update(
             ticker_name, sector, "net debt - ebitda status", nd_ebitda_ratio
         )
+        # multi-year growth
+        rev_cagr_y, _ = calculate_revenue_y_cagr(ticker_analysis)
+        eps_cagr_y, _ = calculate_eps_y_cagr(ticker_analysis)
+        manager._update(ticker_name, sector, "revenue y cagr status", rev_cagr_y)
+        manager._update(ticker_name, sector, "eps y cagr status", eps_cagr_y)
+
+        # consistency
+        rev_hit, _ = calculate_revenue_yoy_hit_rate(
+            ticker_analysis, lookback_quarters=12
+        )
+        eps_hit, _ = calculate_eps_yoy_hit_rate(ticker_analysis, lookback_quarters=12)
+        manager._update(ticker_name, sector, "revenue yoy hit-rate status", rev_hit)
+        manager._update(ticker_name, sector, "eps yoy hit-rate status", eps_hit)
+
+        # quality vs own history
+        nm_vs_avg, _ = calculate_net_margin_vs_avg(
+            ticker_info, ticker_analysis, years=5
+        )
+        roe_vs_avg, _ = calculate_roe_vs_avg(ticker_info, ticker_analysis, years=5)
+        manager._update(ticker_name, sector, "net margin vs avg status", nm_vs_avg)
+        manager._update(ticker_name, sector, "roe vs avg status", roe_vs_avg)
+
+        # Price CAGR over YEARS
+        price_cagr = calculate_price_cagr_status(avanza, ticker_id)
+        manager._update(ticker_name, sector, "price y cagr status", price_cagr)
 
         if get_hist:
             hist["sector"] = sector

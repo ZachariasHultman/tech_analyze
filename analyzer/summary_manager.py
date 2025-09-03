@@ -8,7 +8,7 @@ from analyzer.metrics import (
 )
 from tabulate import tabulate
 import math
-
+import pandas as pd
 
 # base fields needed to compute ratios (always accepted by _update)
 REQUIRED_BASE_COLS = {"roe", "pe", "cagr", "fcfy", "de"}
@@ -44,18 +44,25 @@ class SummaryManager:
         self.template = {
             "sector": None,
             "points": 0,
-            # ratios (computed and stored during ingestion)
+            # ratios
             "roe_pe ratio status": None,
             "cagr_pe ratio status": None,
             "fcfy_pe ratio status": None,
             "roe_de ratio status": None,
             "net debt - ebitda status": None,
-            # sector-agnostic trends/technical
+            "revenue y cagr status": None,
+            "eps y cagr status": None,
+            "net margin vs avg status": None,
+            "roe vs avg status": None,
+            # trends/technicals
             "revenue trend quarter status": None,
             "revenue trend year status": None,
+            "revenue yoy hit-rate status": None,
+            "eps yoy hit-rate status": None,
             "profit margin trend status": None,
             "profit per share trend status": None,
             "sma200 slope status": None,
+            "price y cagr status": None,
         }
 
         self.summary_investment = {}
@@ -263,90 +270,179 @@ class SummaryManager:
     def _display(self, save_df=False):
         """Displays DataFrame with tabulate formatting for a cleaner output."""
 
-        def colorize_row(row):
-            colored_row = row.copy()
-            for col in (
+        # --- helpers ---
+        def _unwrap_deep(v):
+            while isinstance(v, (list, tuple)) and len(v) == 1:
+                v = v[0]
+            try:
+                import numpy as np
+
+                if isinstance(v, np.generic):
+                    v = v.item()
+            except Exception:
+                pass
+            return v
+
+        def _fmt2(v):
+            if v is None:
+                return v
+            try:
+                if isinstance(v, bool):
+                    return v
+                if isinstance(v, (int, float)):
+                    return f"{v:.2f}"
+            except Exception:
+                pass
+            return v
+
+        def _colorize_row(row):
+            colored = row.copy()
+            cols = (
                 self.template
                 if "nav discount status" not in row
                 else self.template_investment
-            ):
+            )
+            for col in cols:
                 score_col = col + "_score"
                 if score_col in row:
-                    if row[score_col] > 0:
-                        colored_row[col] = f"\033[92m{row[col]}\033[0m"
-                    elif row[score_col] < 0:
-                        colored_row[col] = f"\033[91m{row[col]}\033[0m"
-            return colored_row
+                    v = row[col]
+                    uv = _unwrap_deep(v)
+                    if isinstance(uv, (int, float)) and uv is not None:
+                        if row[score_col] > 0:
+                            colored[col] = f"\033[92m{uv:.2f}\033[0m"
+                        elif row[score_col] < 0:
+                            colored[col] = f"\033[91m{uv:.2f}\033[0m"
+                        else:
+                            colored[col] = f"{uv:.2f}"
+                    else:
+                        colored[col] = v
+            return colored
 
-        def _unwrap_cell(v):
-            # [x] -> x ; (x,) -> x
-            if isinstance(v, (list, tuple)) and len(v) == 1:
-                return v[0]
-            return v
+        def _build_export(df):
+            """
+            Build a CSV-friendly DataFrame:
+            - unwrap lists/tuples
+            - add '<metric> (flag)' columns using *_score (GREEN/RED/NEUTRAL)
+            - drop *_score, sector, and base fields
+            - round numeric to 2 decimals (leave flags as text)
+            """
+            import pandas as pd
 
-        def process_dataframe(df):
-            """Applies row-wise coloring, unwraps cells, then drops raw/base columns and helper scores."""
             if df.empty:
                 return df
 
-            df_colored = df.apply(colorize_row, axis=1)
+            df2 = df.applymap(_unwrap_deep)
 
-            df_colored = df_colored.applymap(_unwrap_cell)
+            # Create flags from *_score while we still have them
+            def _flags_row(row):
+                cols = (
+                    self.template
+                    if "nav discount status" not in row
+                    else self.template_investment
+                )
+                out = {}
+                for col in cols:
+                    sc = col + "_score"
+                    if sc in row:
+                        s = row[sc]
+                        flag = "GREEN" if s > 0 else ("RED" if s < 0 else "NEUTRAL")
+                        out[f"{col} (flag)"] = flag
+                return pd.Series(out)
 
-            # Columns to drop
+            flags = df2.apply(_flags_row, axis=1)
+            export = pd.concat([df2, flags], axis=1)
+
+            # Drop helper/base columns
             drop_cols = [
-                col
-                for col in df_colored.columns
-                if col.endswith("_score")
-                or col == "sector"
-                or (
-                    isinstance(col, str)
-                    and col.strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
-                )
+                c
+                for c in export.columns
+                if str(c).endswith("_score")
+                or c == "sector"
+                or str(c).strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
             ]
-            df_colored = df_colored.drop(columns=drop_cols, errors="ignore")
+            export = export.drop(columns=drop_cols, errors="ignore")
 
-            # Optional: replace None/NaN with "N/A" for readability
-            df_colored = df_colored.where(df_colored.notna(), other="N/A")
+            # Round numeric to 2 dp (keep flags and strings as-is)
+            def _round2(x):
+                return round(x, 2) if isinstance(x, (int, float)) else x
 
-            return df_colored
+            export = export.applymap(_round2)
 
-        # --- summary ---
+            # Nice NA
+            export = export.where(export.notna(), other="N/A")
+            return export
+
+        def _process_dataframe(df):
+            """For terminal view (with ANSI colors)."""
+            if df.empty:
+                return df
+            df2 = df.applymap(_unwrap_deep)
+            df2 = df2.apply(_colorize_row, axis=1)
+
+            def _fmt_cell(x):
+                if isinstance(x, str):  # leave colored strings
+                    return x
+                return _fmt2(x)
+
+            df2 = df2.applymap(_fmt_cell)
+
+            drop_cols = [
+                c
+                for c in df2.columns
+                if str(c).endswith("_score")
+                or c == "sector"
+                or str(c).strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
+            ]
+            df2 = df2.drop(columns=drop_cols, errors="ignore")
+
+            if "points" in df2.columns:
+                import pandas as pd
+
+                df2["points"] = pd.to_numeric(df2["points"], errors="coerce")
+
+            df2 = df2.where(df2.notna(), other="N/A")
+            return df2
+
+        def _sort_and_print(df, csv_name):
+            if df.empty:
+                return
+
+            # CSV export first (clean + flags)
+            if save_df:
+                export_df = _build_export(df)
+                # Sort by points (numeric) for the CSV as well
+                if "points" in export_df.columns:
+                    import pandas as pd
+
+                    pts = pd.to_numeric(export_df["points"], errors="coerce")
+                    export_df = (
+                        export_df.assign(_pts=pts.fillna(float("-inf")))
+                        .sort_values("_pts", ascending=False)
+                        .drop(columns="_pts")
+                    )
+                export_df.to_csv(csv_name)
+
+            # Terminal view (colored)
+            proc = _process_dataframe(df)
+            if "points" in proc.columns:
+                import pandas as pd
+
+                pts = pd.to_numeric(proc["points"], errors="coerce")
+                proc = (
+                    proc.assign(_pts=pts.fillna(float("-inf")))
+                    .sort_values("_pts", ascending=False)
+                    .drop(columns="_pts")
+                )
+
+            from tabulate import tabulate
+
+            print(tabulate(proc, headers="keys", tablefmt="fancy_grid", showindex=True))
+
+        # summaries
         if not self.summary.empty:
-            summary_colored = process_dataframe(self.summary).sort_values(
-                by="points", ascending=False
-            )
-            if save_df:
-                self.summary.to_csv("summary.csv")
-
-            # Optional debug: ensure the column is present
-            # print("Summary columns:", list(summary_colored.columns))
-
-            print(
-                tabulate(
-                    summary_colored,
-                    headers="keys",
-                    tablefmt="fancy_grid",
-                    showindex=True,
-                )
-            )
-
-        # --- investment summary ---
+            _sort_and_print(self.summary, "summary.csv")
         if not self.summary_investment.empty:
-            summary_investment_colored = process_dataframe(
-                self.summary_investment
-            ).sort_values(by="points", ascending=False)
-            if save_df:
-                self.summary_investment.to_csv("summary_investment.csv")
-
-            print(
-                tabulate(
-                    summary_investment_colored,
-                    headers="keys",
-                    tablefmt="fancy_grid",
-                    showindex=True,
-                )
-            )
+            _sort_and_print(self.summary_investment, "summary_investment.csv")
 
 
 def process_historical(
