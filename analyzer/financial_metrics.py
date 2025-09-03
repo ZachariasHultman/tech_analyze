@@ -9,6 +9,210 @@ from analyzer.metrics import ticker_reporting_currency_map
 import numpy as np
 
 
+# financial_metrics.py
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# ---------- small utils ----------
+YEARS = 3
+
+
+def _as_vals(seq: Optional[List[dict]]) -> List[Optional[float]]:
+    """Extract .value from a list of {value,..} dicts, keep order, allow None."""
+    if not isinstance(seq, list):
+        return []
+    out = []
+    for x in seq:
+        try:
+            out.append(float(x.get("value")))
+        except Exception:
+            out.append(None)
+    return out
+
+
+def _clean(vals: List[Optional[float]]) -> List[float]:
+    """Drop None; keep order."""
+    return [v for v in vals if v is not None]
+
+
+def _safe_div(a: Optional[float], b: Optional[float]) -> Optional[float]:
+    try:
+        if a is None or b in (None, 0):
+            return None
+        return float(a) / float(b)
+    except Exception:
+        return None
+
+
+def _cagr(first: Optional[float], last: Optional[float], years: int) -> Optional[float]:
+    """CAGR = (last/first)^(1/years) - 1, requires first>0, last>0."""
+    try:
+        if first is None or last is None or years <= 0:
+            return None
+        if first <= 0 or last <= 0:
+            return None
+        return (last / first) ** (1.0 / years) - 1.0
+    except Exception:
+        return None
+
+
+def _rolling_yoy_from_quarterly(vals):
+    out = [None] * len(vals)
+    for i in range(4, len(vals)):
+        ratio = _safe_div(vals[i], vals[i - 4])
+        out[i] = (ratio - 1.0) if ratio is not None else None
+    return out
+
+
+def _hit_rate(last_n: List[Optional[float]]) -> Optional[float]:
+    """Share of positives among last_n (ignoring None)."""
+    valid = [v for v in last_n if v is not None]
+    if not valid:
+        return None
+    return sum(1 for v in valid if v > 0) / float(len(valid))
+
+
+def _avg(vals: List[Optional[float]]) -> Optional[float]:
+    xs = _clean(vals)
+    if not xs:
+        return None
+    return sum(xs) / len(xs)
+
+
+# ---------- 1) Revenue y CAGR ----------
+
+
+def calculate_revenue_y_cagr(
+    ticker_analysis: Dict[str, Any],
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    """
+    Uses companyFinancialsByYear.sales (list of dicts with 'value') to compute y CAGR.
+    Returns (cagr, meta) where cagr is a float or None.
+    """
+    sales = _as_vals(ticker_analysis.get("companyFinancialsByYear", {}).get("sales"))
+    # Need at least years+1 points to span years full years (t-years to t)
+    if len(_clean(sales)) < YEARS + 1:
+        return None, {"reason": "not_enough_data", "points": len(_clean(sales))}
+    first, last = sales[-(YEARS + 1)], sales[-1]
+    cagr = _cagr(first, last, YEARS)
+    return cagr, {"first": first, "last": last, "years": YEARS}
+
+
+# ---------- 2) EPS y CAGR ----------
+
+
+def calculate_eps_y_cagr(
+    ticker_analysis: Dict[str, Any],
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    """
+    Uses companyKeyRatiosByYear.earningsPerShare to compute y CAGR.
+    """
+    eps = _as_vals(
+        ticker_analysis.get("companyKeyRatiosByYear", {}).get("earningsPerShare")
+    )
+    if len(_clean(eps)) < YEARS + 1:
+        return None, {"reason": "not_enough_data", "points": len(_clean(eps))}
+    first, last = eps[-(YEARS + 1)], eps[-1]
+    cagr = _cagr(first, last, YEARS)
+    return cagr, {"first": first, "last": last, "years": YEARS}
+
+
+# ---------- 3) Revenue YoY hit-rate (last 12 quarters) ----------
+
+
+def calculate_revenue_yoy_hit_rate(
+    ticker_analysis: Dict[str, Any], lookback_quarters: int = 12
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    """
+    Uses companyFinancialsByQuarter.sales to compute YoY per quarter (4Q lag)
+    and then the fraction of positive YoY in the last `lookback_quarters`.
+    """
+    q_sales = _as_vals(
+        ticker_analysis.get("companyFinancialsByQuarter", {}).get("sales")
+    )
+    if len(_clean(q_sales)) < 8:  # need at least 8 quarters to form some YoY
+        return None, {"reason": "not_enough_quarters", "points": len(_clean(q_sales))}
+    yoy = _rolling_yoy_from_quarterly(q_sales)
+    last_window = yoy[-lookback_quarters:] if lookback_quarters > 0 else yoy
+    hit = _hit_rate(last_window)
+    return hit, {
+        "window": lookback_quarters,
+        "positives": (
+            None
+            if hit is None
+            else hit * len([v for v in last_window if v is not None])
+        ),
+    }
+
+
+# ---------- 4) EPS YoY hit-rate (last 12 quarters) ----------
+
+
+def calculate_eps_yoy_hit_rate(
+    ticker_analysis: Dict[str, Any], lookback_quarters: int = 12
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    """
+    Uses companyKeyRatiosByQuarterQuarter.earningsPerShare for quarterly EPS,
+    computes YoY with 4Q lag, then fraction >0 in last `lookback_quarters`.
+    """
+    q_eps = _as_vals(
+        ticker_analysis.get("companyKeyRatiosByQuarterQuarter", {}).get(
+            "earningsPerShare"
+        )
+    )
+    if len(_clean(q_eps)) < 8:
+        return None, {"reason": "not_enough_quarters", "points": len(_clean(q_eps))}
+    yoy = _rolling_yoy_from_quarterly(q_eps)
+    last_window = yoy[-lookback_quarters:] if lookback_quarters > 0 else yoy
+    hit = _hit_rate(last_window)
+    return hit, {
+        "window": lookback_quarters,
+        "positives": (
+            None
+            if hit is None
+            else hit * len([v for v in last_window if v is not None])
+        ),
+    }
+
+
+# ---------- 5) Net margin vs y average ----------
+
+
+def calculate_net_margin_vs_avg(
+    ticker_info: Dict[str, Any], ticker_analysis: Dict[str, Any], years: int = 3
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    """
+    latest / y average of profit margin. Latest from ticker_info.keyIndicators.netMargin.
+    y avg from companyFinancialsByYear.profitMargin (last `years` points).
+    """
+    latest = ticker_info.get("keyIndicators", {}).get("netMargin")
+    yr_margins = _as_vals(
+        ticker_analysis.get("companyFinancialsByYear", {}).get("profitMargin")
+    )
+    avg_y = _avg(yr_margins[-years:]) if yr_margins else None
+    ratio = _safe_div(latest, avg_y)
+    return ratio, {"latest": latest, "avg_years": years, "avg": avg_y}
+
+
+# ---------- 6) ROE vs y average ----------
+
+
+def calculate_roe_vs_avg(
+    ticker_info: Dict[str, Any], ticker_analysis: Dict[str, Any], years: int = 3
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    """
+    latest / y average of ROE. Latest from ticker_info.keyIndicators.returnOnEquity.
+    y avg from companyKeyRatiosByYear.returnOnEquityRatio.
+    """
+    latest = ticker_info.get("keyIndicators", {}).get("returnOnEquity")
+    yr_roe = _as_vals(
+        ticker_analysis.get("companyKeyRatiosByYear", {}).get("returnOnEquityRatio")
+    )
+    avg_y = _avg(yr_roe[-years:]) if yr_roe else None
+    ratio = _safe_div(latest, avg_y)
+    return ratio, {"latest": latest, "avg_years": years, "avg": avg_y}
+
+
 def get_ohlc_dataframe(
     *,
     ticker_id: str,
@@ -121,15 +325,6 @@ def calculate_sma200(avanza, ticker_id, *, use_hist: bool = False, hist_row=None
     return sma200, last_week_avg, slope, df_hist
 
 
-def calculate_profit_per_share(ticker_analysis):
-    ticker_profit_per_share = [
-        entry["value"]
-        for entry in ticker_analysis["companyKeyRatiosByYear"]["earningsPerShare"]
-        if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
-    ][-1]
-    return ticker_profit_per_share
-
-
 # -------------------------------------------------------------------
 def calculate_profit_per_share_trend(ticker_analysis, ticker_id=None):
     raw = [
@@ -146,17 +341,6 @@ def calculate_profit_per_share_trend(ticker_analysis, ticker_id=None):
 
 
 # -------------------------------------------------------------------
-def calculate_profit_margin(ticker_analysis):
-    raw = [
-        {"date": e["date"], "value": e["value"]}
-        for e in ticker_analysis["companyFinancialsByYear"]["profitMargin"]
-        if e.get("reportType") == "FULL_YEAR" and "date" in e
-    ]
-    if not raw:
-        return None, None
-
-    latest = float(raw[-1]["value"])  # newest numeric margin
-    return latest, raw  # (value, full record list)
 
 
 def calculate_profit_margin_trend(ticker_analysis, ticker_id=None):
@@ -215,18 +399,48 @@ def calculate_PE(ticker_analysis):
         return None, None
 
 
-def calculate_CAGR_helper(df, years):
+def calculate_CAGR_helper(df, years: int):
+    """
+    CAGR over `years` using the last trading day ON OR BEFORE the target start date
+    and the most recent close.
+    """
     df = df.sort_index()
+    if df.empty or len(df) < 2:
+        return None
+
+    # Ensure DatetimeIndex
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            df = df.copy()
+            df.index = pd.to_datetime(df.index)
+            df = df.sort_index()
+        except Exception:
+            return None
+
+    # Cull bad/NaN closes
+    if "close" not in df.columns:
+        return None
+    df = df[["close"]].dropna()
+    if df.empty:
+        return None
 
     end_date = df.index[-1]
-
     start_date = end_date - pd.DateOffset(years=years)
 
-    closest_start_idx = df.index.get_indexer([start_date], method="backfill")[0]
-    closest_start = df.iloc[closest_start_idx]["close"]
+    # Pick last trading day ON/BEFORE the target date (avoids future-shift bias)
+    # asof returns the latest label <= given date, or NaT if none
+    start_ix = df.index.asof(start_date)
+    if pd.isna(start_ix):  # no data that far back
+        return None
+
+    start_price = df.loc[start_ix, "close"]
     end_price = df["close"].iloc[-1]
 
-    cagr = (end_price / closest_start) ** (1 / years) - 1
+    # Safety—avoid nonsense
+    if pd.isna(start_price) or pd.isna(end_price) or start_price <= 0 or end_price <= 0:
+        return None
+
+    cagr = (end_price / start_price) ** (1 / years) - 1
     return float(cagr)
 
 
@@ -236,89 +450,110 @@ def calculate_closing_CAGR(
     *,
     use_hist: bool = False,
     hist_row: pd.Series | None = None,
-    years_tuple: tuple[int, ...] = (3, 2, 1),
+    years_tuple: tuple[int, ...] | None = None,
 ) -> list[float] | None:
     """
-    Return [CAGR_3Y, CAGR_2Y, CAGR_1Y] by default (old behaviour).
-
-    Parameters
-    ----------
-    use_hist : bool (default False)
-        • False → live fetch via Avanza (unchanged)
-        • True  → derive from hist_row["ohlc"] that you loaded with get_hist_data()
-    hist_row : pd.Series
-        The row from your historical DataFrame; required when use_hist=True.
-    years_tuple : tuple[int,...]
-        Which year-spans to calculate (defaults to (3,2,1) → old behaviour).
+    Returns [CAGR_y1, CAGR_y2, ...] in the same order as years_tuple.
+    If years_tuple is None, defaults to (YEARS, YEARS-1, ..., 1).
+    Entries with insufficient history return None.
     """
+    # Build default years tuple dynamically from global YEARS
+    try:
+        Y = int(YEARS)
+    except Exception:
+        Y = 3  # hard fallback if YEARS isn't defined
+    if years_tuple is None:
+        years_tuple = tuple(range(Y, 0, -1))  # e.g., 5,4,3,2,1
+
     # ── HISTORICAL MODE ────────────────────────────────────────────────
     if use_hist:
-        if (
-            hist_row is None
-            or "ohlc" not in hist_row
-            or hist_row["ohlc"].empty
-            or hist_row["ohlc"] is None
-        ):
+        if not isinstance(hist_row, pd.Series) or "ohlc" not in hist_row:
             return None
+        df = hist_row["ohlc"]
+        if df is None or getattr(df, "empty", True):
+            return None
+        df = df.rename(columns={"close": "close"}).copy()
+        # force numeric & sorted
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        df = df.dropna(subset=["close"]).sort_index()
 
-        df = hist_row["ohlc"].copy()
-        df = df.rename(columns={"close": "close"}).astype(float)
-        df = df.sort_index()
-        cagr_vals = [calculate_CAGR_helper(df, y) for y in years_tuple]
-        return cagr_vals if any(v is not None for v in cagr_vals) else None
+        vals = [calculate_CAGR_helper(df, y) for y in years_tuple]
+        return vals if any(v is not None for v in vals) else None
 
-    # ── LIVE (old) MODE ────────────────────────────────────────────────
+    # ── LIVE MODE (via Avanza) ────────────────────────────────────────
+    # Pick a long enough history window to cover max(years_tuple)
+    max_years = max(years_tuple) if years_tuple else 5
+    # Choose an Avanza period that comfortably covers the maximum span
+    period = TimePeriod.FIVE_YEARS
+    try:
+        if max_years <= 5:
+            period = TimePeriod.FIVE_YEARS
+        elif max_years <= 10 and hasattr(TimePeriod, "TEN_YEARS"):
+            period = TimePeriod.TEN_YEARS
+        elif hasattr(TimePeriod, "FIFTEEN_YEARS"):
+            period = TimePeriod.FIFTEEN_YEARS
+    except Exception:
+        # keep FIVE_YEARS if enum probing fails
+        pass
+
     try:
         ticker_chart_data = avanza.get_chart_data(
             order_book_id=ticker,
-            period=TimePeriod.FIVE_YEARS,
+            period=period,
             resolution=Resolution.DAY,
         )
     except requests.exceptions.HTTPError:
         return None
 
-    timestamps = [e["timestamp"] for e in ticker_chart_data["ohlc"]]
-    closing_prices = [e["close"] for e in ticker_chart_data["ohlc"]]
-    dates = pd.to_datetime(timestamps, unit="ms")
-    data = pd.DataFrame({"close": closing_prices}, index=dates).sort_index()
-
-    return [calculate_CAGR_helper(data, y) for y in years_tuple]
-
-
-def calculate_PEG(pe: list[float], cagr: list[float] | None):
-    """
-    PEG = PE / CAGR
-    • `pe`    list of the last 3 PE values  (oldest → newest)
-    • `cagr`  list of matching CAGR values (ditto)
-    """
-    if cagr is None or not pe:
+    ohlc = ticker_chart_data.get("ohlc") or []
+    if not ohlc:
         return None
 
-    pe = pe[-3:]
-    peg = [float(p / c) if c else None for p, c in zip(pe, cagr)]
-    return peg[-1]  # return most recent PEG
+    dates = pd.to_datetime([e["timestamp"] for e in ohlc], unit="ms", errors="coerce")
+    closes = pd.to_numeric([e.get("close") for e in ohlc], errors="coerce")
+    data = pd.DataFrame({"close": closes}, index=dates).dropna().sort_index()
+
+    vals = [calculate_CAGR_helper(data, y) for y in years_tuple]
+    return vals if any(v is not None for v in vals) else None
+
+
+def calculate_price_cagr_status(
+    avanza,
+    ticker,
+    *,
+    use_hist: bool = False,
+    hist_row: pd.Series | None = None,
+):
+    """
+    Returns a single CAGR over the global YEARS for price.
+    """
+    # one-value tuple with the global YEARS
+    try:
+        yspan = YEARS
+    except NameError:
+        yspan = 3  # fallback if YEARS not defined
+
+    vals = calculate_closing_CAGR(
+        avanza,
+        ticker,
+        use_hist=use_hist,
+        hist_row=hist_row,
+        years_tuple=(yspan,),
+    )
+    if not vals:
+        return None
+    return vals[0]
 
 
 def sync_currency(from_currency: str, to_currency: str = "SEK"):
-    """
-    Converts between reporting and trading currencies.
-    Returns:
-        currency_match (bool)
-        convert_to_sek (bool)
-        exchange_rate (float)
-        sek_rate (float)
-    """
     c = CurrencyConverter()
-
     if not from_currency or not to_currency:
         return False, False, None, None
-
     exchange_rate = c.convert(1, from_currency, to_currency)
+    # Keep API stable, but mark SEK path unused by caller after patch
     sek_rate = c.convert(1, from_currency, "SEK")
-
     currency_match = from_currency == to_currency
-    convert_to_sek = to_currency != "SEK"
-
+    convert_to_sek = False  # <— force off; we won't use SEK conversion in FCFY
     return currency_match, convert_to_sek, exchange_rate, sek_rate
 
 
@@ -382,16 +617,14 @@ def calculate_free_cashflow_yield(yahoo_ticker, stock_info, df_hist=None):
 
         # --- FX normalization ---
         # sync_currency may return None for rates; treat None as 1.0 to avoid float * NoneType
-        currency_match, convert_to_sek, ex_rate, sek_rate = sync_currency(
+        currency_match, _, ex_rate, _ = sync_currency(
             from_currency=from_currency, to_currency=to_currency
         )
-        ex_rate = 1.0 if ex_rate is None else ex_rate
-        sek_rate = 1.0 if sek_rate is None else sek_rate
+        ex_rate = 1.0 if ex_rate is None else float(ex_rate)
 
+        # Convert FCF to the same currency as market_cap; do not convert to SEK here.
         if not currency_match:
-            free_cash_flow_hist = free_cash_flow_hist * float(ex_rate)
-        if convert_to_sek:
-            free_cash_flow_hist = free_cash_flow_hist * float(sek_rate)
+            free_cash_flow_hist = free_cash_flow_hist * ex_rate
 
         # --- historical FCF yield (requires shares_outstanding & df_hist) ---
         fcf_yield_hist = {}
