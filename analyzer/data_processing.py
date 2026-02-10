@@ -86,12 +86,12 @@ def get_data(
         manager._initialize_template(ticker_name, sector)
 
         # --- OHLC data (needed for CAGR, FCFY) ---
-        _, _, _, closing_hist_data = (
+        sma200, weekly_average_close, sma200_slope, closing_hist_data = (
             calculate_sma200(avanza, ticker_id)
         )
 
         # --- revenue trend (year only, quarterly removed as too noisy) ---
-        rev_trend_year, _, rev_year_hist, rev_quarter_hist = (
+        rev_trend_year, rev_trend_quarter, rev_year_hist, rev_quarter_hist = (
             calculate_revenue_trend(ticker_analysis)
         )
         manager._update(
@@ -139,12 +139,15 @@ def get_data(
         manager._update(ticker_name, sector, "net margin vs avg status", nm_vs_avg)
         manager._update(ticker_name, sector, "roe vs avg status", roe_vs_avg)
 
+        # --- NEW: gross margin stability ---
         gm_stability = calculate_gross_margin_stability(ticker_analysis)
         manager._update(ticker_name, sector, "gross margin stability status", gm_stability)
 
+        # --- NEW: dividend yield ---
         div_yield = calculate_dividend_yield(ticker_info)
         manager._update(ticker_name, sector, "dividend yield status", div_yield)
 
+        # --- NEW: Piotroski F-Score ---
         f_score = calculate_piotroski_f_score(
             ticker_analysis, ticker_info, fcfy, de_ratio, roe
         )

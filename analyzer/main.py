@@ -76,7 +76,7 @@ def main():
                 item
                 for item in avanza.get_watchlists()
                 if item.get("name")
-                == "Äger"  # "Utdelare"  # "Test"  # "Mina favoritaktier"  # "Berkshire"   # "Mina favoritaktier"  # "Äger"
+                == "Test"  # "Utdelare"  # "Test"  # "Mina favoritaktier"  # "Berkshire"   # "Mina favoritaktier"  # "Äger"
             ),
             None,
         )["orderbookIds"]
