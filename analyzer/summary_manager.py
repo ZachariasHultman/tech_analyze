@@ -50,19 +50,21 @@ class SummaryManager:
             "fcfy_pe ratio status": None,
             "roe_de ratio status": None,
             "net debt - ebitda status": None,
+            # growth
             "revenue y cagr status": None,
             "eps y cagr status": None,
+            # quality
             "net margin vs avg status": None,
             "roe vs avg status": None,
-            # trends/technicals
-            "revenue trend quarter status": None,
+            "gross margin stability status": None,
+            # consistency
             "revenue trend year status": None,
             "revenue yoy hit-rate status": None,
             "eps yoy hit-rate status": None,
-            "profit margin trend status": None,
-            "profit per share trend status": None,
-            "sma200 slope status": None,
-            "price y cagr status": None,
+            # shareholder return
+            "dividend yield status": None,
+            # composite quality
+            "piotroski f-score status": None,
         }
 
         self.summary_investment = {}
@@ -79,10 +81,9 @@ class SummaryManager:
             "nav discount status": None,
             "calculated nav discount status": None,
             "nav discount trend status": None,
-            # trends/technical
-            "profit per share trend status": None,
-            "sma200 slope status": None,
+            # fundamentals
             "net debt - ebitda status": None,
+            "dividend yield status": None,
         }
 
     def _initialize_template(self, key, sector):
@@ -162,6 +163,15 @@ class SummaryManager:
         return 0
 
     def _assign_points(self, row, metric, threshold_override=None):
+        """Score a metric using continuous linear interpolation.
+
+        Instead of the old {-weight, 0, +weight} bucketing, scores are
+        interpolated linearly between NOK and OK so that a value halfway
+        between the thresholds gets ~0 rather than being lumped with the
+        worst or best values.
+
+        Returns a float in [-weight, +weight].
+        """
         weight = self._assign_weight(metric)
         if weight == 0:
             return 0
@@ -193,18 +203,40 @@ class SummaryManager:
             return nok, ok
 
         def _score_scalar(x, nok, ok):
+            """Continuous scoring with linear interpolation between NOK and OK.
+
+            For higher-is-better (direction == +1):
+              x >= ok      → +weight
+              x <= nok     → -weight
+              nok < x < ok → linearly interpolated from -weight to +weight
+
+            For lower-is-better (direction == -1):
+              x <= ok      → +weight
+              x >= nok     → -weight
+              ok < x < nok → linearly interpolated from +weight to -weight
+            """
             if direction == +1:
                 if x >= ok:
                     return +weight
                 if x <= nok:
                     return -weight
-                return 0
+                # linear interpolation: nok → -weight, ok → +weight
+                span = ok - nok
+                if span == 0:
+                    return 0
+                t = (x - nok) / span  # 0 at nok, 1 at ok
+                return weight * (2 * t - 1)  # -weight at t=0, +weight at t=1
             else:
                 if x <= ok:
                     return +weight
                 if x >= nok:
                     return -weight
-                return 0
+                # linear interpolation: ok → +weight, nok → -weight
+                span = nok - ok
+                if span == 0:
+                    return 0
+                t = (x - ok) / span  # 0 at ok, 1 at nok
+                return weight * (1 - 2 * t)  # +weight at t=0, -weight at t=1
 
         def _extract_pair(cfg_obj):
             if isinstance(cfg_obj, (list, tuple)) and len(cfg_obj) == 2:
@@ -261,11 +293,8 @@ class SummaryManager:
             xv1, xv2 = rv[0][0], rv[0][1]
         s1 = _score_scalar(float(xv1), nok1, ok1)
         s2 = _score_scalar(float(xv2), nok2, ok2)
-        if s1 > 0 and s2 > 0:
-            return +weight
-        if s1 < 0 and s2 < 0:
-            return -weight
-        return 0
+        # average the two component scores for composite metrics
+        return (s1 + s2) / 2.0
 
     def _display(self, save_df=False):
         """Displays DataFrame with tabulate formatting for a cleaner output."""
@@ -506,7 +535,7 @@ def process_historical(
             num = _get_val_from_row_or_summary(row, ticker, sector, num_name)
             den = _get_val_from_row_or_summary(row, ticker, sector, den_name)
 
-            num = _to_pct(num) if num_is_rate else _unwrap(num)
+            num = _to_pct(num, force_convert=True) if num_is_rate else _unwrap(num)
             ratio_val = _safe_div(num, den)
 
             if ratio_val is not None:

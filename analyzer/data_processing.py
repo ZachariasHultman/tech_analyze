@@ -9,7 +9,13 @@ def _unwrap(v):
     return v[0] if isinstance(v, (list, tuple)) and len(v) == 1 else v
 
 
-def _to_pct(x):
+def _to_pct(x, force_convert=False):
+    """Convert a value to percent if `force_convert` is True.
+
+    The old heuristic (multiply by 100 when 0 < |x| < 1) is dangerous
+    because legitimate values like PE=0.5, ROE=0.8 get corrupted.
+    Now only converts when the caller explicitly says the field is a rate.
+    """
     x = _unwrap(x)
     if x is None:
         return None
@@ -17,8 +23,7 @@ def _to_pct(x):
         x = float(x)
     except Exception:
         return None
-    # if stored as fraction (0.12), convert to percent (12.0)
-    return x * 100.0 if 0 < abs(x) < 1 else x
+    return x * 100.0 if force_convert else x
 
 
 def _safe_div(a, b):
@@ -48,7 +53,7 @@ def enrich_ratios(df: pd.DataFrame) -> pd.DataFrame:
         if num in out.columns and den in out.columns:
             vals = []
             for i in out.index:
-                n = _to_pct(out.at[i, num]) if num_is_rate else _unwrap(out.at[i, num])
+                n = _to_pct(out.at[i, num], force_convert=True) if num_is_rate else _unwrap(out.at[i, num])
                 d = out.at[i, den]
                 vals.append(_safe_div(n, d))
             out[out_col] = vals
@@ -80,29 +85,17 @@ def get_data(
         sector = [sector for sector in ticker_info["sectors"]]
         manager._initialize_template(ticker_name, sector)
 
-        # --- technicals ---
+        # --- OHLC data (needed for CAGR, FCFY) ---
         sma200, weekly_average_close, sma200_slope, closing_hist_data = (
             calculate_sma200(avanza, ticker_id)
         )
-        manager._update(ticker_name, sector, "sma200 slope status", sma200_slope)
 
-        # --- trends ---
-        pps_trend, pps_hist = calculate_profit_per_share_trend(ticker_analysis)
-        manager._update(ticker_name, sector, "profit per share trend status", pps_trend)
-
-        profit_margin_trend = calculate_profit_margin_trend(ticker_analysis)
-        manager._update(
-            ticker_name, sector, "profit margin trend status", profit_margin_trend
-        )
-
+        # --- revenue trend (year only, quarterly removed as too noisy) ---
         rev_trend_year, rev_trend_quarter, rev_year_hist, rev_quarter_hist = (
             calculate_revenue_trend(ticker_analysis)
         )
         manager._update(
             ticker_name, sector, "revenue trend year status", rev_trend_year
-        )
-        manager._update(
-            ticker_name, sector, "revenue trend quarter status", rev_trend_quarter
         )
 
         # --- valuation/growth/cashflow base fields (sector-agnostic ratios use these) ---
@@ -146,14 +139,23 @@ def get_data(
         manager._update(ticker_name, sector, "net margin vs avg status", nm_vs_avg)
         manager._update(ticker_name, sector, "roe vs avg status", roe_vs_avg)
 
-        # Price CAGR over YEARS
-        price_cagr = calculate_price_cagr_status(avanza, ticker_id)
-        manager._update(ticker_name, sector, "price y cagr status", price_cagr)
+        # --- NEW: gross margin stability ---
+        gm_stability = calculate_gross_margin_stability(ticker_analysis)
+        manager._update(ticker_name, sector, "gross margin stability status", gm_stability)
+
+        # --- NEW: dividend yield ---
+        div_yield = calculate_dividend_yield(ticker_info)
+        manager._update(ticker_name, sector, "dividend yield status", div_yield)
+
+        # --- NEW: Piotroski F-Score ---
+        f_score = calculate_piotroski_f_score(
+            ticker_analysis, ticker_info, fcfy, de_ratio, roe
+        )
+        manager._update(ticker_name, sector, "piotroski f-score status", f_score)
 
         if get_hist:
             hist["sector"] = sector
             hist["ohlc"] = closing_hist_data
-            hist["profit_per_share"] = pps_hist
             hist["pe"] = pe_hist
             hist["roe"] = roe_hist
             hist["revenue_year"] = rev_year_hist
@@ -167,15 +169,10 @@ def get_data(
         sector = [{"sectorId": "51", "sectorName": "Investmentbolag"}]
         manager._initialize_template(ticker_name, sector)
 
-        # --- technicals ---
+        # --- OHLC data ---
         sma200, weekly_average_close, sma200_slope, closing_hist_data = (
             calculate_sma200(avanza, ticker_id)
         )
-        manager._update(ticker_name, sector, "sma200 slope status", sma200_slope)
-
-        # --- trends ---
-        pps_trend, pps_hist = calculate_profit_per_share_trend(ticker_analysis)
-        manager._update(ticker_name, sector, "profit per share trend status", pps_trend)
 
         # --- base fields for ratios ---
         pe, pe_hist = calculate_PE(ticker_analysis)
@@ -184,11 +181,15 @@ def get_data(
             calculate_free_cashflow_yield(yahoo_ticker, ticker_info)
         )
         roe, roe_hist = calculate_roe(ticker_analysis)
+        nd_ebitda_ratio, nd_ebitda_hist = extract_netdebt_ebitda_ratio(ticker_analysis)
 
         manager._update(ticker_name, sector, "pe", pe[-1] if pe else None)
         manager._update(ticker_name, sector, "cagr", cagr[-1] if cagr else None)
         manager._update(ticker_name, sector, "fcfy", fcfy)
         manager._update(ticker_name, sector, "roe", roe)
+        manager._update(
+            ticker_name, sector, "net debt - ebitda status", nd_ebitda_ratio
+        )
 
         # --- NAV fields kept in investment template ---
         (
@@ -209,10 +210,13 @@ def get_data(
             ticker_name, sector, "nav discount trend status", nav_discount_trend
         )
 
+        # --- NEW: dividend yield ---
+        div_yield = calculate_dividend_yield(ticker_info)
+        manager._update(ticker_name, sector, "dividend yield status", div_yield)
+
         if get_hist:
             hist["sector"] = sector
             hist["ohlc"] = closing_hist_data
-            hist["profit_per_share"] = pps_hist
             hist["pe"] = pe_hist
             hist["roe"] = roe_hist
             hist["nav_discount"] = nav_discount_hist
@@ -258,6 +262,8 @@ def calculate_score(manager, metrics_to_score=None):
         score_cols = [c for c in score_data if c.endswith("_score")]
         summary["points"] = summary[score_cols].sum(axis=1)
 
+        # Symmetric bonus/penalty: +1 when ALL highest-weight metrics score
+        # positively, -1 when ALL score negatively. No bonus otherwise.
         bonus_metrics = [
             col for col in HIGHEST_WEIGHT_METRICS if col in summary.columns
         ]
@@ -267,9 +273,13 @@ def calculate_score(manager, metrics_to_score=None):
             metrics_to_score
         ):
             if all(col in summary.columns for col in existing_bonus_score_cols):
-                summary["points"] += (
+                all_positive = (
                     (summary[existing_bonus_score_cols] > 0).all(axis=1).astype(int)
                 )
+                all_negative = (
+                    (summary[existing_bonus_score_cols] < 0).all(axis=1).astype(int)
+                )
+                summary["points"] += all_positive - all_negative
 
         return summary
 
