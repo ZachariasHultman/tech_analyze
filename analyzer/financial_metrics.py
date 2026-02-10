@@ -364,8 +364,16 @@ def calculate_revenue_trend(ticker_analysis, ticker_id=None):
         # all quarterly values
         q_vals = [d["value"] for d in qtr]
 
-        slope_year = float(calculate_slope(y_vals))
-        slope_quarter = float(calculate_slope(q_vals))
+        # Normalize slope to a percentage of the mean, so it's comparable
+        # across companies of different sizes. Raw slope on absolute revenue
+        # (e.g. 2e9 for PayPal) is meaningless for threshold comparison.
+        def _normalized_slope(vals):
+            s = float(calculate_slope(vals))
+            avg = sum(vals) / len(vals) if vals else 0
+            return s / abs(avg) if avg != 0 else 0.0
+
+        slope_year = _normalized_slope(y_vals)
+        slope_quarter = _normalized_slope(q_vals)
 
         return slope_year, slope_quarter, yr, qtr
 
@@ -545,132 +553,113 @@ def sync_currency(from_currency: str, to_currency: str = "SEK"):
     return currency_match, convert_to_sek, exchange_rate, sek_rate
 
 
+def _find_fcf_row(cash_flow_df):
+    """Find the Free Cash Flow row in a yfinance cashflow DataFrame.
+
+    yfinance versions use different labels; try common variants.
+    """
+    for label in ("Free Cash Flow", "FreeCashFlow", "free_cash_flow"):
+        if label in cash_flow_df.index:
+            return cash_flow_df.loc[label]
+    # fallback: case-insensitive substring match
+    for idx in cash_flow_df.index:
+        if "free" in str(idx).lower() and "cash" in str(idx).lower():
+            return cash_flow_df.loc[idx]
+    return None
+
+
 def calculate_free_cashflow_yield(yahoo_ticker, stock_info, df_hist=None):
+    """Compute FCF yield = latest_FCF / market_cap.
+
+    Returns (fcf_yield, latest_fcf, fcf_yield_hist_dict, fcf_hist_dict).
+    Simplified: uses market_cap from Avanza directly (same currency as
+    the stock price), so FX conversion is only needed when yfinance
+    reports FCF in a different currency than the listing.
+    """
     try:
-        # --- base inputs ---
-        from_currency = ticker_reporting_currency_map.get(yahoo_ticker.ticker)
+        # --- market cap from Avanza ---
         ki = stock_info.get("keyIndicators", {}) if isinstance(stock_info, dict) else {}
         mc_obj = ki.get("marketCapital", {}) if isinstance(ki, dict) else {}
-        to_currency = mc_obj.get("currency")
         market_cap = mc_obj.get("value")
+        listing_currency = mc_obj.get("currency")
 
-        # guard market_cap
-        if (
-            market_cap is None
-            or not isinstance(market_cap, (int, float))
-            or market_cap <= 0
-        ):
+        if not isinstance(market_cap, (int, float)) or market_cap <= 0:
             return None, None, None, None
 
-        # infer shares outstanding
-        shares_outstanding = None
-        if (
-            df_hist is not None
-            and isinstance(df_hist, pd.DataFrame)
-            and not df_hist.empty
-        ):
-            try:
-                last_close_price = float(df_hist["close"].iloc[-1])
-                if last_close_price > 0:
-                    shares_outstanding = market_cap / last_close_price
-            except Exception:
-                shares_outstanding = None
+        # --- FCF from yfinance ---
+        cash_flow_df = getattr(yahoo_ticker, "cashflow", None)
+        if cash_flow_df is None or not isinstance(cash_flow_df, pd.DataFrame) or cash_flow_df.empty:
+            return None, None, None, None
 
-        # fallback: try yfinance info
+        fcf_series = _find_fcf_row(cash_flow_df)
+        if fcf_series is None:
+            print(f"  FCF row not found for {yahoo_ticker.ticker}")
+            return None, None, None, None
+
+        fcf_series = pd.to_numeric(fcf_series, errors="coerce")
+
+        # --- FX: only convert when reporting currency differs from listing ---
+        reporting_currency = ticker_reporting_currency_map.get(yahoo_ticker.ticker)
+        if reporting_currency and listing_currency and reporting_currency != listing_currency:
+            try:
+                currency_match, _, ex_rate, _ = sync_currency(
+                    from_currency=reporting_currency, to_currency=listing_currency
+                )
+                if not currency_match and ex_rate is not None:
+                    fcf_series = fcf_series * float(ex_rate)
+            except Exception:
+                pass  # if FX fails, use raw values (usually same currency)
+
+        # --- latest FCF yield ---
+        clean = fcf_series.dropna()
+        if clean.empty:
+            return None, None, None, None
+
+        latest_fcf = float(clean.iloc[0])  # most recent year first in yfinance
+        fcf_yield_now = latest_fcf / market_cap
+
+        # --- historical FCF yields (FCF / market_cap at each reporting date) ---
+        fcf_yield_hist = {}
+        fcf_hist_dict = {}
+
+        shares_outstanding = None
+        if df_hist is not None and isinstance(df_hist, pd.DataFrame) and not df_hist.empty:
+            try:
+                last_close = float(df_hist["close"].iloc[-1])
+                if last_close > 0:
+                    shares_outstanding = market_cap / last_close
+            except Exception:
+                pass
+
         if shares_outstanding is None:
             try:
                 so = getattr(yahoo_ticker, "info", {}).get("sharesOutstanding")
                 if isinstance(so, (int, float)) and so > 0:
                     shares_outstanding = float(so)
             except Exception:
-                shares_outstanding = None
-
-        # if still missing, we can compute current FCFY via market_cap, but no hist yields
-        # --- fetch cash flow ---
-        cash_flow_df = getattr(yahoo_ticker, "cashflow", None)
-        if (
-            cash_flow_df is None
-            or not isinstance(cash_flow_df, pd.DataFrame)
-            or cash_flow_df.empty
-        ):
-            return None, None, None, None
-        if "Free Cash Flow" not in cash_flow_df.index:
-            print(" 'Free Cash Flow' not found for", yahoo_ticker.ticker)
-            return None, None, None, None
-
-        free_cash_flow_hist = cash_flow_df.loc["Free Cash Flow"].copy()
-
-        # coerce to numeric
-        free_cash_flow_hist = pd.to_numeric(free_cash_flow_hist, errors="coerce")
-
-        # --- FX normalization ---
-        # sync_currency may return None for rates; treat None as 1.0 to avoid float * NoneType
-        currency_match, _, ex_rate, _ = sync_currency(
-            from_currency=from_currency, to_currency=to_currency
-        )
-        ex_rate = 1.0 if ex_rate is None else float(ex_rate)
-
-        # Convert FCF to the same currency as market_cap; do not convert to SEK here.
-        if not currency_match:
-            free_cash_flow_hist = free_cash_flow_hist * ex_rate
-
-        # --- historical FCF yield (requires shares_outstanding & df_hist) ---
-        fcf_yield_hist = {}
-        if (
-            shares_outstanding
-            and df_hist is not None
-            and isinstance(df_hist, pd.DataFrame)
-            and not df_hist.empty
-        ):
-            try:
-                df_hist = df_hist.copy()
-                df_hist.index = pd.to_datetime(df_hist.index)
-            except Exception:
                 pass
-            for dt, fcf in free_cash_flow_hist.items():
-                if pd.isna(fcf):
-                    continue
+
+        for dt, fcf_val in fcf_series.items():
+            dt_str = pd.to_datetime(dt).strftime("%Y-%m-%d")
+            fcf_hist_dict[dt_str] = None if pd.isna(fcf_val) else float(fcf_val)
+
+            if pd.isna(fcf_val) or shares_outstanding is None:
+                continue
+            if df_hist is not None and isinstance(df_hist, pd.DataFrame) and not df_hist.empty:
                 try:
-                    # align to the latest price <= dt
-                    close_price = df_hist.loc[: pd.to_datetime(dt)]["close"].iloc[-1]
-                    market_cap_hist = float(close_price) * float(shares_outstanding)
-                    if market_cap_hist > 0:
-                        fcf_yield_hist[pd.to_datetime(dt).strftime("%Y-%m-%d")] = (
-                            float(fcf) / market_cap_hist
-                        )
+                    df_tmp = df_hist.copy()
+                    df_tmp.index = pd.to_datetime(df_tmp.index)
+                    close_price = float(df_tmp.loc[:pd.to_datetime(dt)]["close"].iloc[-1])
+                    mc_hist = close_price * shares_outstanding
+                    if mc_hist > 0:
+                        fcf_yield_hist[dt_str] = float(fcf_val) / mc_hist
                 except Exception:
                     continue
 
-        # --- latest values ---
-        latest_fcf = None
-        try:
-            latest_fcf = float(free_cash_flow_hist.dropna().iloc[0])
-        except Exception:
-            latest_fcf = None
+        return fcf_yield_now, latest_fcf, fcf_yield_hist, fcf_hist_dict
 
-        fcf_yield_now = (
-            (latest_fcf / market_cap)
-            if (latest_fcf is not None and market_cap)
-            else None
-        )
-
-        # serialize FCF hist
-        free_cf_hist_dict = {
-            pd.to_datetime(dt).strftime("%Y-%m-%d"): (
-                None if pd.isna(val) else float(val)
-            )
-            for dt, val in free_cash_flow_hist.items()
-        }
-
-        return (
-            fcf_yield_now,  # scalar or None
-            latest_fcf,  # scalar or None
-            fcf_yield_hist,  # dict
-            free_cf_hist_dict,  # dict
-        )
-
-    except (KeyError, IndexError, TypeError, ValueError) as e:
-        print("calculate_free_cashflow_yield failed:", e)
+    except Exception as e:
+        print(f"calculate_free_cashflow_yield failed for {yahoo_ticker.ticker}: {e}")
         return None, None, None, None
 
 
@@ -843,19 +832,21 @@ def calculate_gross_margin_stability(
 def calculate_dividend_yield(ticker_info: Dict[str, Any]) -> Optional[float]:
     """
     Extract current dividend yield from ticker_info.keyIndicators.directYield.
-    Returns yield as a fraction (e.g. 0.035 for 3.5%), or None.
+    Returns yield as a fraction (e.g. 0.035 for 3.5%).
+    Returns 0.0 (not None) when no dividend data exists, so the scoring
+    system correctly penalizes non-dividend payers instead of skipping them.
     """
     try:
         dy = ticker_info.get("keyIndicators", {}).get("directYield")
         if dy is None:
-            return None
+            return 0.0
         dy = float(dy)
         # Avanza stores as percentage (e.g. 3.5), normalize to fraction
         if dy > 1:
             dy = dy / 100.0
         return dy
     except Exception:
-        return None
+        return 0.0
 
 
 def calculate_piotroski_f_score(
