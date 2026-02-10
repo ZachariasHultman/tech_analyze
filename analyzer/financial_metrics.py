@@ -45,13 +45,34 @@ def _safe_div(a: Optional[float], b: Optional[float]) -> Optional[float]:
 
 
 def _cagr(first: Optional[float], last: Optional[float], years: int) -> Optional[float]:
-    """CAGR = (last/first)^(1/years) - 1, requires first>0, last>0."""
+    """CAGR = (last/first)^(1/years) - 1.
+
+    When both values are positive, uses standard CAGR formula.
+    When first is negative and last is positive (turnaround), returns an
+    annualized absolute growth rate so these stocks aren't silently dropped.
+    """
     try:
         if first is None or last is None or years <= 0:
             return None
-        if first <= 0 or last <= 0:
+        if first == 0:
             return None
-        return (last / first) ** (1.0 / years) - 1.0
+        # Standard case: both positive
+        if first > 0 and last > 0:
+            return (last / first) ** (1.0 / years) - 1.0
+        # Turnaround: negative → positive (strong improvement)
+        if first < 0 and last > 0:
+            # Use absolute change annualized: treats as growth from |first| to last
+            return ((last - first) / abs(first)) ** (1.0 / years) - 1.0
+        # Deterioration: positive → negative
+        if first > 0 and last <= 0:
+            return -1.0  # total loss
+        # Both negative: still deteriorating, or improving toward zero
+        if first < 0 and last < 0:
+            # Improving if loss is shrinking (last closer to 0)
+            if abs(last) < abs(first):
+                return (abs(first) / abs(last)) ** (1.0 / years) - 1.0
+            return -(abs(last) / abs(first)) ** (1.0 / years) + 1.0
+        return None
     except Exception:
         return None
 
@@ -323,39 +344,6 @@ def calculate_sma200(avanza, ticker_id, *, use_hist: bool = False, hist_row=None
     )
     sma200, last_week_avg, slope = calc_sma200_metrics(df_hist)
     return sma200, last_week_avg, slope, df_hist
-
-
-# -------------------------------------------------------------------
-def calculate_profit_per_share_trend(ticker_analysis, ticker_id=None):
-    raw = [
-        {"date": e["date"], "value": e["value"]}
-        for e in ticker_analysis["companyKeyRatiosByYear"]["earningsPerShare"]
-        if e.get("reportType") == "FULL_YEAR" and "date" in e
-    ]
-    if len(raw) < 2:
-        return None, None
-
-    values = [d["value"] for d in raw][-5:]  # last five EPS numbers
-    slope = calculate_slope(values, ticker_id)  # expects numeric list
-    return float(slope), raw  # (slope, full record list)
-
-
-# -------------------------------------------------------------------
-
-
-def calculate_profit_margin_trend(ticker_analysis, ticker_id=None):
-    ticker_profit_margin = [
-        entry["value"]
-        for entry in ticker_analysis["companyFinancialsByYear"]["profitMargin"]
-        if "reportType" in entry and entry["reportType"] == "FULL_YEAR"
-    ][-5:]
-    # ticker_profit_margin = z_score(ticker_profit_margin)
-    if len(ticker_profit_margin) > 1:
-        slope = calculate_slope(ticker_profit_margin, ticker_id)
-        return float(slope)
-    else:
-        return None
-
 
 def calculate_revenue_trend(ticker_analysis, ticker_id=None):
     # --- build dict-lists --------------------------------------------------
@@ -826,6 +814,147 @@ def calculate_NAV_discount(ticker_name):
         nav_discount_raw,
         calc_nav_discount_raw,
     )
+
+
+def calculate_gross_margin_stability(
+    ticker_analysis: Dict[str, Any], years: int = 5
+) -> Optional[float]:
+    """
+    Coefficient of variation (std/mean) of gross margin over `years` years.
+    Lower = more stable = better for long-term investing.
+    Returns the CV as a float, or None if insufficient data.
+    Uses profitMargin from companyFinancialsByYear as a proxy when
+    gross margin isn't directly available.
+    """
+    margins = _as_vals(
+        ticker_analysis.get("companyFinancialsByYear", {}).get("profitMargin")
+    )
+    clean = _clean(margins[-years:]) if margins else []
+    if len(clean) < 3:
+        return None
+    avg = sum(clean) / len(clean)
+    if avg == 0:
+        return None
+    std = (sum((x - avg) ** 2 for x in clean) / len(clean)) ** 0.5
+    cv = std / abs(avg)
+    return float(cv)
+
+
+def calculate_dividend_yield(ticker_info: Dict[str, Any]) -> Optional[float]:
+    """
+    Extract current dividend yield from ticker_info.keyIndicators.directYield.
+    Returns yield as a fraction (e.g. 0.035 for 3.5%), or None.
+    """
+    try:
+        dy = ticker_info.get("keyIndicators", {}).get("directYield")
+        if dy is None:
+            return None
+        dy = float(dy)
+        # Avanza stores as percentage (e.g. 3.5), normalize to fraction
+        if dy > 1:
+            dy = dy / 100.0
+        return dy
+    except Exception:
+        return None
+
+
+def calculate_piotroski_f_score(
+    ticker_analysis: Dict[str, Any],
+    ticker_info: Dict[str, Any],
+    fcfy: Optional[float] = None,
+    de_ratio: Optional[float] = None,
+    roe: Optional[float] = None,
+) -> Optional[int]:
+    """
+    Simplified Piotroski F-Score (0-9).
+    Tests profitability, leverage, and operating efficiency signals.
+
+    Profitability (4 points):
+      1. ROE > 0
+      2. Operating cash flow > 0 (FCF yield > 0 as proxy)
+      3. ROE improving year-over-year
+      4. Cash flow > net income (accruals quality)
+
+    Leverage (3 points):
+      5. D/E ratio decreased year-over-year
+      6. Current ratio improved (not available, skip → always 0)
+      7. No new share dilution (not available, skip → always 0)
+
+    Efficiency (2 points):
+      8. Gross margin improved year-over-year
+      9. Asset turnover improved year-over-year
+    """
+    score = 0
+
+    # --- Profitability ---
+    # 1. Positive ROE
+    if roe is not None and roe > 0:
+        score += 1
+
+    # 2. Positive operating cash flow (FCF yield as proxy)
+    if fcfy is not None and fcfy > 0:
+        score += 1
+
+    # 3. ROE improving (last year vs prior year)
+    roe_series = _as_vals(
+        ticker_analysis.get("companyKeyRatiosByYear", {}).get("returnOnEquityRatio")
+    )
+    roe_clean = _clean(roe_series)
+    if len(roe_clean) >= 2 and roe_clean[-1] > roe_clean[-2]:
+        score += 1
+
+    # 4. FCF > net income (accruals quality)
+    # Compare FCF yield to earnings yield (1/PE) as a proxy
+    pe_raw = ticker_info.get("keyIndicators", {}).get("priceEarningsRatio")
+    if fcfy is not None and pe_raw is not None:
+        try:
+            earnings_yield = 1.0 / float(pe_raw) if float(pe_raw) > 0 else None
+            if earnings_yield is not None and fcfy > earnings_yield:
+                score += 1
+        except Exception:
+            pass
+
+    # --- Leverage ---
+    # 5. D/E ratio decreased
+    de_series = [
+        e["value"]
+        for e in ticker_analysis.get("companyFinancialsByYear", {}).get(
+            "debtToEquityRatio", []
+        )
+        if e.get("reportType") == "FULL_YEAR"
+    ]
+    if len(de_series) >= 2 and de_series[-1] < de_series[-2]:
+        score += 1
+
+    # 6-7: Current ratio / share dilution — data not available from Avanza, skip
+
+    # --- Efficiency ---
+    # 8. Gross margin improved
+    margin_series = _as_vals(
+        ticker_analysis.get("companyFinancialsByYear", {}).get("profitMargin")
+    )
+    margin_clean = _clean(margin_series)
+    if len(margin_clean) >= 2 and margin_clean[-1] > margin_clean[-2]:
+        score += 1
+
+    # 9. Asset turnover improved (sales / total assets)
+    sales = _as_vals(
+        ticker_analysis.get("companyFinancialsByYear", {}).get("sales")
+    )
+    assets = [
+        e["value"]
+        for e in ticker_analysis.get("companyFinancialsByYear", {}).get(
+            "totalAssets", []
+        )
+        if e.get("reportType") == "FULL_YEAR"
+    ]
+    if len(sales) >= 2 and len(assets) >= 2:
+        turn_now = _safe_div(sales[-1], assets[-1])
+        turn_prev = _safe_div(sales[-2], assets[-2])
+        if turn_now is not None and turn_prev is not None and turn_now > turn_prev:
+            score += 1
+
+    return score
 
 
 def calculate_de(ticker_analysis, ticker_id=None):

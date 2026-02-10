@@ -9,9 +9,6 @@ import numpy as np
 import pandas as pd
 
 from metrics import extract_sector
-from financial_metrics import (  # your util
-    calc_sma200_metrics,
-)
 from analyzer.metrics import RATIO_SPECS  # single source of truth
 
 
@@ -22,7 +19,6 @@ METRIC_TO_DATAPOINT = {
     "roe status": "roe",
     "de status": "de_ratio",
     "profit margin status": "profit_margin",
-    "profit margin trend status": "profit_margin",
     "net debt - ebitda status": "netDebtEbitdaRatio",
     "nav discount status": "nav_discount",
     "nav discount trend status": "nav_discount",
@@ -30,8 +26,6 @@ METRIC_TO_DATAPOINT = {
     "fcf status": "free_cashflow",
     "fcfy status": "free_cashflow_yield",
     "revenue trend year status": "revenue_year",
-    "revenue trend quarter status": "revenue_quarter",
-    "profit per share trend status": "profit_per_share",
     "net debt - ebit status": "evEbit",
 }
 
@@ -250,7 +244,8 @@ def _unwrap1(x):
     return x[0] if isinstance(x, (list, tuple)) and len(x) == 1 else x
 
 
-def _to_pct(x):
+def _to_pct(x, force_convert=False):
+    """Convert to percent only when explicitly requested (force_convert=True)."""
     x = _unwrap1(x)
     if x is None:
         return None
@@ -258,8 +253,7 @@ def _to_pct(x):
         x = float(x)
     except Exception:
         return None
-    # normalize rate fractions (0.12 -> 12.0)
-    return x * 100.0 if 0 < abs(x) < 1 else x
+    return x * 100.0 if force_convert else x
 
 
 def _safe_last(series):
@@ -294,12 +288,7 @@ def calculate_metrics_given_hist() -> None:
     # metrics to compute (sector-agnostic)
     ratio_keys = list(RATIO_SPECS.keys())
     other_keys = [
-        "revenue trend quarter status",
         "revenue trend year status",
-        "profit margin trend status",
-        "profit per share trend status",
-        "sma200 slope status",
-        # keep "sma200 status" if you still want it
     ]
     metrics = ratio_keys + other_keys
 
@@ -338,14 +327,6 @@ def calculate_metrics_given_hist() -> None:
                 except Exception:
                     total_return = None
 
-                # ---- SMA(200) + slope ----
-                sma_val, _, sma_slope = calc_sma200_metrics(ohlc_win)
-                sma_status = (
-                    (ohlc_win["close"].iloc[-1] - sma_val) / sma_val
-                    if sma_val is not None and not ohlc_win.empty
-                    else None
-                )
-
                 # ---- Base fields for ratios: last values in the window ----
                 pe_val = _safe_last(filtered.get("pe"))
                 de_val = _safe_last(filtered.get("de"))
@@ -371,8 +352,6 @@ def calculate_metrics_given_hist() -> None:
                     "roe": roe_val,
                     "fcfy": fcfy_val,
                     "cagr": price_cagr,
-                    "sma200 status": sma_status,
-                    "sma200 slope status": sma_slope,
                 }
 
                 # ---- Trends (same logic as before) ----
@@ -413,7 +392,7 @@ def calculate_metrics_given_hist() -> None:
                     )
 
                     if num_is_rate:
-                        num_val = _to_pct(num_val)
+                        num_val = _to_pct(num_val, force_convert=True)
 
                     entry[rk] = _safe_div(num_val, den_val)
 
