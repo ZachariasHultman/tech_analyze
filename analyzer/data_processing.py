@@ -50,11 +50,20 @@ def enrich_ratios(df: pd.DataFrame) -> pd.DataFrame:
             continue
         num, den = spec["num"], spec["den"]
         num_is_rate = spec.get("num_is_rate", False)
+        den_floor = spec.get("den_floor")
         if num in out.columns and den in out.columns:
             vals = []
             for i in out.index:
                 n = _to_pct(out.at[i, num], force_convert=True) if num_is_rate else _unwrap(out.at[i, num])
-                d = out.at[i, den]
+                d = _unwrap(out.at[i, den])
+                # Clamp denominator to floor to prevent blow-up (e.g. ROE/DE when DE≈0)
+                if den_floor is not None and d is not None:
+                    try:
+                        d = float(d)
+                        if abs(d) < den_floor:
+                            d = den_floor if d >= 0 else -den_floor
+                    except (TypeError, ValueError):
+                        pass
                 vals.append(_safe_div(n, d))
             out[out_col] = vals
         else:

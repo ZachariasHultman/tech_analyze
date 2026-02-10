@@ -394,6 +394,16 @@ def calculate_metrics_given_hist() -> None:
                     if num_is_rate:
                         num_val = _to_pct(num_val, force_convert=True)
 
+                    # Clamp denominator to floor (e.g. ROE/DE when DE≈0)
+                    den_floor = spec.get("den_floor")
+                    if den_floor is not None and den_val is not None:
+                        try:
+                            den_val = float(den_val)
+                            if abs(den_val) < den_floor:
+                                den_val = den_floor if den_val >= 0 else -den_floor
+                        except (TypeError, ValueError):
+                            pass
+
                     entry[rk] = _safe_div(num_val, den_val)
 
                 results.append(entry)

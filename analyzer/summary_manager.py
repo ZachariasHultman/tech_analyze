@@ -3,6 +3,7 @@ from analyzer.metrics import (
     HIGH_WEIGHT_METRICS,
     LOW_WEIGHT_METRICS,
     RATIO_SPECS,
+    DIRECTION_OVERRIDES,
     get_metrics_threshold,
     extract_sector,
 )
@@ -154,6 +155,9 @@ class SummaryManager:
         return True
 
     def _assign_weight(self, metric):
+        # Allow optimizer to override weights at runtime
+        if hasattr(self, "_weight_overrides") and self._weight_overrides:
+            return self._weight_overrides.get(metric, 0)
         if metric in HIGHEST_WEIGHT_METRICS:
             return 2
         if metric in HIGH_WEIGHT_METRICS:
@@ -176,8 +180,11 @@ class SummaryManager:
         if weight == 0:
             return 0
 
-        # Direction: use RATIO_SPECS for ratios; default higher-better otherwise
-        direction = RATIO_SPECS[metric]["dir"] if metric in RATIO_SPECS else +1
+        # Direction: RATIO_SPECS for ratios, DIRECTION_OVERRIDES for others, default +1
+        if metric in RATIO_SPECS:
+            direction = RATIO_SPECS[metric]["dir"]
+        else:
+            direction = DIRECTION_OVERRIDES.get(metric, +1)
 
         # Thresholds: explicit override -> per-run override -> ratio bands -> global bands
         if threshold_override is not None:
@@ -531,11 +538,20 @@ def process_historical(
         for out_col, spec in RATIO_SPECS.items():
             num_name, den_name = spec["num"], spec["den"]
             num_is_rate = spec.get("num_is_rate", False)
+            den_floor = spec.get("den_floor")
 
             num = _get_val_from_row_or_summary(row, ticker, sector, num_name)
             den = _get_val_from_row_or_summary(row, ticker, sector, den_name)
 
             num = _to_pct(num, force_convert=True) if num_is_rate else _unwrap(num)
+            # Clamp denominator to floor to prevent blow-up (e.g. ROE/DE when DE≈0)
+            if den_floor is not None and den is not None:
+                try:
+                    den = float(_unwrap(den))
+                    if abs(den) < den_floor:
+                        den = den_floor if den >= 0 else -den_floor
+                except (TypeError, ValueError):
+                    pass
             ratio_val = _safe_div(num, den)
 
             if ratio_val is not None:

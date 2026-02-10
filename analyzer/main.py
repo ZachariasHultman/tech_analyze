@@ -19,10 +19,9 @@ from data_processing import *
 from importlib.metadata import version
 
 from historical_calc import calculate_metrics_given_hist
+from correlation import baseline_correlation, optimize_weights_and_thresholds
 from datetime import date
 import argparse
-
-# TODO Analyze historical data and create tuning params from that
 
 
 def setup_env():
@@ -64,6 +63,16 @@ def main():
         type=bool,
         help="true/false. Use historical data to run the script",
         default=False,
+    )
+    ap.add_argument(
+        "--correlate",
+        action="store_true",
+        help="Run baseline correlation analysis (score vs forward return)",
+    )
+    ap.add_argument(
+        "--optimize",
+        action="store_true",
+        help="Run weight/threshold optimization sweep",
     )
     args = ap.parse_args()
     os.makedirs("data", exist_ok=True)
@@ -116,6 +125,18 @@ def main():
         calculate_score(manager)
 
         manager._display(save_df=True)
+    elif args.correlate:
+        # Step 1: generate metrics_by_timespan.csv from historical data
+        calculate_metrics_given_hist()
+        # Step 2: run baseline correlation report
+        baseline_correlation("metrics_by_timespan.csv")
+    elif args.optimize:
+        # Step 1: generate metrics_by_timespan.csv from historical data
+        calculate_metrics_given_hist()
+        # Step 2: run baseline first
+        baseline_correlation("metrics_by_timespan.csv")
+        # Step 3: optimize weights and thresholds
+        optimize_weights_and_thresholds("metrics_by_timespan.csv")
     else:
         calculate_metrics_given_hist()
 
