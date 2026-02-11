@@ -50,7 +50,7 @@ def _all_scored_metrics():
 
 def _load_timespan_csv(path="metrics_by_timespan.csv"):
     df = pd.read_csv(path)
-    df.columns = df.columns.str.strip().str.lower()
+    df.columns = df.columns.str.strip()
     df.dropna(subset=["total_return"], inplace=True)
     return df
 
@@ -99,6 +99,8 @@ def baseline_correlation(csv_path="metrics_by_timespan.csv"):
 
     Returns a summary DataFrame and prints a report.
     """
+    
+ 
     df = _load_timespan_csv(csv_path)
     if df.empty:
         print("[WARN] No data found.")
@@ -239,101 +241,25 @@ def baseline_correlation(csv_path="metrics_by_timespan.csv"):
 
 
 # ======================================================================
-# Phase B: Weight / threshold optimization
+# Phase B: Correlation-based weight optimization
 # ======================================================================
-
-WEIGHT_OPTIONS = [0.0, 1.0, 1.5, 2.0]
-
-
-def _build_weight_combos(metrics, n_samples=200):
-    """Generate diverse weight combinations for the given metrics.
-
-    Full grid is too large, so we sample strategically:
-    - Always include current weights as baseline
-    - Random samples from the weight grid
-    - Ablation: zero out one metric at a time
-    """
-    combos = []
-
-    # 1. Current weights
-    current = {}
-    for m in metrics:
-        if m in HIGHEST_WEIGHT_METRICS:
-            current[m] = 2.0
-        elif m in HIGH_WEIGHT_METRICS:
-            current[m] = 1.5
-        elif m in LOW_WEIGHT_METRICS:
-            current[m] = 1.0
-        else:
-            current[m] = 0.0
-    combos.append(current)
-
-    # 2. Ablation: drop one metric at a time
-    for drop in metrics:
-        c = current.copy()
-        c[drop] = 0.0
-        combos.append(c)
-
-    # 3. Promotion: bump each metric up one tier
-    for bump in metrics:
-        c = current.copy()
-        if c[bump] < 2.0:
-            c[bump] = min(c[bump] + 0.5, 2.0)
-            combos.append(c)
-
-    # 4. Random samples
-    rng = np.random.default_rng(42)
-    for _ in range(n_samples - len(combos)):
-        c = {m: float(rng.choice(WEIGHT_OPTIONS)) for m in metrics}
-        # Ensure at least some metrics are nonzero
-        if sum(c.values()) == 0:
-            c[rng.choice(metrics)] = 1.0
-        combos.append(c)
-
-    return combos[:n_samples]
-
-
-def _threshold_variations(metric, base_thr, steps=3, step_pct=0.15):
-    """Generate threshold variations around a base (nok, ok) pair."""
-    nok0, ok0 = float(base_thr[0]), float(base_thr[1])
-
-    # Determine direction
-    if metric in RATIO_SPECS:
-        direction = RATIO_SPECS[metric]["dir"]
-    else:
-        direction = DIRECTION_OVERRIDES.get(metric, +1)
-
-    variations = set()
-    for i in range(-steps, steps + 1):
-        for j in range(-steps, steps + 1):
-            nok = round(nok0 * (1 + step_pct * i), 6)
-            ok = round(ok0 * (1 + step_pct * j), 6)
-            # Enforce ordering
-            if direction == +1 and nok < ok:
-                variations.add((nok, ok))
-            elif direction == -1 and nok > ok:
-                variations.add((nok, ok))
-
-    # Always include base
-    variations.add((nok0, ok0))
-    return list(variations)
-
 
 def optimize_weights_and_thresholds(
     csv_path="metrics_by_timespan.csv",
-    n_weight_samples=100,
-    threshold_steps=2,
     target_timespans=None,
+    **_kwargs,
 ):
-    """Sweep weight combinations and threshold variations to maximize
-    score-return correlation.
+    """Assign weights proportional to each metric's Spearman correlation
+    with forward returns. Simple and robust — avoids overfitting.
 
     Strategy:
-    1. First optimize weights with current thresholds (fast)
-    2. Then optimize thresholds with best weights (per-metric)
-    3. Report best combination
+    1. Compute per-metric Spearman correlation across TOTAL windows
+    2. Drop metrics with negative or near-zero correlation (weight=0)
+    3. Scale positive correlations to weights in [0, 2]
+    4. Re-score with optimized weights and report improvement
+    5. Compute per-company fundamental reliability score
 
-    Returns dict with optimal params and correlation stats.
+    Returns dict with optimal weights and reliability scores.
     """
     df = _load_timespan_csv(csv_path)
     if df.empty:
@@ -342,191 +268,275 @@ def optimize_weights_and_thresholds(
 
     metrics = _all_scored_metrics()
 
-    # Filter to target timespans (default: TOTAL windows for less noise)
+    # Use TOTAL windows (most relevant for 3-5 year horizon)
     if target_timespans is None:
         target_timespans = [t for t in df["timespan"].unique() if "TOTAL" in str(t)]
     if not target_timespans:
         target_timespans = list(df["timespan"].unique())
 
-    df = df[df["timespan"].isin(target_timespans)]
+    df_total = df[df["timespan"].isin(target_timespans)]
 
-    print(f"\n[OPTIMIZE] {len(df)} rows, {len(metrics)} metrics, "
+    print(f"\n[OPTIMIZE] {len(df_total)} rows, {len(metrics)} metrics, "
           f"timespans: {target_timespans}")
 
-    # ---- Step 1: Weight sweep with current thresholds ----
-    print("\n[Step 1] Sweeping weight combinations...")
-    weight_combos = _build_weight_combos(metrics, n_samples=n_weight_samples)
+    # ---- Step 1: Per-metric Spearman correlation ----
+    print("\n[Step 1] Computing per-metric correlations...")
 
-    best_weight_corr = -999
-    best_weights = None
-    weight_results = []
+    metric_corrs = {}  # metric -> list of (rho, n) across timespans
 
-    for i, weights in enumerate(weight_combos):
-        # Temporarily override HIGHEST/HIGH/LOW by patching SummaryManager
-        corrs = []
-        for timespan in target_timespans:
-            df_ts = df[df["timespan"] == timespan].copy()
-            if len(df_ts) < 5:
+    for timespan in target_timespans:
+        df_ts = df_total[df_total["timespan"] == timespan].copy()
+        if len(df_ts) < 5:
+            continue
+
+        scored = _score_snapshot(df_ts)
+        if scored.empty:
+            continue
+
+        returns = df_ts.set_index("company")["total_return"]
+        score_cols = [c for c in scored.columns if c.endswith("_score")]
+
+        for sc in score_cols:
+            metric_name = sc.replace("_score", "")
+            if metric_name not in metrics:
                 continue
 
-            sm = SummaryManager()
-            # Inject weight overrides
-            sm._weight_overrides = weights
-            sm.process_historical(df_ts, metrics)
-            calculate_score(sm, metrics_to_score=metrics)
-
-            scored = sm.summary
-            if scored is None or (isinstance(scored, pd.DataFrame) and scored.empty):
-                scored = sm.summary_investment
-            if scored is None or (isinstance(scored, pd.DataFrame) and scored.empty):
-                continue
-            if isinstance(scored, dict):
-                scored = pd.DataFrame(scored).T
-
-            returns = df_ts.set_index("company")["total_return"]
-            scores = pd.to_numeric(scored.get("points", pd.Series(dtype=float)),
-                                   errors="coerce")
-            common = scores.index.intersection(returns.index)
+            ms = pd.to_numeric(scored.get(sc, pd.Series(dtype=float)), errors="coerce")
+            common = ms.index.intersection(returns.index)
             if len(common) < 5:
                 continue
 
-            s = scores.loc[common].astype(float)
-            r = returns.loc[common].astype(float)
-            valid = s.notna() & r.notna()
+            m_vals = ms.loc[common].astype(float)
+            r_vals = returns.loc[common].astype(float)
+            valid = m_vals.notna() & r_vals.notna()
             if valid.sum() < 5:
                 continue
 
-            rho, _ = sp_stats.spearmanr(s[valid], r[valid])
+            rho, pval = sp_stats.spearmanr(m_vals[valid], r_vals[valid])
             if not np.isnan(rho):
-                corrs.append(rho)
+                metric_corrs.setdefault(metric_name, []).append(
+                    {"rho": rho, "p": pval, "n": int(valid.sum()), "ts": timespan}
+                )
 
-        avg_corr = np.mean(corrs) if corrs else -999
-        weight_results.append({"weights": weights, "avg_spearman": avg_corr})
+    # ---- Step 2: Assign weights from correlations ----
+    print("\n[Step 2] Assigning correlation-based weights...")
 
-        if avg_corr > best_weight_corr:
-            best_weight_corr = avg_corr
-            best_weights = weights
+    avg_corrs = {}
+    for m, entries in metric_corrs.items():
+        rhos = [e["rho"] for e in entries]
+        avg_corrs[m] = np.mean(rhos)
 
-        if (i + 1) % 25 == 0:
-            print(f"  ... {i+1}/{len(weight_combos)} tested, "
-                  f"best so far: ρ={best_weight_corr:+.4f}")
+    # Only keep metrics with positive average correlation
+    positive_metrics = {m: r for m, r in avg_corrs.items() if r > 0.02}
 
-    print(f"\n[Step 1] Best weight combo: ρ={best_weight_corr:+.4f}")
-    if best_weights:
-        nonzero = {k: v for k, v in best_weights.items() if v > 0}
-        print(f"  Active metrics ({len(nonzero)}): {nonzero}")
+    if not positive_metrics:
+        print("[WARN] No metrics with positive correlation found.")
+        return {}
 
-    # ---- Step 2: Threshold sweep with best weights ----
-    print("\n[Step 2] Sweeping thresholds per metric...")
-
-    best_thresholds = {}
-    for metric in metrics:
-        # Get base threshold
-        if metric in RATIO_SPECS:
-            base = RATIO_SPECS[metric]["thr"]
-        elif metric in GLOBAL_THRESHOLDS:
-            base = GLOBAL_THRESHOLDS[metric]
+    # Scale to [0, 2] range proportional to correlation strength
+    max_corr = max(positive_metrics.values())
+    optimized_weights = {}
+    for m in metrics:
+        if m in positive_metrics:
+            # Scale: strongest metric gets 2.0, others proportionally
+            raw = positive_metrics[m] / max_corr * 2.0
+            # Round to nearest 0.25 for cleaner weights
+            optimized_weights[m] = round(raw * 4) / 4
         else:
+            optimized_weights[m] = 0.0
+
+    # ---- Step 3: Re-score with optimized weights ----
+    print("\n[Step 3] Re-scoring with optimized weights...")
+
+    baseline_corrs = []
+    optimized_corrs = []
+
+    for timespan in target_timespans:
+        df_ts = df_total[df_total["timespan"] == timespan].copy()
+        if len(df_ts) < 5:
             continue
 
-        if best_weights and best_weights.get(metric, 0) == 0:
-            continue  # Skip metrics with zero weight
+        returns = df_ts.set_index("company")["total_return"]
 
-        variations = _threshold_variations(metric, base, steps=threshold_steps)
-        best_thr_corr = -999
-        best_thr = base
+        # Baseline score
+        scored_base = _score_snapshot(df_ts)
+        if not scored_base.empty and "points" in scored_base.columns:
+            s = pd.to_numeric(scored_base["points"], errors="coerce")
+            common = s.index.intersection(returns.index)
+            if len(common) >= 5:
+                sv = s.loc[common].astype(float)
+                rv = returns.loc[common].astype(float)
+                valid = sv.notna() & rv.notna()
+                if valid.sum() >= 5:
+                    rho, _ = sp_stats.spearmanr(sv[valid], rv[valid])
+                    if not np.isnan(rho):
+                        baseline_corrs.append(rho)
 
-        for thr in variations:
-            overrides = {metric: {"nok": thr[0], "ok": thr[1]}}
-            corrs = []
+        # Optimized score
+        sm = SummaryManager()
+        sm._weight_overrides = optimized_weights
+        sm.process_historical(df_ts, metrics)
+        calculate_score(sm, metrics_to_score=metrics)
 
-            for timespan in target_timespans:
-                df_ts = df[df["timespan"] == timespan].copy()
-                if len(df_ts) < 5:
-                    continue
+        scored_opt = sm.summary
+        if scored_opt is None or (isinstance(scored_opt, pd.DataFrame) and scored_opt.empty):
+            scored_opt = sm.summary_investment
+        if scored_opt is None or (isinstance(scored_opt, pd.DataFrame) and scored_opt.empty):
+            continue
+        if isinstance(scored_opt, dict):
+            scored_opt = pd.DataFrame(scored_opt).T
 
-                sm = SummaryManager()
-                if best_weights:
-                    sm._weight_overrides = best_weights
-                sm.process_historical(df_ts, [metric], thresholds=overrides)
-                calculate_score(sm, metrics_to_score=[metric])
-
-                scored = sm.summary
-                if scored is None or (isinstance(scored, pd.DataFrame) and scored.empty):
-                    scored = sm.summary_investment
-                if scored is None or (isinstance(scored, pd.DataFrame) and scored.empty):
-                    continue
-                if isinstance(scored, dict):
-                    scored = pd.DataFrame(scored).T
-
-                returns = df_ts.set_index("company")["total_return"]
-                scores = pd.to_numeric(scored.get("points", pd.Series(dtype=float)),
-                                       errors="coerce")
-                common = scores.index.intersection(returns.index)
-                if len(common) < 5:
-                    continue
-
-                s = scores.loc[common].astype(float)
-                r = returns.loc[common].astype(float)
-                valid = s.notna() & r.notna()
-                if valid.sum() < 5:
-                    continue
-
-                rho, _ = sp_stats.spearmanr(s[valid], r[valid])
+        s = pd.to_numeric(scored_opt.get("points", pd.Series(dtype=float)), errors="coerce")
+        common = s.index.intersection(returns.index)
+        if len(common) >= 5:
+            sv = s.loc[common].astype(float)
+            rv = returns.loc[common].astype(float)
+            valid = sv.notna() & rv.notna()
+            if valid.sum() >= 5:
+                rho, _ = sp_stats.spearmanr(sv[valid], rv[valid])
                 if not np.isnan(rho):
-                    corrs.append(rho)
+                    optimized_corrs.append(rho)
 
-            avg = np.mean(corrs) if corrs else -999
-            if avg > best_thr_corr:
-                best_thr_corr = avg
-                best_thr = thr
+    avg_baseline = np.mean(baseline_corrs) if baseline_corrs else 0
+    avg_optimized = np.mean(optimized_corrs) if optimized_corrs else 0
 
-        best_thresholds[metric] = {
-            "nok": best_thr[0],
-            "ok": best_thr[1],
-            "spearman": round(best_thr_corr, 4),
-        }
+    # ---- Step 4: Per-company fundamental reliability ----
+    print("\n[Step 4] Computing per-company fundamental reliability...")
+
+    reliability = _compute_reliability(df, target_timespans)
 
     # ---- Report ----
     print("\n" + "=" * 70)
     print("  OPTIMIZATION RESULTS")
     print("=" * 70)
 
-    print("\nOptimal weights:")
-    if best_weights:
-        for m in sorted(best_weights, key=lambda x: best_weights[x], reverse=True):
-            w = best_weights[m]
-            if w > 0:
-                print(f"  {m:40s}  weight={w:.1f}")
+    print("\nPer-metric avg Spearman correlation:")
+    for m in sorted(avg_corrs, key=lambda x: avg_corrs[x], reverse=True):
+        r = avg_corrs[m]
+        w = optimized_weights.get(m, 0)
+        status = "KEEP" if w > 0 else "DROP"
+        print(f"  {m:40s}  ρ={r:+.4f}  weight={w:.2f}  [{status}]")
 
-    print("\nOptimal thresholds:")
-    for m, t in sorted(best_thresholds.items()):
-        print(f"  {m:40s}  nok={t['nok']:.4f}  ok={t['ok']:.4f}  ρ={t['spearman']:+.4f}")
+    # Show metrics with no data at all
+    no_data = [m for m in metrics if m not in avg_corrs]
+    if no_data:
+        print(f"\n  No data available for: {', '.join(no_data)}")
 
-    print(f"\nOverall best Spearman: {best_weight_corr:+.4f}")
+    print(f"\n  Baseline avg Spearman:   {avg_baseline:+.4f}")
+    print(f"  Optimized avg Spearman:  {avg_optimized:+.4f}")
+    improvement = avg_optimized - avg_baseline
+    print(f"  Improvement:             {improvement:+.4f}")
+
+    if reliability is not None and not reliability.empty:
+        print("\n" + "-" * 70)
+        print("  PER-COMPANY FUNDAMENTAL RELIABILITY")
+        print("  (How well does this company's score predict its returns?)")
+        print("-" * 70)
+        for _, row in reliability.head(20).iterrows():
+            label = "RELIABLE" if row["reliable"] else "UNRELIABLE"
+            print(f"  {row['company']:40s}  ρ={row['spearman']:+.4f}  "
+                  f"n={row['n_windows']:2d}  [{label}]")
+        print(f"  ... ({len(reliability)} companies total)")
+
+        n_reliable = reliability["reliable"].sum()
+        print(f"\n  Reliable companies: {n_reliable}/{len(reliability)}")
+
     print("=" * 70)
 
     # Save results
     result = {
-        "best_weights": best_weights,
-        "best_thresholds": best_thresholds,
-        "best_spearman": best_weight_corr,
+        "optimized_weights": optimized_weights,
+        "per_metric_correlations": {m: round(r, 4) for m, r in avg_corrs.items()},
+        "baseline_spearman": round(avg_baseline, 4),
+        "optimized_spearman": round(avg_optimized, 4),
     }
 
-    # Save to JSON
     out_path = "optimization_results.json"
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2, default=str)
     print(f"\nSaved optimization results to {out_path}")
 
-    # Save weight sweep results
-    wr_df = pd.DataFrame([
-        {"avg_spearman": r["avg_spearman"], **r["weights"]}
-        for r in weight_results
-    ]).sort_values("avg_spearman", ascending=False)
-    wr_df.to_csv("weight_sweep_results.csv", index=False)
-    print(f"Saved weight sweep to weight_sweep_results.csv")
+    if reliability is not None and not reliability.empty:
+        reliability.to_csv("company_reliability.csv", index=False)
+        print(f"Saved company reliability to company_reliability.csv")
 
+    return result
+
+
+# ======================================================================
+# Per-company fundamental reliability
+# ======================================================================
+
+def _compute_reliability(df, target_timespans):
+    """For each company, compute how well its fundamental score
+    correlates with its returns across different time windows.
+
+    A "reliable" company is one where good fundamentals actually
+    translate into good returns. An "unreliable" company (like PayPal)
+    has good fundamentals but disconnected price performance.
+
+    Returns DataFrame with columns: company, spearman, n_windows, reliable
+    """
+    # Collect (score, return) pairs per company across all timespans
+    company_pairs = defaultdict(lambda: {"scores": [], "returns": []})
+
+    all_timespans = sorted(df["timespan"].unique())
+
+    for timespan in all_timespans:
+        df_ts = df[df["timespan"] == timespan].copy()
+        if len(df_ts) < 5:
+            continue
+
+        scored = _score_snapshot(df_ts)
+        if scored.empty or "points" not in scored.columns:
+            continue
+
+        returns = df_ts.set_index("company")["total_return"]
+        scores = pd.to_numeric(scored["points"], errors="coerce")
+        common = scores.index.intersection(returns.index)
+
+        for company in common:
+            s_val = scores.get(company)
+            r_val = returns.get(company)
+            if s_val is not None and r_val is not None:
+                try:
+                    s_f = float(s_val)
+                    r_f = float(r_val)
+                    if not (np.isnan(s_f) or np.isnan(r_f)):
+                        company_pairs[company]["scores"].append(s_f)
+                        company_pairs[company]["returns"].append(r_f)
+                except (TypeError, ValueError):
+                    pass
+
+    # Compute per-company correlation
+    rows = []
+    for company, data in company_pairs.items():
+        n = len(data["scores"])
+        if n < 3:
+            # Not enough windows to compute meaningful correlation
+            rows.append({
+                "company": company,
+                "spearman": np.nan,
+                "n_windows": n,
+                "reliable": False,
+            })
+            continue
+
+        rho, pval = sp_stats.spearmanr(data["scores"], data["returns"])
+        # "Reliable" = positive correlation with p < 0.3
+        # (lenient threshold because we have few data points per company)
+        reliable = (not np.isnan(rho)) and rho > 0.1 and pval < 0.3
+        rows.append({
+            "company": company,
+            "spearman": round(rho, 4) if not np.isnan(rho) else np.nan,
+            "n_windows": n,
+            "reliable": reliable,
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows).sort_values("spearman", ascending=False, na_position="last")
     return result
 
 
@@ -541,25 +551,16 @@ if __name__ == "__main__":
     ap.add_argument("--baseline", action="store_true",
                     help="Run baseline correlation report")
     ap.add_argument("--optimize", action="store_true",
-                    help="Run weight/threshold optimization sweep")
+                    help="Run correlation-based weight optimization")
     ap.add_argument("--csv", default="metrics_by_timespan.csv",
                     help="Path to metrics_by_timespan.csv")
-    ap.add_argument("--weight-samples", type=int, default=100,
-                    help="Number of weight combos to try")
-    ap.add_argument("--threshold-steps", type=int, default=2,
-                    help="Steps per direction for threshold variation")
     args = ap.parse_args()
 
     if args.baseline:
         baseline_correlation(args.csv)
     elif args.optimize:
-        optimize_weights_and_thresholds(
-            csv_path=args.csv,
-            n_weight_samples=args.weight_samples,
-            threshold_steps=args.threshold_steps,
-        )
+        optimize_weights_and_thresholds(csv_path=args.csv)
     else:
-        # Default: run baseline first
         print("Running baseline correlation analysis...")
-        print("(Use --optimize for weight/threshold sweep)")
+        print("(Use --optimize for weight optimization + reliability scoring)")
         baseline_correlation(args.csv)

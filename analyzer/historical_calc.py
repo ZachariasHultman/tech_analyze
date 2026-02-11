@@ -10,6 +10,17 @@ import pandas as pd
 
 from metrics import extract_sector
 from analyzer.metrics import RATIO_SPECS  # single source of truth
+from analyzer.financial_metrics import (
+    calculate_revenue_y_cagr,
+    calculate_eps_y_cagr,
+    calculate_revenue_yoy_hit_rate,
+    calculate_eps_yoy_hit_rate,
+    calculate_net_margin_vs_avg,
+    calculate_roe_vs_avg,
+    calculate_gross_margin_stability,
+    calculate_piotroski_f_score,
+    calculate_revenue_trend,
+)
 
 
 # ----------------------------------------------------------------------
@@ -260,6 +271,11 @@ def _safe_last(series):
     try:
         if series is None:
             return None
+        # Handle stringified dict like '{"2024-12-31": 0.034, ...}'
+        if isinstance(series, str) and series.strip().startswith("{"):
+            parsed = json.loads(series)
+            vals = [(k, v) for k, v in sorted(parsed.items()) if v is not None]
+            return float(vals[-1][1]) if vals else None
         s = _series_from_df(series)
         if s is None or s.empty:
             return None
@@ -282,6 +298,104 @@ def _safe_div(a, b):
         return None
 
 
+def _df_to_dict_list(df_or_obj, start=None, end=None):
+    """Convert a CSV DataFrame (date, value cols) to list-of-dicts
+    that financial_metrics functions expect: [{"value": x, "date": "...", "reportType": "FULL_YEAR"}, ...]
+    Optionally filter to [start, end] window.
+    """
+    if df_or_obj is None:
+        return []
+    if isinstance(df_or_obj, (int, float)):
+        return [{"value": float(df_or_obj), "reportType": "FULL_YEAR"}]
+    if isinstance(df_or_obj, str):
+        # stringified dict like '{"2024-12-31": 0.034, ...}'
+        try:
+            parsed = json.loads(df_or_obj)
+            out = []
+            for d, v in sorted(parsed.items()):
+                if v is not None:
+                    out.append({"date": d, "value": float(v), "reportType": "FULL_YEAR"})
+            return out
+        except (json.JSONDecodeError, ValueError):
+            return []
+    if isinstance(df_or_obj, pd.DataFrame):
+        if df_or_obj.empty or "value" not in df_or_obj.columns:
+            return []
+        df = df_or_obj.copy()
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df.dropna(subset=["date"]).sort_values("date")
+            if start is not None:
+                df = df[df["date"] >= start]
+            if end is not None:
+                df = df[df["date"] <= end]
+        out = []
+        for _, r in df.iterrows():
+            entry = {"value": r["value"], "reportType": "FULL_YEAR"}
+            if "date" in r:
+                entry["date"] = str(r["date"].date()) if hasattr(r["date"], "date") else str(r["date"])
+            out.append(entry)
+        return out
+    return []
+
+
+def _build_ticker_dicts(row, filtered, start_d, end_d):
+    """Build fake ticker_analysis and ticker_info dicts from CSV data
+    so we can reuse the same financial_metrics functions as the live flow.
+
+    Uses all data up to end_d (not just within window) because quality
+    metrics like CAGR, hit-rate, stability need multi-year history.
+    The window only constrains price-based return calculations.
+    """
+    # Use full history up to end_d (not start_d) so functions have enough data
+    revenue_year = _df_to_dict_list(row.get("revenue_year"), end=end_d)
+    revenue_quarter = _df_to_dict_list(row.get("revenue_quarter"), end=end_d)
+    profit_margin = _df_to_dict_list(row.get("profit_margin"), end=end_d)
+    profit_per_share = _df_to_dict_list(row.get("profit_per_share"), end=end_d)
+    roe_series = _df_to_dict_list(row.get("roe"), end=end_d)
+    de_series = _df_to_dict_list(row.get("de_ratio"), end=end_d)
+
+    ticker_analysis = {
+        "companyFinancialsByYear": {
+            "sales": revenue_year,
+            "profitMargin": profit_margin,
+            "debtToEquityRatio": de_series,
+            "totalAssets": [],   # not in CSV
+            "totalLiabilities": [],  # not in CSV
+            "netProfit": [],  # not in CSV
+        },
+        "companyFinancialsByQuarter": {
+            "sales": revenue_quarter,
+        },
+        "companyKeyRatiosByYear": {
+            "earningsPerShare": profit_per_share,
+            "returnOnEquityRatio": roe_series,
+        },
+        "companyKeyRatiosByQuarterQuarter": {
+            "earningsPerShare": [],  # quarterly EPS not stored separately in CSV
+        },
+    }
+
+    # Latest values for ticker_info (used by net_margin_vs_avg, roe_vs_avg, etc.)
+    latest_margin = profit_margin[-1]["value"] if profit_margin else None
+    latest_roe = roe_series[-1]["value"] if roe_series else None
+    latest_pe = None
+    pe_list = _df_to_dict_list(row.get("pe"), end=end_d)
+    if pe_list:
+        latest_pe = pe_list[-1]["value"]
+
+    ticker_info = {
+        "keyIndicators": {
+            "netMargin": latest_margin,
+            "returnOnEquity": latest_roe,
+            "priceEarningsRatio": latest_pe,
+            "directYield": None,  # not in CSV
+        },
+    }
+
+    return ticker_analysis, ticker_info
+
+
 def calculate_metrics_given_hist() -> None:
     df = get_hist_data()
 
@@ -289,6 +403,16 @@ def calculate_metrics_given_hist() -> None:
     ratio_keys = list(RATIO_SPECS.keys())
     other_keys = [
         "revenue trend year status",
+        "net debt - ebitda status",
+        "net margin vs avg status",
+        "roe vs avg status",
+        "revenue yoy hit-rate status",
+        "eps yoy hit-rate status",
+        "eps y cagr status",
+        "revenue y cagr status",
+        "gross margin stability status",
+        "piotroski f-score status",
+        "price momentum status",
     ]
     metrics = ratio_keys + other_keys
 
@@ -327,18 +451,23 @@ def calculate_metrics_given_hist() -> None:
                 except Exception:
                     total_return = None
 
-                # ---- Base fields for ratios: last values in the window ----
+                # ---- Base fields for ratios ----
                 pe_val = _safe_last(filtered.get("pe"))
-                de_val = _safe_last(filtered.get("de"))
+                de_val = _safe_last(filtered.get("de_ratio")) or _safe_last(filtered.get("de"))
                 roe_val = _safe_last(filtered.get("roe"))
-                fcfy_val = _safe_last(filtered.get("fcfy"))
+                fcfy_val = _safe_last(filtered.get("free_cashflow_yield")) or _safe_last(filtered.get("fcfy"))
 
-                # CAGR proxy inside window (price-based), normalized to %
+                # CAGR proxy inside window (price-based)
                 price_cagr = price_cagr_window(
                     ohlc_df["close"], start_d, end_d, yrs_span
                 )
                 if isinstance(price_cagr, np.floating):
                     price_cagr = float(price_cagr)
+
+                # ---- Build adapter dicts for financial_metrics functions ----
+                ticker_analysis, ticker_info = _build_ticker_dicts(
+                    row, filtered, start_d, end_d
+                )
 
                 # ---- Build row ----
                 entry = {
@@ -346,7 +475,6 @@ def calculate_metrics_given_hist() -> None:
                     "sector": sector,
                     "timespan": label,
                     "total_return": total_return,
-                    # base fields (optional but useful to inspect)
                     "pe": pe_val,
                     "de": de_val,
                     "roe": roe_val,
@@ -354,24 +482,95 @@ def calculate_metrics_given_hist() -> None:
                     "cagr": price_cagr,
                 }
 
-                # ---- Trends (same logic as before) ----
-                for m in other_keys:
-                    if "trend" in m:
-                        col = METRIC_TO_DATAPOINT[m]
-                        entry[m] = (
-                            _trend_metric_yoy(row[col], start_d)
-                            if yrs_span == 1 and "_YoY-" in label
-                            else _trend_metric(filtered.get(col))
-                        )
+                # ---- Use financial_metrics functions (same as live flow) ----
+                try:
+                    rev_trend_y, _, _, _ = calculate_revenue_trend(ticker_analysis)
+                    entry["revenue trend year status"] = rev_trend_y
+                except Exception:
+                    entry["revenue trend year status"] = None
+
+                # net debt / ebitda
+                nde_val = _safe_last(filtered.get("netDebtEbitdaRatio"))
+                entry["net debt - ebitda status"] = nde_val
+
+                # revenue y cagr
+                try:
+                    rev_cagr, _ = calculate_revenue_y_cagr(ticker_analysis)
+                    entry["revenue y cagr status"] = rev_cagr
+                except Exception:
+                    entry["revenue y cagr status"] = None
+
+                # eps y cagr
+                try:
+                    eps_cagr, _ = calculate_eps_y_cagr(ticker_analysis)
+                    entry["eps y cagr status"] = eps_cagr
+                except Exception:
+                    entry["eps y cagr status"] = None
+
+                # revenue yoy hit-rate
+                try:
+                    rev_hit, _ = calculate_revenue_yoy_hit_rate(ticker_analysis, lookback_quarters=12)
+                    entry["revenue yoy hit-rate status"] = rev_hit
+                except Exception:
+                    entry["revenue yoy hit-rate status"] = None
+
+                # eps yoy hit-rate
+                try:
+                    eps_hit, _ = calculate_eps_yoy_hit_rate(ticker_analysis, lookback_quarters=12)
+                    entry["eps yoy hit-rate status"] = eps_hit
+                except Exception:
+                    entry["eps yoy hit-rate status"] = None
+
+                # net margin vs avg
+                try:
+                    nm_vs, _ = calculate_net_margin_vs_avg(ticker_info, ticker_analysis, years=5)
+                    entry["net margin vs avg status"] = nm_vs
+                except Exception:
+                    entry["net margin vs avg status"] = None
+
+                # roe vs avg
+                try:
+                    roe_vs, _ = calculate_roe_vs_avg(ticker_info, ticker_analysis, years=5)
+                    entry["roe vs avg status"] = roe_vs
+                except Exception:
+                    entry["roe vs avg status"] = None
+
+                # gross margin stability
+                try:
+                    gm_stab = calculate_gross_margin_stability(ticker_analysis)
+                    entry["gross margin stability status"] = gm_stab
+                except Exception:
+                    entry["gross margin stability status"] = None
+
+                # piotroski f-score
+                try:
+                    f_score = calculate_piotroski_f_score(
+                        ticker_analysis, ticker_info, fcfy_val, de_val, roe_val
+                    )
+                    entry["piotroski f-score status"] = f_score
+                except Exception:
+                    entry["piotroski f-score status"] = None
+
+                # price momentum: price / SMA200 at end of window
+                try:
+                    close = ohlc_df["close"]
+                    # Use data up to end_d for SMA200
+                    close_to_end = close[close.index <= end_d]
+                    if len(close_to_end) >= 200:
+                        sma200 = close_to_end.iloc[-200:].mean()
+                        last_price = close_to_end.iloc[-1]
+                        entry["price momentum status"] = float(last_price / sma200) - 1.0
+                    else:
+                        entry["price momentum status"] = None
+                except Exception:
+                    entry["price momentum status"] = None
 
                 # ---- Ratios (sector-agnostic, using RATIO_SPECS) ----
-                # num_is_rate=True => convert to percent before dividing
                 for rk, spec in RATIO_SPECS.items():
                     num_name = spec["num"]
                     den_name = spec["den"]
                     num_is_rate = spec.get("num_is_rate", False)
 
-                    # choose the right base value from the window
                     if num_name == "cagr":
                         num_val = price_cagr
                     elif num_name == "roe":
@@ -394,7 +593,6 @@ def calculate_metrics_given_hist() -> None:
                     if num_is_rate:
                         num_val = _to_pct(num_val, force_convert=True)
 
-                    # Clamp denominator to floor (e.g. ROE/DE when DE≈0)
                     den_floor = spec.get("den_floor")
                     if den_floor is not None and den_val is not None:
                         try:

@@ -7,6 +7,7 @@ from analyzer.metrics import (
     get_metrics_threshold,
     extract_sector,
 )
+from analyzer.data_processing import _to_pct, _unwrap
 from tabulate import tabulate
 import math
 import pandas as pd
@@ -66,6 +67,8 @@ class SummaryManager:
             "dividend yield status": None,
             # composite quality
             "piotroski f-score status": None,
+            # momentum
+            "price momentum status": None,
         }
 
         self.summary_investment = {}
@@ -480,87 +483,86 @@ class SummaryManager:
         if not self.summary_investment.empty:
             _sort_and_print(self.summary_investment, "summary_investment.csv")
 
+    def process_historical(
+        self, historical_df, metrics_to_use, thresholds=None, sector_column="sector"
+    ):
+        """
+        Ingest historical data:
+        - Store base fields (roe, pe, cagr, fcfy, de) so ratios can be computed.
+        - Store template metrics (trends/NAV).
+        - Compute and store ratio status values alongside other fields.
+        thresholds: optional dict {metric: threshold or {'nok': x, 'ok': y}}
+        """
+        self._threshold_overrides = thresholds if thresholds else {}
 
-def process_historical(
-    self, historical_df, metrics_to_use, thresholds=None, sector_column="sector"
-):
-    """
-    Ingest historical data:
-    - Store base fields (roe, pe, cagr, fcfy, de) so ratios can be computed.
-    - Store template metrics (trends/NAV).
-    - Compute and store ratio status values alongside other fields.
-    thresholds: optional dict {metric: threshold or {'nok': x, 'ok': y}}
-    """
-    self._threshold_overrides = thresholds if thresholds else {}
-
-    def _get_val_from_row_or_summary(row, ticker, sector, field):
-        v = row.get(field)
-        if v is not None:
-            return v
-        target = (
-            self.summary if sector != "Investmentbolag" else self.summary_investment
-        )
-        stored = target.get(ticker, {}).get(field)
-        if isinstance(stored, (list, tuple)) and stored:
-            return stored[0]
-        return stored
-
-    for _, row in historical_df.iterrows():
-        ticker = row.get("company", "UNKNOWN")
-        sector = row.get(sector_column, "UNKNOWN")
-
-        sector_info = [{"sectorName": sector}]
-        self._initialize_template(ticker, sector_info)
-
-        # 1) base columns for ratios
-        for base in REQUIRED_BASE_COLS:
-            base_val = (
-                row.get(base) or row.get(base.strip()) or row.get(base.strip().lower())
+        def _get_val_from_row_or_summary(row, ticker, sector, field):
+            v = row.get(field)
+            if v is not None:
+                return v
+            target = (
+                self.summary if sector != "Investmentbolag" else self.summary_investment
             )
-            if base_val is not None:
-                self._update(ticker, sector_info, base, base_val)
+            stored = target.get(ticker, {}).get(field)
+            if isinstance(stored, (list, tuple)) and stored:
+                return stored[0]
+            return stored
 
-        # 2) template metrics (trends/NAV/etc.)
-        template = (
-            self.template if sector != "Investmentbolag" else self.template_investment
-        )
-        for metric in metrics_to_use:
-            if metric not in template:
-                continue
-            value = (
-                row.get(metric)
-                or row.get(metric.strip())
-                or row.get(metric.strip().lower())
-            )
-            self._update(ticker, sector_info, metric, value)
+        for _, row in historical_df.iterrows():
+            ticker = row.get("company", "UNKNOWN")
+            sector = row.get(sector_column, "UNKNOWN")
 
-        # 3) ratio values -> status fields
-        for out_col, spec in RATIO_SPECS.items():
-            num_name, den_name = spec["num"], spec["den"]
-            num_is_rate = spec.get("num_is_rate", False)
-            den_floor = spec.get("den_floor")
+            sector_info = [{"sectorName": sector}]
+            self._initialize_template(ticker, sector_info)
 
-            num = _get_val_from_row_or_summary(row, ticker, sector, num_name)
-            den = _get_val_from_row_or_summary(row, ticker, sector, den_name)
-
-            num = _to_pct(num, force_convert=True) if num_is_rate else _unwrap(num)
-            # Clamp denominator to floor to prevent blow-up (e.g. ROE/DE when DE≈0)
-            if den_floor is not None and den is not None:
-                try:
-                    den = float(_unwrap(den))
-                    if abs(den) < den_floor:
-                        den = den_floor if den >= 0 else -den_floor
-                except (TypeError, ValueError):
-                    pass
-            ratio_val = _safe_div(num, den)
-
-            if ratio_val is not None:
-                self._update(ticker, sector_info, out_col, ratio_val)
-            else:
-                target = (
-                    self.summary
-                    if sector != "Investmentbolag"
-                    else self.summary_investment
+            # 1) base columns for ratios
+            for base in REQUIRED_BASE_COLS:
+                base_val = (
+                    row.get(base) or row.get(base.strip()) or row.get(base.strip().lower())
                 )
-                if out_col not in target[ticker]:
-                    target[ticker][out_col] = [None]
+                if base_val is not None:
+                    self._update(ticker, sector_info, base, base_val)
+
+            # 2) template metrics (trends/NAV/etc.)
+            template = (
+                self.template if sector != "Investmentbolag" else self.template_investment
+            )
+            for metric in metrics_to_use:
+                if metric not in template:
+                    continue
+                value = (
+                    row.get(metric)
+                    or row.get(metric.strip())
+                    or row.get(metric.strip().lower())
+                )
+                self._update(ticker, sector_info, metric, value)
+
+            # 3) ratio values -> status fields
+            for out_col, spec in RATIO_SPECS.items():
+                num_name, den_name = spec["num"], spec["den"]
+                num_is_rate = spec.get("num_is_rate", False)
+                den_floor = spec.get("den_floor")
+
+                num = _get_val_from_row_or_summary(row, ticker, sector, num_name)
+                den = _get_val_from_row_or_summary(row, ticker, sector, den_name)
+
+                num = _to_pct(num, force_convert=True) if num_is_rate else _unwrap(num)
+                # Clamp denominator to floor to prevent blow-up (e.g. ROE/DE when DE≈0)
+                if den_floor is not None and den is not None:
+                    try:
+                        den = float(_unwrap(den))
+                        if abs(den) < den_floor:
+                            den = den_floor if den >= 0 else -den_floor
+                    except (TypeError, ValueError):
+                        pass
+                ratio_val = _safe_div(num, den)
+
+                if ratio_val is not None:
+                    self._update(ticker, sector_info, out_col, ratio_val)
+                else:
+                    target = (
+                        self.summary
+                        if sector != "Investmentbolag"
+                        else self.summary_investment
+                    )
+                    if out_col not in target[ticker]:
+                        target[ticker][out_col] = [None]

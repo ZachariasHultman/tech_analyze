@@ -77,6 +77,14 @@ def main():
     args = ap.parse_args()
     os.makedirs("data", exist_ok=True)
 
+    # --correlate and --optimize imply historical mode
+    if args.correlate or args.optimize:
+        calculate_metrics_given_hist()
+        baseline_correlation("metrics_by_timespan.csv")
+        if args.optimize:
+            optimize_weights_and_thresholds("metrics_by_timespan.csv")
+        return 0
+
     manager = SummaryManager()
     if not args.use_hist:
         avanza = setup_env()
@@ -85,7 +93,7 @@ def main():
                 item
                 for item in avanza.get_watchlists()
                 if item.get("name")
-                == "Mina favoritaktier"  # "Utdelare"  # "Test"  # "Mina favoritaktier"  # "Berkshire"   # "Mina favoritaktier"  # "Äger"
+                == "Test"  # "Utdelare"  # "Test"  # "Mina favoritaktier"  # "Berkshire"   # "Mina favoritaktier"  # "Äger"
             ),
             None,
         )["orderbookIds"]
@@ -125,18 +133,6 @@ def main():
         calculate_score(manager)
 
         manager._display(save_df=True)
-    elif args.correlate:
-        # Step 1: generate metrics_by_timespan.csv from historical data
-        calculate_metrics_given_hist()
-        # Step 2: run baseline correlation report
-        baseline_correlation("metrics_by_timespan.csv")
-    elif args.optimize:
-        # Step 1: generate metrics_by_timespan.csv from historical data
-        calculate_metrics_given_hist()
-        # Step 2: run baseline first
-        baseline_correlation("metrics_by_timespan.csv")
-        # Step 3: optimize weights and thresholds
-        optimize_weights_and_thresholds("metrics_by_timespan.csv")
     else:
         calculate_metrics_given_hist()
 
