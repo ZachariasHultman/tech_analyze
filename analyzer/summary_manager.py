@@ -309,6 +309,20 @@ class SummaryManager:
     def _display(self, save_df=False):
         """Displays DataFrame with tabulate formatting for a cleaner output."""
 
+        # --- load company reliability scores ---
+        import os
+        reliability_map = {}
+        rel_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "company_reliability.csv"
+        )
+        if os.path.exists(rel_path):
+            try:
+                rel_df = pd.read_csv(rel_path)
+                for _, r in rel_df.iterrows():
+                    reliability_map[r["company"]] = r["spearman"]
+            except Exception:
+                pass
+
         # --- helpers ---
         def _unwrap_deep(v):
             while isinstance(v, (list, tuple)) and len(v) == 1:
@@ -442,6 +456,55 @@ class SummaryManager:
             df2 = df2.where(df2.notna(), other="N/A")
             return df2
 
+        def _reorder_columns(df):
+            """Reorder metric columns by weight (highest first), then add reliability."""
+            # Separate special cols from metric cols
+            metric_cols = [
+                c for c in df.columns
+                if c.endswith(" status") and not c.endswith("_score")
+            ]
+            other_cols = [c for c in df.columns if c not in metric_cols]
+
+            # Sort metric columns by weight descending, then alphabetical
+            metric_cols.sort(key=lambda m: (-self._assign_weight(m), m))
+
+            # Build final order: points first, then reliability, then metrics, then rest
+            ordered = []
+            if "points" in other_cols:
+                ordered.append("points")
+                other_cols.remove("points")
+            if "reliability" in other_cols:
+                ordered.append("reliability")
+                other_cols.remove("reliability")
+            ordered.extend(metric_cols)
+            ordered.extend(other_cols)
+
+            # Only keep columns that exist
+            ordered = [c for c in ordered if c in df.columns]
+            return df[ordered]
+
+        def _add_reliability(df, colorize=False):
+            """Add reliability column from company_reliability.csv."""
+            if reliability_map:
+                df["reliability"] = df.index.map(
+                    lambda c: reliability_map.get(c, None)
+                )
+                if colorize:
+                    def _color_rel(v):
+                        if v is None or (isinstance(v, float) and _is_nan(v)):
+                            return "N/A"
+                        try:
+                            fv = float(v)
+                            if fv > 0.1:
+                                return f"\033[92m{fv:.2f}\033[0m"
+                            elif fv < -0.1:
+                                return f"\033[91m{fv:.2f}\033[0m"
+                            return f"{fv:.2f}"
+                        except Exception:
+                            return v
+                    df["reliability"] = df["reliability"].apply(_color_rel)
+            return df
+
         def _sort_and_print(df, csv_name):
             if df.empty:
                 return
@@ -449,6 +512,8 @@ class SummaryManager:
             # CSV export first (clean + flags)
             if save_df:
                 export_df = _build_export(df)
+                export_df = _add_reliability(export_df)
+                export_df = _reorder_columns(export_df)
                 # Sort by points (numeric) for the CSV as well
                 if "points" in export_df.columns:
                     import pandas as pd
@@ -472,6 +537,10 @@ class SummaryManager:
                     .sort_values("_pts", ascending=False)
                     .drop(columns="_pts")
                 )
+
+            # Add reliability and reorder columns by weight
+            proc = _add_reliability(proc, colorize=True)
+            proc = _reorder_columns(proc)
 
             from tabulate import tabulate
 

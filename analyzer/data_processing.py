@@ -148,15 +148,15 @@ def get_data(
         manager._update(ticker_name, sector, "net margin vs avg status", nm_vs_avg)
         manager._update(ticker_name, sector, "roe vs avg status", roe_vs_avg)
 
-        # --- NEW: gross margin stability ---
+        # --- : gross margin stability ---
         gm_stability = calculate_gross_margin_stability(ticker_analysis)
         manager._update(ticker_name, sector, "gross margin stability status", gm_stability)
 
-        # --- NEW: dividend yield ---
+        # --- : dividend yield ---
         div_yield = calculate_dividend_yield(ticker_info)
         manager._update(ticker_name, sector, "dividend yield status", div_yield)
 
-        # --- NEW: Piotroski F-Score ---
+        # --- : Piotroski F-Score ---
         f_score = calculate_piotroski_f_score(
             ticker_analysis, ticker_info, fcfy, de_ratio, roe
         )
@@ -226,7 +226,7 @@ def get_data(
             ticker_name, sector, "nav discount trend status", nav_discount_trend
         )
 
-        # --- NEW: dividend yield ---
+        # --- : dividend yield ---
         div_yield = calculate_dividend_yield(ticker_info)
         manager._update(ticker_name, sector, "dividend yield status", div_yield)
 

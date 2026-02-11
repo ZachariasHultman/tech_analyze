@@ -4,6 +4,8 @@
 # Ignore logs and temporary files
 *.log
 *.tmp
+*.json
+
 
 # Ignore compiled files
 *.o
