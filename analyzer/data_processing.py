@@ -162,6 +162,13 @@ def get_data(
         )
         manager._update(ticker_name, sector, "piotroski f-score status", f_score)
 
+        # --- Price momentum: price / SMA200 - 1 ---
+        if sma200 is not None and weekly_average_close is not None and sma200 > 0:
+            momentum = (weekly_average_close / sma200) - 1.0
+        else:
+            momentum = None
+        manager._update(ticker_name, sector, "price momentum status", momentum)
+
         if get_hist:
             hist["sector"] = sector
             hist["ohlc"] = closing_hist_data
