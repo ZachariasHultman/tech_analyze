@@ -5,6 +5,34 @@ from analyzer.helper import *
 from analyzer.financial_metrics import *
 
 
+def _extract_yearly_series(ticker_analysis, section, key):
+    """Extract a yearly time-series from the Avanza API response."""
+    try:
+        raw = ticker_analysis.get(section, {}).get(key, [])
+        hist = [
+            {"date": e["date"], "value": e["value"]}
+            for e in raw
+            if e.get("reportType") == "FULL_YEAR" and "date" in e and "value" in e
+        ]
+        return hist if hist else None
+    except Exception:
+        return None
+
+
+def _extract_dividend_series(ticker_analysis):
+    """Extract dividend per share history from dividendsByYear."""
+    try:
+        raw = ticker_analysis.get("dividendsByYear", {}).get("dividendPerShare", [])
+        hist = [
+            {"date": e["date"], "value": e["value"]}
+            for e in raw
+            if e.get("reportType") == "FULL_YEAR" and "date" in e and "value" in e
+        ]
+        return hist if hist else None
+    except Exception:
+        return None
+
+
 def _unwrap(v):
     return v[0] if isinstance(v, (list, tuple)) and len(v) == 1 else v
 
@@ -162,6 +190,14 @@ def get_data(
         )
         manager._update(ticker_name, sector, "piotroski f-score status", f_score)
 
+        # --- : earnings quality (OCF / net income) ---
+        eq = calculate_earnings_quality(ticker_info, ticker_analysis)
+        manager._update(ticker_name, sector, "earnings quality status", eq)
+
+        # --- : dividend growth ---
+        div_growth = calculate_dividend_growth(ticker_analysis, years=3)
+        manager._update(ticker_name, sector, "dividend growth status", div_growth)
+
         # --- Price momentum: price / SMA200 - 1 ---
         if sma200 is not None and weekly_average_close is not None and sma200 > 0:
             momentum = (weekly_average_close / sma200) - 1.0
@@ -183,6 +219,13 @@ def get_data(
             hist["profit_margin"] = extract_profit_margin_hist(ticker_analysis)
             hist["profit_per_share"] = extract_eps_hist(ticker_analysis)
             hist["dividend_yield"] = div_yield
+            # Full financial data for Piotroski and new metrics
+            hist["net_profit"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "netProfit")
+            hist["total_assets"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalAssets")
+            hist["total_liabilities"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalLiabilities")
+            hist["equity_per_share"] = _extract_yearly_series(ticker_analysis, "companyKeyRatiosByYear", "equityPerShare")
+            hist["ev_ebit"] = _extract_yearly_series(ticker_analysis, "stockKeyRatiosByYear", "evEbitRatio")
+            hist["dividend_per_share"] = _extract_dividend_series(ticker_analysis)
 
     else:
         sector = [{"sectorId": "51", "sectorName": "Investmentbolag"}]
@@ -245,6 +288,12 @@ def get_data(
             hist["profit_margin"] = extract_profit_margin_hist(ticker_analysis)
             hist["profit_per_share"] = extract_eps_hist(ticker_analysis)
             hist["dividend_yield"] = div_yield
+            hist["net_profit"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "netProfit")
+            hist["total_assets"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalAssets")
+            hist["total_liabilities"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalLiabilities")
+            hist["equity_per_share"] = _extract_yearly_series(ticker_analysis, "companyKeyRatiosByYear", "equityPerShare")
+            hist["ev_ebit"] = _extract_yearly_series(ticker_analysis, "stockKeyRatiosByYear", "evEbitRatio")
+            hist["dividend_per_share"] = _extract_dividend_series(ticker_analysis)
 
     if get_hist:
         return ticker_name, hist

@@ -339,6 +339,15 @@ def optimize_weights_and_thresholds(
     MOMENTUM_METRICS = {"price momentum status"}
     MOMENTUM_WEIGHT_CAP = 1.0
 
+    # Minimum weight floors for academically proven metrics.
+    # These may show weak/negative correlation due to data quality issues
+    # in the historical adapter, but are well-established in research.
+    WEIGHT_FLOORS = {
+        "piotroski f-score status": 0.5,
+        "dividend yield status": 0.25,
+        "earnings quality status": 0.25,
+    }
+
     # Scale to [0, 2] range proportional to correlation strength
     # Exclude momentum from max_corr so fundamental metrics set the scale
     fundamental_corrs = {m: r for m, r in positive_metrics.items() if m not in MOMENTUM_METRICS}
@@ -354,9 +363,10 @@ def optimize_weights_and_thresholds(
             # Cap momentum-like metrics
             if m in MOMENTUM_METRICS:
                 w = min(w, MOMENTUM_WEIGHT_CAP)
-            optimized_weights[m] = w
+            optimized_weights[m] = max(w, WEIGHT_FLOORS.get(m, 0.0))
         else:
-            optimized_weights[m] = 0.0
+            # Apply floor even if correlation was negative/zero
+            optimized_weights[m] = WEIGHT_FLOORS.get(m, 0.0)
 
     # ---- Step 3: Re-score with optimized weights ----
     print("\n[Step 3] Re-scoring with optimized weights...")

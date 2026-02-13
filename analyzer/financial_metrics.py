@@ -886,95 +886,158 @@ def calculate_piotroski_f_score(
     roe: Optional[float] = None,
 ) -> Optional[int]:
     """
-    Simplified Piotroski F-Score (0-9).
-    Tests profitability, leverage, and operating efficiency signals.
+    Piotroski F-Score (0-9).
 
     Profitability (4 points):
-      1. ROE > 0
-      2. Operating cash flow > 0 (FCF yield > 0 as proxy)
-      3. ROE improving year-over-year
-      4. Cash flow > net income (accruals quality)
+      1. Net income > 0
+      2. Operating cash flow > 0
+      3. ROA improving year-over-year
+      4. Operating cash flow > net income (accruals quality)
 
     Leverage (3 points):
       5. D/E ratio decreased year-over-year
-      6. Current ratio improved (not available, skip → always 0)
-      7. No new share dilution (not available, skip → always 0)
+      6. Equity ratio (equity/assets) improved
+      7. No new share dilution (equity_per_share not declining)
 
     Efficiency (2 points):
       8. Gross margin improved year-over-year
       9. Asset turnover improved year-over-year
     """
     score = 0
+    fin_yr = ticker_analysis.get("companyFinancialsByYear", {})
+    key_yr = ticker_analysis.get("companyKeyRatiosByYear", {})
+
+    net_profit = _as_vals(fin_yr.get("netProfit"))
+    total_assets = _as_vals(fin_yr.get("totalAssets"))
+    total_liab = _as_vals(fin_yr.get("totalLiabilities"))
+    sales = _as_vals(fin_yr.get("sales"))
+    margin_series = _as_vals(fin_yr.get("profitMargin"))
+    de_series = _as_vals(fin_yr.get("debtToEquityRatio"))
+    equity_ps = _as_vals(key_yr.get("equityPerShare"))
+
+    # Operating cash flow from keyIndicators (latest snapshot)
+    op_cf = None
+    op_cf_raw = ticker_info.get("keyIndicators", {}).get("operatingCashFlow")
+    if op_cf_raw is not None:
+        try:
+            if isinstance(op_cf_raw, dict):
+                op_cf = float(op_cf_raw.get("value", 0))
+            else:
+                op_cf = float(op_cf_raw)
+        except (TypeError, ValueError):
+            pass
 
     # --- Profitability ---
-    # 1. Positive ROE
-    if roe is not None and roe > 0:
+    # 1. Net income > 0 (last year)
+    np_clean = _clean(net_profit)
+    if np_clean and np_clean[-1] > 0:
         score += 1
 
-    # 2. Positive operating cash flow (FCF yield as proxy)
-    if fcfy is not None and fcfy > 0:
+    # 2. Operating cash flow > 0
+    if op_cf is not None and op_cf > 0:
+        score += 1
+    elif fcfy is not None and fcfy > 0:
+        # fallback: use FCF yield as proxy
         score += 1
 
-    # 3. ROE improving (last year vs prior year)
-    roe_series = _as_vals(
-        ticker_analysis.get("companyKeyRatiosByYear", {}).get("returnOnEquityRatio")
-    )
-    roe_clean = _clean(roe_series)
-    if len(roe_clean) >= 2 and roe_clean[-1] > roe_clean[-2]:
-        score += 1
+    # 3. ROA improving (net_profit / total_assets)
+    np_c = _clean(net_profit)
+    ta_c = _clean(total_assets)
+    if len(np_c) >= 2 and len(ta_c) >= 2:
+        roa_now = _safe_div(np_c[-1], ta_c[-1])
+        roa_prev = _safe_div(np_c[-2], ta_c[-2])
+        if roa_now is not None and roa_prev is not None and roa_now > roa_prev:
+            score += 1
 
-    # 4. FCF > net income (accruals quality)
-    # Compare FCF yield to earnings yield (1/PE) as a proxy
-    pe_raw = ticker_info.get("keyIndicators", {}).get("priceEarningsRatio")
-    if fcfy is not None and pe_raw is not None:
-        try:
-            earnings_yield = 1.0 / float(pe_raw) if float(pe_raw) > 0 else None
-            if earnings_yield is not None and fcfy > earnings_yield:
-                score += 1
-        except Exception:
-            pass
+    # 4. Operating cash flow > net income (accruals quality)
+    if op_cf is not None and np_clean:
+        if op_cf > np_clean[-1]:
+            score += 1
 
     # --- Leverage ---
     # 5. D/E ratio decreased
-    de_series = [
-        e["value"]
-        for e in ticker_analysis.get("companyFinancialsByYear", {}).get(
-            "debtToEquityRatio", []
-        )
-        if e.get("reportType") == "FULL_YEAR" and "value" in e
-    ]
-    if len(de_series) >= 2 and de_series[-1] < de_series[-2]:
+    de_clean = _clean(de_series)
+    if len(de_clean) >= 2 and de_clean[-1] < de_clean[-2]:
         score += 1
 
-    # 6-7: Current ratio / share dilution — data not available from Avanza, skip
+    # 6. Equity ratio (equity / assets) improved
+    ta_c2 = _clean(total_assets)
+    tl_c = _clean(total_liab)
+    if len(ta_c2) >= 2 and len(tl_c) >= 2:
+        eq_ratio_now = _safe_div(ta_c2[-1] - tl_c[-1], ta_c2[-1])
+        eq_ratio_prev = _safe_div(ta_c2[-2] - tl_c[-2], ta_c2[-2])
+        if eq_ratio_now is not None and eq_ratio_prev is not None and eq_ratio_now > eq_ratio_prev:
+            score += 1
+
+    # 7. No share dilution (equity per share not declining)
+    eps_clean = _clean(equity_ps)
+    if len(eps_clean) >= 2 and eps_clean[-1] >= eps_clean[-2]:
+        score += 1
 
     # --- Efficiency ---
     # 8. Gross margin improved
-    margin_series = _as_vals(
-        ticker_analysis.get("companyFinancialsByYear", {}).get("profitMargin")
-    )
     margin_clean = _clean(margin_series)
     if len(margin_clean) >= 2 and margin_clean[-1] > margin_clean[-2]:
         score += 1
 
     # 9. Asset turnover improved (sales / total assets)
-    sales = _as_vals(
-        ticker_analysis.get("companyFinancialsByYear", {}).get("sales")
-    )
-    assets = [
-        e["value"]
-        for e in ticker_analysis.get("companyFinancialsByYear", {}).get(
-            "totalAssets", []
-        )
-        if e.get("reportType") == "FULL_YEAR" and "value" in e
-    ]
-    if len(sales) >= 2 and len(assets) >= 2:
-        turn_now = _safe_div(sales[-1], assets[-1])
-        turn_prev = _safe_div(sales[-2], assets[-2])
+    s_c = _clean(sales)
+    if len(s_c) >= 2 and len(ta_c) >= 2:
+        turn_now = _safe_div(s_c[-1], ta_c[-1])
+        turn_prev = _safe_div(s_c[-2], ta_c[-2])
         if turn_now is not None and turn_prev is not None and turn_now > turn_prev:
             score += 1
 
     return score
+
+
+def calculate_earnings_quality(
+    ticker_info: Dict[str, Any],
+    ticker_analysis: Dict[str, Any],
+) -> Optional[float]:
+    """
+    Accruals quality: operating cash flow / net income.
+    Values > 1.0 mean cash earnings exceed accounting earnings (good).
+    """
+    op_cf = None
+    op_cf_raw = ticker_info.get("keyIndicators", {}).get("operatingCashFlow")
+    if op_cf_raw is not None:
+        try:
+            if isinstance(op_cf_raw, dict):
+                op_cf = float(op_cf_raw.get("value", 0))
+            else:
+                op_cf = float(op_cf_raw)
+        except (TypeError, ValueError):
+            pass
+
+    net_profit = _as_vals(
+        ticker_analysis.get("companyFinancialsByYear", {}).get("netProfit")
+    )
+    np_clean = _clean(net_profit)
+
+    if op_cf is not None and np_clean and np_clean[-1] != 0:
+        return op_cf / abs(np_clean[-1])
+    return None
+
+
+def calculate_dividend_growth(ticker_analysis: Dict[str, Any], years: int = 3) -> Optional[float]:
+    """
+    Dividend per share CAGR over `years` years.
+    Uses dividendsByYear.dividendPerShare from Avanza.
+    """
+    raw = ticker_analysis.get("dividendsByYear", {}).get("dividendPerShare", [])
+    vals = [
+        e["value"]
+        for e in raw
+        if e.get("reportType") == "FULL_YEAR" and "value" in e and e["value"] > 0
+    ]
+    if len(vals) < years + 1:
+        return None
+    first = vals[-(years + 1)]
+    last = vals[-1]
+    if first <= 0:
+        return None
+    return (last / first) ** (1.0 / years) - 1.0
 
 
 def calculate_de(ticker_analysis, ticker_id=None):

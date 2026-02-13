@@ -20,6 +20,8 @@ from analyzer.financial_metrics import (
     calculate_gross_margin_stability,
     calculate_piotroski_f_score,
     calculate_revenue_trend,
+    calculate_earnings_quality,
+    calculate_dividend_growth,
 )
 
 
@@ -354,15 +356,21 @@ def _build_ticker_dicts(row, filtered, start_d, end_d):
     profit_per_share = _df_to_dict_list(row.get("profit_per_share"), end=end_d)
     roe_series = _df_to_dict_list(row.get("roe"), end=end_d)
     de_series = _df_to_dict_list(row.get("de_ratio"), end=end_d)
+    net_profit = _df_to_dict_list(row.get("net_profit"), end=end_d)
+    total_assets = _df_to_dict_list(row.get("total_assets"), end=end_d)
+    total_liab = _df_to_dict_list(row.get("total_liabilities"), end=end_d)
+    equity_ps = _df_to_dict_list(row.get("equity_per_share"), end=end_d)
+    ev_ebit = _df_to_dict_list(row.get("ev_ebit"), end=end_d)
+    div_ps = _df_to_dict_list(row.get("dividend_per_share"), end=end_d)
 
     ticker_analysis = {
         "companyFinancialsByYear": {
             "sales": revenue_year,
             "profitMargin": profit_margin,
             "debtToEquityRatio": de_series,
-            "totalAssets": [],   # not in CSV
-            "totalLiabilities": [],  # not in CSV
-            "netProfit": [],  # not in CSV
+            "totalAssets": total_assets,
+            "totalLiabilities": total_liab,
+            "netProfit": net_profit,
         },
         "companyFinancialsByQuarter": {
             "sales": revenue_quarter,
@@ -370,9 +378,16 @@ def _build_ticker_dicts(row, filtered, start_d, end_d):
         "companyKeyRatiosByYear": {
             "earningsPerShare": profit_per_share,
             "returnOnEquityRatio": roe_series,
+            "equityPerShare": equity_ps,
         },
         "companyKeyRatiosByQuarterQuarter": {
             "earningsPerShare": [],  # quarterly EPS not stored separately in CSV
+        },
+        "stockKeyRatiosByYear": {
+            "evEbitRatio": ev_ebit,
+        },
+        "dividendsByYear": {
+            "dividendPerShare": div_ps,
         },
     }
 
@@ -395,6 +410,7 @@ def _build_ticker_dicts(row, filtered, start_d, end_d):
         except (TypeError, ValueError):
             pass
 
+    # Operating cash flow not in CSV, but net_profit + total_assets lets Piotroski work
     ticker_info = {
         "keyIndicators": {
             "netMargin": latest_margin,
@@ -425,6 +441,8 @@ def calculate_metrics_given_hist() -> None:
         "piotroski f-score status",
         "price momentum status",
         "dividend yield status",
+        "earnings quality status",
+        "dividend growth status",
     ]
     metrics = ratio_keys + other_keys
 
@@ -569,6 +587,20 @@ def calculate_metrics_given_hist() -> None:
                     entry["dividend yield status"] = calculate_dividend_yield(ticker_info)
                 except Exception:
                     entry["dividend yield status"] = None
+
+                # earnings quality (OCF / net income)
+                try:
+                    eq = calculate_earnings_quality(ticker_info, ticker_analysis)
+                    entry["earnings quality status"] = eq
+                except Exception:
+                    entry["earnings quality status"] = None
+
+                # dividend growth (CAGR of dividend per share)
+                try:
+                    dg = calculate_dividend_growth(ticker_analysis, years=3)
+                    entry["dividend growth status"] = dg
+                except Exception:
+                    entry["dividend growth status"] = None
 
                 # price momentum: price / SMA200 at end of window
                 try:

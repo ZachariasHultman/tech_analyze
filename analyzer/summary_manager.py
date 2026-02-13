@@ -65,8 +65,10 @@ class SummaryManager:
             "eps yoy hit-rate status": None,
             # shareholder return
             "dividend yield status": None,
+            "dividend growth status": None,
             # composite quality
             "piotroski f-score status": None,
+            "earnings quality status": None,
             # momentum
             "price momentum status": None,
         }
