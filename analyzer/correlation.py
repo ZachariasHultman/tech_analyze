@@ -333,15 +333,28 @@ def optimize_weights_and_thresholds(
         print("[WARN] No metrics with positive correlation found.")
         return {}
 
+    # Metrics whose correlation with returns is partly circular
+    # (they measure price-derived signals, not fundamentals).
+    # Cap their weight so fundamentals remain the primary driver.
+    MOMENTUM_METRICS = {"price momentum status"}
+    MOMENTUM_WEIGHT_CAP = 1.0
+
     # Scale to [0, 2] range proportional to correlation strength
-    max_corr = max(positive_metrics.values())
+    # Exclude momentum from max_corr so fundamental metrics set the scale
+    fundamental_corrs = {m: r for m, r in positive_metrics.items() if m not in MOMENTUM_METRICS}
+    max_corr = max(fundamental_corrs.values()) if fundamental_corrs else max(positive_metrics.values())
+
     optimized_weights = {}
     for m in metrics:
         if m in positive_metrics:
-            # Scale: strongest metric gets 2.0, others proportionally
+            # Scale: strongest fundamental metric gets 2.0, others proportionally
             raw = positive_metrics[m] / max_corr * 2.0
             # Round to nearest 0.25 for cleaner weights
-            optimized_weights[m] = round(raw * 4) / 4
+            w = round(raw * 4) / 4
+            # Cap momentum-like metrics
+            if m in MOMENTUM_METRICS:
+                w = min(w, MOMENTUM_WEIGHT_CAP)
+            optimized_weights[m] = w
         else:
             optimized_weights[m] = 0.0
 

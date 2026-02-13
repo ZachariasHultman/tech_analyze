@@ -384,12 +384,23 @@ def _build_ticker_dicts(row, filtered, start_d, end_d):
     if pe_list:
         latest_pe = pe_list[-1]["value"]
 
+    # Dividend yield: scalar in CSV (not time-series)
+    div_yield_raw = row.get("dividend_yield")
+    div_yield = None
+    if div_yield_raw is not None:
+        try:
+            dv = float(div_yield_raw)
+            if not np.isnan(dv):
+                div_yield = dv
+        except (TypeError, ValueError):
+            pass
+
     ticker_info = {
         "keyIndicators": {
             "netMargin": latest_margin,
             "returnOnEquity": latest_roe,
             "priceEarningsRatio": latest_pe,
-            "directYield": None,  # not in CSV
+            "directYield": div_yield,
         },
     }
 
@@ -413,6 +424,7 @@ def calculate_metrics_given_hist() -> None:
         "gross margin stability status",
         "piotroski f-score status",
         "price momentum status",
+        "dividend yield status",
     ]
     metrics = ratio_keys + other_keys
 
@@ -551,6 +563,13 @@ def calculate_metrics_given_hist() -> None:
                 except Exception:
                     entry["piotroski f-score status"] = None
 
+                # dividend yield
+                try:
+                    from analyzer.financial_metrics import calculate_dividend_yield
+                    entry["dividend yield status"] = calculate_dividend_yield(ticker_info)
+                except Exception:
+                    entry["dividend yield status"] = None
+
                 # price momentum: price / SMA200 at end of window
                 try:
                     close = ohlc_df["close"]
@@ -567,6 +586,9 @@ def calculate_metrics_given_hist() -> None:
 
                 # ---- Ratios (sector-agnostic, using RATIO_SPECS) ----
                 for rk, spec in RATIO_SPECS.items():
+                    # Skip if we already computed a valid value (e.g. net debt-ebitda from direct extraction)
+                    if rk in entry and entry[rk] is not None:
+                        continue
                     num_name = spec["num"]
                     den_name = spec["den"]
                     num_is_rate = spec.get("num_is_rate", False)

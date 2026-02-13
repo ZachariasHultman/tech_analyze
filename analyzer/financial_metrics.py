@@ -350,7 +350,7 @@ def calculate_revenue_trend(ticker_analysis, ticker_id=None):
     yr = [
         {"date": e["date"], "value": e["value"]}
         for e in ticker_analysis["companyFinancialsByYear"]["sales"]
-        if e.get("reportType") == "FULL_YEAR" and "date" in e
+        if e.get("reportType") == "FULL_YEAR" and "date" in e and "value" in e
     ]
     qtr = [
         {"date": e["date"], "value": e["value"]}
@@ -387,12 +387,41 @@ def calculate_PE(ticker_analysis):
         if "reportType" in entry
         and entry["reportType"] == "FULL_YEAR"
         and "date" in entry
+        and "value" in entry
     ]
     latest_vals = [d["value"] for d in pe][-5:]
     if len(pe) >= 1:
         return latest_vals, pe
     else:
         return None, None
+
+
+def extract_profit_margin_hist(ticker_analysis):
+    """Extract profit margin time series from companyFinancialsByYear.profitMargin."""
+    try:
+        raw = ticker_analysis.get("companyFinancialsByYear", {}).get("profitMargin", [])
+        hist = [
+            {"date": e["date"], "value": e["value"]}
+            for e in raw
+            if "reportType" in e and e["reportType"] == "FULL_YEAR" and "date" in e and "value" in e
+        ]
+        return hist if hist else None
+    except Exception:
+        return None
+
+
+def extract_eps_hist(ticker_analysis):
+    """Extract EPS time series from companyKeyRatiosByYear.earningsPerShare."""
+    try:
+        raw = ticker_analysis.get("companyKeyRatiosByYear", {}).get("earningsPerShare", [])
+        hist = [
+            {"date": e["date"], "value": e["value"]}
+            for e in raw
+            if "reportType" in e and e["reportType"] == "FULL_YEAR" and "date" in e and "value" in e
+        ]
+        return hist if hist else None
+    except Exception:
+        return None
 
 
 def calculate_CAGR_helper(df, years: int):
@@ -912,7 +941,7 @@ def calculate_piotroski_f_score(
         for e in ticker_analysis.get("companyFinancialsByYear", {}).get(
             "debtToEquityRatio", []
         )
-        if e.get("reportType") == "FULL_YEAR"
+        if e.get("reportType") == "FULL_YEAR" and "value" in e
     ]
     if len(de_series) >= 2 and de_series[-1] < de_series[-2]:
         score += 1
@@ -937,7 +966,7 @@ def calculate_piotroski_f_score(
         for e in ticker_analysis.get("companyFinancialsByYear", {}).get(
             "totalAssets", []
         )
-        if e.get("reportType") == "FULL_YEAR"
+        if e.get("reportType") == "FULL_YEAR" and "value" in e
     ]
     if len(sales) >= 2 and len(assets) >= 2:
         turn_now = _safe_div(sales[-1], assets[-1])
@@ -952,7 +981,7 @@ def calculate_de(ticker_analysis, ticker_id=None):
     raw = [
         {"date": e["date"], "value": e["value"]}
         for e in ticker_analysis["companyFinancialsByYear"]["debtToEquityRatio"]
-        if e.get("reportType") == "FULL_YEAR" and "date" in e
+        if e.get("reportType") == "FULL_YEAR" and "date" in e and "value" in e
     ]
     if not raw:
         return None, None
@@ -965,17 +994,17 @@ def calculate_roe(ticker_analysis, ticker_id=None):
     net_profit = [
         {"date": e["date"], "value": e["value"]}
         for e in ticker_analysis["companyFinancialsByYear"]["netProfit"]
-        if e.get("reportType") == "FULL_YEAR" and "date" in e
+        if e.get("reportType") == "FULL_YEAR" and "date" in e and "value" in e
     ]
     total_assets = [
         e["value"]
         for e in ticker_analysis["companyFinancialsByYear"]["totalAssets"]
-        if e.get("reportType") == "FULL_YEAR" and "date" in e
+        if e.get("reportType") == "FULL_YEAR" and "date" in e and "value" in e
     ]
     total_liab = [
         e["value"]
         for e in ticker_analysis["companyFinancialsByYear"]["totalLiabilities"]
-        if e.get("reportType") == "FULL_YEAR" and "date" in e
+        if e.get("reportType") == "FULL_YEAR" and "date" in e and "value" in e
     ]
 
     if not (net_profit and total_assets and total_liab):

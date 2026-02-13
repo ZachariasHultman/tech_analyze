@@ -180,6 +180,9 @@ def get_data(
             hist["free_cashflow_yield"] = fcfy_hist
             hist["free_cashflow"] = free_cashflow_hist
             hist["netDebtEbitdaRatio"] = nd_ebitda_hist
+            hist["profit_margin"] = extract_profit_margin_hist(ticker_analysis)
+            hist["profit_per_share"] = extract_eps_hist(ticker_analysis)
+            hist["dividend_yield"] = div_yield
 
     else:
         sector = [{"sectorId": "51", "sectorName": "Investmentbolag"}]
@@ -239,6 +242,9 @@ def get_data(
             hist["calculated_nav_discount"] = calculated_nav_discount_hist
             hist["free_cashflow_yield"] = fcfy_hist
             hist["free_cashflow"] = free_cashflow_hist
+            hist["profit_margin"] = extract_profit_margin_hist(ticker_analysis)
+            hist["profit_per_share"] = extract_eps_hist(ticker_analysis)
+            hist["dividend_yield"] = div_yield
 
     if get_hist:
         return ticker_name, hist
