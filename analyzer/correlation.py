@@ -76,13 +76,20 @@ def _score_snapshot(df_slice, metrics_to_score=None, thresholds=None):
     frames = []
     if sm.summary is not None and not (isinstance(sm.summary, pd.DataFrame) and sm.summary.empty):
         s = sm.summary if isinstance(sm.summary, pd.DataFrame) else pd.DataFrame(sm.summary).T
-        frames.append(s)
+        # Drop columns that are entirely NA to avoid FutureWarning on concat
+        s = s.dropna(axis=1, how="all")
+        if not s.empty:
+            frames.append(s)
     if sm.summary_investment is not None and not (isinstance(sm.summary_investment, pd.DataFrame) and sm.summary_investment.empty):
         s = sm.summary_investment if isinstance(sm.summary_investment, pd.DataFrame) else pd.DataFrame(sm.summary_investment).T
-        frames.append(s)
+        s = s.dropna(axis=1, how="all")
+        if not s.empty:
+            frames.append(s)
 
     if not frames:
         return pd.DataFrame()
+    if len(frames) == 1:
+        return frames[0]
     return pd.concat(frames)
 
 
