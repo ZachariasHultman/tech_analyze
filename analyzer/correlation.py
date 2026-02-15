@@ -15,6 +15,7 @@ from itertools import product
 import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
+from scipy import optimize as sp_optimize
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
@@ -75,13 +76,20 @@ def _score_snapshot(df_slice, metrics_to_score=None, thresholds=None):
     frames = []
     if sm.summary is not None and not (isinstance(sm.summary, pd.DataFrame) and sm.summary.empty):
         s = sm.summary if isinstance(sm.summary, pd.DataFrame) else pd.DataFrame(sm.summary).T
-        frames.append(s)
+        # Drop columns that are entirely NA to avoid FutureWarning on concat
+        s = s.dropna(axis=1, how="all")
+        if not s.empty:
+            frames.append(s)
     if sm.summary_investment is not None and not (isinstance(sm.summary_investment, pd.DataFrame) and sm.summary_investment.empty):
         s = sm.summary_investment if isinstance(sm.summary_investment, pd.DataFrame) else pd.DataFrame(sm.summary_investment).T
-        frames.append(s)
+        s = s.dropna(axis=1, how="all")
+        if not s.empty:
+            frames.append(s)
 
     if not frames:
         return pd.DataFrame()
+    if len(frames) == 1:
+        return frames[0]
     return pd.concat(frames)
 
 
@@ -368,63 +376,50 @@ def optimize_weights_and_thresholds(
             # Apply floor even if correlation was negative/zero
             optimized_weights[m] = WEIGHT_FLOORS.get(m, 0.0)
 
-    # ---- Step 3: Re-score with optimized weights ----
-    print("\n[Step 3] Re-scoring with optimized weights...")
+    # ---- Step 3: Optimize thresholds per-metric ----
+    print("\n[Step 3] Optimizing thresholds per-metric...")
 
-    baseline_corrs = []
-    optimized_corrs = []
+    default_thresholds = _get_default_thresholds()
+    optimized_thresholds = dict(default_thresholds)
 
-    for timespan in target_timespans:
-        df_ts = df_total[df_total["timespan"] == timespan].copy()
-        if len(df_ts) < 5:
+    for m in metrics:
+        if optimized_weights.get(m, 0) == 0:
+            continue  # skip dropped metrics
+        if m not in default_thresholds:
             continue
 
-        returns = df_ts.set_index("company")["total_return"]
+        cur = default_thresholds[m]
+        candidates = _threshold_grid_for_metric(m, cur["nok"], cur["ok"], n_steps=2)
 
-        # Baseline score
-        scored_base = _score_snapshot(df_ts)
-        if not scored_base.empty and "points" in scored_base.columns:
-            s = pd.to_numeric(scored_base["points"], errors="coerce")
-            common = s.index.intersection(returns.index)
-            if len(common) >= 5:
-                sv = s.loc[common].astype(float)
-                rv = returns.loc[common].astype(float)
-                valid = sv.notna() & rv.notna()
-                if valid.sum() >= 5:
-                    rho, _ = sp_stats.spearmanr(sv[valid], rv[valid])
-                    if not np.isnan(rho):
-                        baseline_corrs.append(rho)
+        best_thr = cur
+        best_rho = -999
 
-        # Optimized score
-        sm = SummaryManager()
-        sm._weight_overrides = optimized_weights
-        sm.process_historical(df_ts, metrics)
-        calculate_score(sm, metrics_to_score=metrics)
+        for cand in candidates:
+            trial_thr = dict(optimized_thresholds)
+            trial_thr[m] = cand
+            rho = _avg_spearman_across_windows(
+                optimized_weights, df_total, target_timespans, metrics, trial_thr
+            )
+            if rho > best_rho:
+                best_rho = rho
+                best_thr = cand
 
-        scored_opt = sm.summary
-        if scored_opt is None or (isinstance(scored_opt, pd.DataFrame) and scored_opt.empty):
-            scored_opt = sm.summary_investment
-        if scored_opt is None or (isinstance(scored_opt, pd.DataFrame) and scored_opt.empty):
-            continue
-        if isinstance(scored_opt, dict):
-            scored_opt = pd.DataFrame(scored_opt).T
+        optimized_thresholds[m] = best_thr
 
-        s = pd.to_numeric(scored_opt.get("points", pd.Series(dtype=float)), errors="coerce")
-        common = s.index.intersection(returns.index)
-        if len(common) >= 5:
-            sv = s.loc[common].astype(float)
-            rv = returns.loc[common].astype(float)
-            valid = sv.notna() & rv.notna()
-            if valid.sum() >= 5:
-                rho, _ = sp_stats.spearmanr(sv[valid], rv[valid])
-                if not np.isnan(rho):
-                    optimized_corrs.append(rho)
+    # ---- Step 4: Re-score with optimized weights + thresholds ----
+    print("\n[Step 4] Re-scoring with optimized weights and thresholds...")
 
-    avg_baseline = np.mean(baseline_corrs) if baseline_corrs else 0
-    avg_optimized = np.mean(optimized_corrs) if optimized_corrs else 0
+    avg_baseline = _avg_spearman_across_windows(
+        {m: (2.0 if m in HIGHEST_WEIGHT_METRICS else 1.5 if m in HIGH_WEIGHT_METRICS else 1.0)
+         for m in metrics},
+        df_total, target_timespans, metrics
+    )
+    avg_optimized = _avg_spearman_across_windows(
+        optimized_weights, df_total, target_timespans, metrics, optimized_thresholds
+    )
 
-    # ---- Step 4: Per-company fundamental reliability ----
-    print("\n[Step 4] Computing per-company fundamental reliability...")
+    # ---- Step 5: Per-company fundamental reliability ----
+    print("\n[Step 5] Computing per-company fundamental reliability...")
 
     reliability = _compute_reliability(df, target_timespans)
 
@@ -466,18 +461,32 @@ def optimize_weights_and_thresholds(
 
     print("=" * 70)
 
+    # Report threshold changes
+    print("\nThreshold changes:")
+    for m in sorted(optimized_thresholds):
+        old = default_thresholds.get(m)
+        new = optimized_thresholds[m]
+        if old and (old["nok"] != new["nok"] or old["ok"] != new["ok"]):
+            print(f"  {m:40s}  ({old['nok']}, {old['ok']}) → ({new['nok']}, {new['ok']})")
+
     # Save results
+    # Convert thresholds to serializable format (nok, ok) tuples
+    thr_serializable = {m: {"nok": t["nok"], "ok": t["ok"]}
+                        for m, t in optimized_thresholds.items()}
     result = {
         "optimized_weights": optimized_weights,
+        "optimized_thresholds": thr_serializable,
         "per_metric_correlations": {m: round(r, 4) for m, r in avg_corrs.items()},
         "baseline_spearman": round(avg_baseline, 4),
         "optimized_spearman": round(avg_optimized, 4),
     }
 
-    out_path = "optimization_results.json"
+    out_path = "optimization_results_individual.json"
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2, default=str)
     print(f"\nSaved optimization results to {out_path}")
+
+    _save_thresholds_to_metrics_py(optimized_thresholds, "INDIVIDUAL")
 
     if reliability is not None and not reliability.empty:
         reliability.to_csv("company_reliability.csv", index=False)
@@ -564,6 +573,538 @@ def _compute_reliability(df, target_timespans):
 
 
 # ======================================================================
+# Shared helpers for combo / stepwise optimization
+# ======================================================================
+
+MOMENTUM_METRICS = {"price momentum status"}
+MOMENTUM_WEIGHT_CAP = 1.0
+WEIGHT_FLOORS = {
+    "piotroski f-score status": 0.5,
+    "dividend yield status": 0.25,
+    "earnings quality status": 0.25,
+}
+
+
+def _apply_weight_constraints(weights_dict):
+    """Enforce momentum cap and weight floors, clamp to [0, 2]."""
+    for m, w in weights_dict.items():
+        w = max(0.0, min(2.0, w))
+        if m in MOMENTUM_METRICS:
+            w = min(w, MOMENTUM_WEIGHT_CAP)
+        w = max(w, WEIGHT_FLOORS.get(m, 0.0))
+        weights_dict[m] = round(w * 4) / 4  # snap to 0.25
+    return weights_dict
+
+
+def _get_default_thresholds():
+    """Return the current hardcoded thresholds as {metric: {"nok": x, "ok": y}}."""
+    thresholds = {}
+    for m, spec in RATIO_SPECS.items():
+        thresholds[m] = {"nok": spec["thr"][0], "ok": spec["thr"][1]}
+    for m, (nok, ok) in GLOBAL_THRESHOLDS.items():
+        if nok is not None and ok is not None:
+            thresholds[m] = {"nok": nok, "ok": ok}
+    return thresholds
+
+
+def _threshold_grid_for_metric(metric, current_nok, current_ok, n_steps=3):
+    """Generate candidate (nok, ok) pairs around current thresholds.
+
+    For direction=+1: nok < ok, so we shift both and ensure nok < ok.
+    For direction=-1: nok > ok (e.g. gross margin stability), same logic.
+
+    Returns list of {"nok": x, "ok": y} dicts.
+    """
+    direction = DIRECTION_OVERRIDES.get(metric, +1)
+    if metric in RATIO_SPECS:
+        direction = RATIO_SPECS[metric]["dir"]
+
+    # Determine step size: ~20% of the range between nok and ok
+    span = abs(current_ok - current_nok)
+    if span < 1e-6:
+        # nok == ok (e.g. revenue trend where both are 0.0)
+        # Use absolute step based on the value magnitude
+        step = max(abs(current_ok) * 0.2, 0.02)
+    else:
+        step = span * 0.3
+
+    candidates = []
+    nok_range = [current_nok + i * step for i in range(-n_steps, n_steps + 1)]
+    ok_range = [current_ok + i * step for i in range(-n_steps, n_steps + 1)]
+
+    for nok in nok_range:
+        for ok in ok_range:
+            # Enforce ordering: for dir=+1 nok<ok, for dir=-1 nok>ok
+            if direction == +1 and nok >= ok:
+                continue
+            if direction == -1 and nok <= ok:
+                continue
+            candidates.append({"nok": round(nok, 4), "ok": round(ok, 4)})
+
+    # Always include the original
+    candidates.append({"nok": current_nok, "ok": current_ok})
+    # Deduplicate
+    seen = set()
+    unique = []
+    for c in candidates:
+        key = (c["nok"], c["ok"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+    return unique
+
+
+def _score_with_weights(df_ts, metrics, weights_dict, thresholds_dict=None):
+    """Score a timespan slice with custom weights and thresholds.
+
+    thresholds_dict: optional {metric: {"nok": x, "ok": y}}
+    Returns (scores, returns) aligned Series, or (None, None).
+    """
+    sm = SummaryManager()
+    sm._weight_overrides = weights_dict
+    sm.process_historical(df_ts, metrics, thresholds=thresholds_dict)
+    calculate_score(sm, metrics_to_score=metrics)
+
+    scored = sm.summary
+    if scored is None or (isinstance(scored, pd.DataFrame) and scored.empty):
+        scored = sm.summary_investment
+    if scored is None or (isinstance(scored, pd.DataFrame) and scored.empty):
+        return None, None
+    if isinstance(scored, dict):
+        scored = pd.DataFrame(scored).T
+
+    s = pd.to_numeric(scored.get("points", pd.Series(dtype=float)), errors="coerce")
+    returns = df_ts.set_index("company")["total_return"]
+    common = s.index.intersection(returns.index)
+    if len(common) < 5:
+        return None, None
+
+    sv = s.loc[common].astype(float)
+    rv = returns.loc[common].astype(float)
+    valid = sv.notna() & rv.notna()
+    if valid.sum() < 5:
+        return None, None
+    return sv[valid], rv[valid]
+
+
+def _avg_spearman_across_windows(weights_dict, df_total, target_timespans, metrics,
+                                  thresholds_dict=None):
+    """Compute average Spearman correlation across timespans."""
+    corrs = []
+    for ts in target_timespans:
+        df_ts = df_total[df_total["timespan"] == ts].copy()
+        if len(df_ts) < 5:
+            continue
+        sv, rv = _score_with_weights(df_ts, metrics, weights_dict, thresholds_dict)
+        if sv is None:
+            continue
+        rho, _ = sp_stats.spearmanr(sv, rv)
+        if not np.isnan(rho):
+            corrs.append(rho)
+    return np.mean(corrs) if corrs else 0.0
+
+
+def _get_starting_weights_and_thresholds(csv_path):
+    """Run method 1 (individual) to get starting weights and thresholds."""
+    result = optimize_weights_and_thresholds(csv_path=csv_path)
+    if not result or "optimized_weights" not in result:
+        metrics = _all_scored_metrics()
+        return {m: 1.0 for m in metrics}, _get_default_thresholds()
+    weights = result["optimized_weights"]
+    thresholds = result.get("optimized_thresholds", _get_default_thresholds())
+    return weights, thresholds
+
+
+def _prepare_data(csv_path):
+    """Load data and determine target timespans."""
+    df = _load_timespan_csv(csv_path)
+    if df.empty:
+        return None, None, None, None
+    metrics = _all_scored_metrics()
+    target_timespans = [t for t in df["timespan"].unique() if "TOTAL" in str(t)]
+    if not target_timespans:
+        target_timespans = list(df["timespan"].unique())
+    df_total = df[df["timespan"].isin(target_timespans)]
+    return df, df_total, target_timespans, metrics
+
+
+def _cv_score(weights_dict, df_total, target_timespans, metrics,
+              thresholds_dict=None):
+    """Leave-one-out cross-validation score across time windows."""
+    if len(target_timespans) < 2:
+        return _avg_spearman_across_windows(
+            weights_dict, df_total, target_timespans, metrics, thresholds_dict
+        )
+
+    val_corrs = []
+    for held_out in target_timespans:
+        df_val = df_total[df_total["timespan"] == held_out].copy()
+        if len(df_val) < 5:
+            continue
+        sv, rv = _score_with_weights(df_val, metrics, weights_dict, thresholds_dict)
+        if sv is None:
+            continue
+        rho, _ = sp_stats.spearmanr(sv, rv)
+        if not np.isnan(rho):
+            val_corrs.append(rho)
+
+    return np.mean(val_corrs) if val_corrs else 0.0
+
+
+def _save_thresholds_to_metrics_py(thresholds_dict, variant):
+    """Append/update OPTIMIZED_THRESHOLDS_<VARIANT> dict in metrics.py.
+
+    variant: "INDIVIDUAL", "COMBO", or "STEPWISE"
+    """
+    metrics_path = os.path.join(os.path.dirname(__file__), "metrics.py")
+    if not os.path.exists(metrics_path):
+        print(f"[WARN] metrics.py not found at {metrics_path}, skipping threshold save.")
+        return
+
+    dict_name = f"OPTIMIZED_THRESHOLDS_{variant.upper()}"
+
+    with open(metrics_path, "r") as f:
+        content = f.read()
+
+    # Build the new dict string
+    lines = [f"{dict_name} = {{"]
+    for m in sorted(thresholds_dict.keys()):
+        t = thresholds_dict[m]
+        lines.append(f'    "{m}": ({t["nok"]}, {t["ok"]}),')
+    lines.append("}")
+    new_block = "\n".join(lines) + "\n"
+
+    # Check if dict already exists — replace it
+    import re
+    pattern = rf'^{dict_name}\s*=\s*\{{.*?\}}\s*$'
+    match = re.search(pattern, content, re.MULTILINE | re.DOTALL)
+
+    if match:
+        content = content[:match.start()] + new_block + content[match.end():]
+    else:
+        # Append before the get_metrics_threshold function, or at end
+        insert_marker = "\n\ndef get_metrics_threshold"
+        if insert_marker in content:
+            content = content.replace(
+                insert_marker,
+                "\n\n" + new_block + insert_marker
+            )
+        else:
+            content = content.rstrip() + "\n\n\n" + new_block
+
+    with open(metrics_path, "w") as f:
+        f.write(content)
+    print(f"  Saved {dict_name} to {metrics_path}")
+
+
+# ======================================================================
+# Phase C: Grid sweep + cross-validation (combo)
+# ======================================================================
+
+def optimize_combo(csv_path="metrics_by_timespan.csv"):
+    """Grid sweep around independent-correlation weights AND thresholds
+    with cross-validation.
+
+    1. Get starting weights + thresholds from method 1
+    2. Coordinate descent: for each metric, sweep weight and threshold
+    3. Evaluate using CV across time windows
+    4. Pick the best combination
+    """
+    print("\n" + "=" * 70)
+    print("  COMBO OPTIMIZATION (Grid Sweep + Cross-Validation)")
+    print("=" * 70)
+
+    print("\n[Step 1] Running independent correlation to get starting point...")
+    start_weights, start_thresholds = _get_starting_weights_and_thresholds(csv_path)
+
+    df, df_total, target_timespans, metrics = _prepare_data(csv_path)
+    if df is None:
+        print("[WARN] No data.")
+        return {}
+
+    print(f"\n[Step 2] Grid sweep over {len(metrics)} metrics (weights + thresholds), "
+          f"{len(target_timespans)} time windows...")
+
+    best_weights = dict(start_weights)
+    best_thresholds = dict(start_thresholds)
+    best_cv = _cv_score(best_weights, df_total, target_timespans, metrics, best_thresholds)
+    print(f"  Starting CV Spearman: {best_cv:+.4f}")
+
+    # Coordinate descent: sweep weight AND threshold per metric, repeat
+    max_rounds = 3
+    for round_num in range(1, max_rounds + 1):
+        improved = False
+        for m in metrics:
+            # --- Weight sweep ---
+            current_w = best_weights.get(m, 0.0)
+            weight_candidates = sorted(set(
+                max(0.0, min(2.0, round((current_w + d) * 4) / 4))
+                for d in [-0.5, -0.25, 0.0, 0.25, 0.5]
+            ))
+
+            for cand_w in weight_candidates:
+                if cand_w == best_weights.get(m, 0.0):
+                    continue
+                trial_w = dict(best_weights)
+                trial_w[m] = cand_w
+                trial_w = _apply_weight_constraints(trial_w)
+
+                cv = _cv_score(trial_w, df_total, target_timespans, metrics, best_thresholds)
+                if cv > best_cv + 1e-6:
+                    best_cv = cv
+                    best_weights = trial_w
+                    improved = True
+
+            # --- Threshold sweep (only for metrics with weight > 0) ---
+            if best_weights.get(m, 0) > 0 and m in best_thresholds:
+                cur_thr = best_thresholds[m]
+                thr_candidates = _threshold_grid_for_metric(
+                    m, cur_thr["nok"], cur_thr["ok"], n_steps=2
+                )
+
+                for cand_thr in thr_candidates:
+                    if cand_thr["nok"] == cur_thr["nok"] and cand_thr["ok"] == cur_thr["ok"]:
+                        continue
+                    trial_thr = dict(best_thresholds)
+                    trial_thr[m] = cand_thr
+
+                    cv = _cv_score(best_weights, df_total, target_timespans, metrics, trial_thr)
+                    if cv > best_cv + 1e-6:
+                        best_cv = cv
+                        best_thresholds = trial_thr
+                        improved = True
+
+        print(f"  Round {round_num}: CV Spearman = {best_cv:+.4f}")
+        if not improved:
+            print("  Converged.")
+            break
+
+    best_weights = _apply_weight_constraints(best_weights)
+
+    # Compute baseline for comparison
+    baseline_cv = _cv_score(
+        {m: 1.0 for m in metrics}, df_total, target_timespans, metrics
+    )
+
+    # Report
+    print("\n" + "-" * 70)
+    print("  COMBO OPTIMIZATION RESULTS")
+    print("-" * 70)
+    print(f"\n  Equal-weight CV Spearman:    {baseline_cv:+.4f}")
+    print(f"  Combo-optimized CV Spearman: {best_cv:+.4f}")
+    print(f"\nOptimized weights:")
+    for m in sorted(best_weights, key=lambda x: best_weights[x], reverse=True):
+        w = best_weights[m]
+        sw = start_weights.get(m, 0.0)
+        delta = w - sw
+        print(f"  {m:40s}  w={w:.2f}  (indep={sw:.2f}, Δ={delta:+.2f})")
+
+    default_thr = _get_default_thresholds()
+    print(f"\nThreshold changes:")
+    for m in sorted(best_thresholds):
+        old = default_thr.get(m)
+        new = best_thresholds[m]
+        if old and (old["nok"] != new["nok"] or old["ok"] != new["ok"]):
+            print(f"  {m:40s}  ({old['nok']}, {old['ok']}) → ({new['nok']}, {new['ok']})")
+
+    # Reliability
+    reliability = _compute_reliability(df, target_timespans)
+
+    # Save
+    thr_serializable = {m: {"nok": t["nok"], "ok": t["ok"]}
+                        for m, t in best_thresholds.items()}
+    result = {
+        "method": "combo_grid_cv",
+        "optimized_weights": best_weights,
+        "optimized_thresholds": thr_serializable,
+        "cv_spearman": round(best_cv, 4),
+        "baseline_cv_spearman": round(baseline_cv, 4),
+        "independent_weights": start_weights,
+    }
+
+    out_path = "optimization_results_combo.json"
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2, default=str)
+    print(f"\nSaved to {out_path}")
+
+    _save_thresholds_to_metrics_py(best_thresholds, "COMBO")
+
+    if reliability is not None and not reliability.empty:
+        reliability.to_csv("company_reliability_combo.csv", index=False)
+
+    print("=" * 70)
+    return result
+
+
+# ======================================================================
+# Phase D: Scipy numerical optimization (stepwise)
+# ======================================================================
+
+def optimize_stepwise(csv_path="metrics_by_timespan.csv"):
+    """Numerical optimization of all weights AND thresholds simultaneously.
+
+    Uses Nelder-Mead (derivative-free) to maximize average Spearman
+    correlation across time windows with cross-validation.
+
+    The parameter vector is: [weight_0, ..., weight_N, nok_0, ok_0, ..., nok_N, ok_N]
+    for all metrics that have thresholds.
+    """
+    print("\n" + "=" * 70)
+    print("  STEPWISE OPTIMIZATION (Scipy Nelder-Mead + Cross-Validation)")
+    print("=" * 70)
+
+    print("\n[Step 1] Running independent correlation to get starting point...")
+    start_weights, start_thresholds = _get_starting_weights_and_thresholds(csv_path)
+
+    df, df_total, target_timespans, metrics = _prepare_data(csv_path)
+    if df is None:
+        print("[WARN] No data.")
+        return {}
+
+    # Order metrics consistently for vector operations
+    metric_list = sorted(metrics)
+    # Metrics that have thresholds to optimize
+    thr_metrics = [m for m in metric_list if m in start_thresholds]
+
+    # Build x0: [weights..., nok_0, ok_0, nok_1, ok_1, ...]
+    n_weights = len(metric_list)
+    n_thr = len(thr_metrics)
+    x0_weights = [start_weights.get(m, 0.0) for m in metric_list]
+    x0_thresholds = []
+    for m in thr_metrics:
+        t = start_thresholds[m]
+        x0_thresholds.extend([t["nok"], t["ok"]])
+    x0 = np.array(x0_weights + x0_thresholds)
+
+    print(f"\n[Step 2] Optimizing {n_weights} weights + {n_thr * 2} threshold params over "
+          f"{len(target_timespans)} time windows...")
+
+    eval_count = [0]
+
+    def objective(x):
+        """Negative CV Spearman (we minimize)."""
+        # Decode weights
+        w_dict = {}
+        for i, m in enumerate(metric_list):
+            w_dict[m] = float(np.clip(x[i], 0.0, 2.0))
+        w_dict = _apply_weight_constraints(w_dict)
+
+        # Decode thresholds
+        thr_dict = dict(start_thresholds)  # start with defaults for non-optimized
+        for j, m in enumerate(thr_metrics):
+            nok = float(x[n_weights + j * 2])
+            ok = float(x[n_weights + j * 2 + 1])
+
+            # Enforce ordering based on direction
+            direction = DIRECTION_OVERRIDES.get(m, +1)
+            if m in RATIO_SPECS:
+                direction = RATIO_SPECS[m]["dir"]
+            if direction == +1 and nok >= ok:
+                ok = nok + 0.01
+            elif direction == -1 and nok <= ok:
+                nok = ok + 0.01
+
+            thr_dict[m] = {"nok": round(nok, 4), "ok": round(ok, 4)}
+
+        cv = _cv_score(w_dict, df_total, target_timespans, metrics, thr_dict)
+        eval_count[0] += 1
+        if eval_count[0] % 50 == 0:
+            print(f"    eval {eval_count[0]}: CV Spearman = {cv:+.4f}")
+        return -cv
+
+    result_opt = sp_optimize.minimize(
+        objective,
+        x0,
+        method="Nelder-Mead",
+        options={
+            "maxiter": 1000,
+            "maxfev": 5000,
+            "xatol": 0.02,
+            "fatol": 1e-4,
+            "adaptive": True,
+        },
+    )
+
+    # Extract final weights
+    best_weights = {}
+    for i, m in enumerate(metric_list):
+        best_weights[m] = float(np.clip(result_opt.x[i], 0.0, 2.0))
+    best_weights = _apply_weight_constraints(best_weights)
+
+    # Extract final thresholds
+    best_thresholds = dict(start_thresholds)
+    for j, m in enumerate(thr_metrics):
+        nok = float(result_opt.x[n_weights + j * 2])
+        ok = float(result_opt.x[n_weights + j * 2 + 1])
+        direction = DIRECTION_OVERRIDES.get(m, +1)
+        if m in RATIO_SPECS:
+            direction = RATIO_SPECS[m]["dir"]
+        if direction == +1 and nok >= ok:
+            ok = nok + 0.01
+        elif direction == -1 and nok <= ok:
+            nok = ok + 0.01
+        best_thresholds[m] = {"nok": round(nok, 4), "ok": round(ok, 4)}
+
+    best_cv = -result_opt.fun
+    baseline_cv = _cv_score(
+        {m: 1.0 for m in metrics}, df_total, target_timespans, metrics
+    )
+
+    # Report
+    print(f"\n  Converged after {result_opt.nfev} evaluations")
+    print("\n" + "-" * 70)
+    print("  STEPWISE OPTIMIZATION RESULTS")
+    print("-" * 70)
+    print(f"\n  Equal-weight CV Spearman:       {baseline_cv:+.4f}")
+    print(f"  Stepwise-optimized CV Spearman: {best_cv:+.4f}")
+    print(f"\nOptimized weights:")
+    for m in sorted(best_weights, key=lambda x: best_weights[x], reverse=True):
+        w = best_weights[m]
+        sw = start_weights.get(m, 0.0)
+        delta = w - sw
+        print(f"  {m:40s}  w={w:.2f}  (indep={sw:.2f}, Δ={delta:+.2f})")
+
+    default_thr = _get_default_thresholds()
+    print(f"\nThreshold changes:")
+    for m in sorted(best_thresholds):
+        old = default_thr.get(m)
+        new = best_thresholds[m]
+        if old and (old["nok"] != new["nok"] or old["ok"] != new["ok"]):
+            print(f"  {m:40s}  ({old['nok']}, {old['ok']}) → ({new['nok']}, {new['ok']})")
+
+    # Reliability
+    reliability = _compute_reliability(df, target_timespans)
+
+    # Save
+    thr_serializable = {m: {"nok": t["nok"], "ok": t["ok"]}
+                        for m, t in best_thresholds.items()}
+    result = {
+        "method": "stepwise_nelder_mead_cv",
+        "optimized_weights": best_weights,
+        "optimized_thresholds": thr_serializable,
+        "cv_spearman": round(best_cv, 4),
+        "baseline_cv_spearman": round(baseline_cv, 4),
+        "independent_weights": start_weights,
+        "scipy_converged": bool(result_opt.success),
+        "scipy_message": result_opt.message,
+        "n_evaluations": int(result_opt.nfev),
+    }
+
+    out_path = "optimization_results_stepwise.json"
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2, default=str)
+    print(f"\nSaved to {out_path}")
+
+    _save_thresholds_to_metrics_py(best_thresholds, "STEPWISE")
+
+    if reliability is not None and not reliability.empty:
+        reliability.to_csv("company_reliability_stepwise.csv", index=False)
+
+    print("=" * 70)
+    return result
+
+
+# ======================================================================
 # CLI entry point
 # ======================================================================
 
@@ -575,15 +1116,23 @@ if __name__ == "__main__":
                     help="Run baseline correlation report")
     ap.add_argument("--optimize", action="store_true",
                     help="Run correlation-based weight optimization")
+    ap.add_argument("--optimize-combo", action="store_true",
+                    help="Grid sweep + cross-validation optimization")
+    ap.add_argument("--optimize-stepwise", action="store_true",
+                    help="Scipy numerical optimization + cross-validation")
     ap.add_argument("--csv", default="metrics_by_timespan.csv",
                     help="Path to metrics_by_timespan.csv")
     args = ap.parse_args()
 
-    if args.baseline:
+    if args.optimize_combo:
+        optimize_combo(args.csv)
+    elif args.optimize_stepwise:
+        optimize_stepwise(args.csv)
+    elif args.baseline:
         baseline_correlation(args.csv)
     elif args.optimize:
         optimize_weights_and_thresholds(csv_path=args.csv)
     else:
         print("Running baseline correlation analysis...")
-        print("(Use --optimize for weight optimization + reliability scoring)")
+        print("(Use --optimize, --optimize-combo, or --optimize-stepwise)")
         baseline_correlation(args.csv)

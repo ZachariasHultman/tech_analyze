@@ -19,7 +19,7 @@ from data_processing import *
 from importlib.metadata import version
 
 from historical_calc import calculate_metrics_given_hist
-from correlation import baseline_correlation, optimize_weights_and_thresholds
+from correlation import baseline_correlation, optimize_weights_and_thresholds, optimize_combo, optimize_stepwise
 from datetime import date
 import argparse
 
@@ -46,23 +46,40 @@ def setup_env():
     return avanza_user
 
 
-def _load_optimized_weights():
-    """Load optimized weights from optimization_results.json if it exists.
-    Returns the weight dict or None."""
+def _load_optimized_params(variant=None):
+    """Load optimized weights and thresholds from the appropriate results file.
+
+    variant: None (default/legacy), "individual", "combo", or "stepwise"
+    Returns (weights_dict, thresholds_dict) — either may be None.
+    """
     import json
-    weights_path = os.path.join(project_root, "optimization_results.json")
+    if variant == "individual":
+        filename = "optimization_results_individual.json"
+    elif variant == "combo":
+        filename = "optimization_results_combo.json"
+    elif variant == "stepwise":
+        filename = "optimization_results_stepwise.json"
+    else:
+        # Legacy fallback: try individual first, then old name
+        filename = "optimization_results_individual.json"
+        path = os.path.join(project_root, filename)
+        if not os.path.exists(path):
+            filename = "optimization_results.json"
+
+    weights_path = os.path.join(project_root, filename)
     if not os.path.exists(weights_path):
-        return None
+        return None, None
     try:
         with open(weights_path) as f:
             data = json.load(f)
         weights = data.get("optimized_weights")
+        thresholds = data.get("optimized_thresholds")
         if weights:
-            print(f"Loaded optimized weights from {weights_path}")
-            return weights
+            print(f"Loaded optimized params from {weights_path}")
+            return weights, thresholds
     except Exception as e:
-        print(f"Warning: could not load optimized weights: {e}")
-    return None
+        print(f"Warning: could not load optimized params: {e}")
+    return None, None
 
 
 def main():
@@ -77,8 +94,13 @@ Usage examples:
   python main.py                    Run live analysis (uses optimized weights if available)
   python main.py --save             Run live analysis AND save data snapshots to data/
   python main.py --correlate        Show per-metric correlation with stock returns
-  python main.py --optimize         Optimize weights based on historical data
-  python main.py --no-opt           Run live analysis with default (hardcoded) weights
+  python main.py --optimize-individual Optimize weights (independent correlation)
+  python main.py --optimize-combo     Optimize weights (grid sweep + cross-validation)
+  python main.py --optimize-stepwise  Optimize weights (scipy numerical + cross-validation)
+  python main.py --no-opt             Run live analysis with default (hardcoded) weights
+  python main.py --use-individual     Use individual optimization results for live analysis
+  python main.py --use-combo          Use combo optimization results for live analysis
+  python main.py --use-stepwise       Use stepwise optimization results for live analysis
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -98,36 +120,75 @@ Usage examples:
         help="Show per-metric Spearman correlation with forward returns",
     )
     ap.add_argument(
-        "--optimize",
+        "--optimize", "--optimize-individual",
         action="store_true",
-        help="Optimize metric weights based on historical correlation (saves optimization_results.json)",
+        dest="optimize_individual",
+        help="Optimize metric weights based on individual correlation (saves optimization_results_individual.json)",
+    )
+    ap.add_argument(
+        "--optimize-combo",
+        action="store_true",
+        help="Optimize with grid sweep + cross-validation (saves optimization_results_combo.json)",
+    )
+    ap.add_argument(
+        "--optimize-stepwise",
+        action="store_true",
+        help="Optimize with scipy numerical + cross-validation (saves optimization_results_stepwise.json)",
     )
     ap.add_argument(
         "--no-opt",
         action="store_true",
         help="Ignore optimized weights, use hardcoded defaults",
     )
+    ap.add_argument(
+        "--use-individual",
+        action="store_true",
+        help="Use individual optimization results for live analysis",
+    )
+    ap.add_argument(
+        "--use-combo",
+        action="store_true",
+        help="Use combo optimization results for live analysis",
+    )
+    ap.add_argument(
+        "--use-stepwise",
+        action="store_true",
+        help="Use stepwise optimization results for live analysis",
+    )
     args = ap.parse_args()
     os.makedirs("data", exist_ok=True)
 
     save_data = args.save or args.get_hist
 
-    # --correlate and --optimize: use saved historical data
-    if args.correlate or args.optimize:
+    # --correlate and --optimize*: use saved historical data
+    if args.correlate or args.optimize_individual or args.optimize_combo or args.optimize_stepwise:
         calculate_metrics_given_hist()
         baseline_correlation("metrics_by_timespan.csv")
-        if args.optimize:
+        if args.optimize_individual:
             optimize_weights_and_thresholds("metrics_by_timespan.csv")
+        if args.optimize_combo:
+            optimize_combo("metrics_by_timespan.csv")
+        if args.optimize_stepwise:
+            optimize_stepwise("metrics_by_timespan.csv")
         return 0
 
     # --- Live analysis ---
     manager = SummaryManager()
 
-    # Load optimized weights unless --no-opt
+    # Load optimized weights and thresholds unless --no-opt
     if not args.no_opt:
-        opt_weights = _load_optimized_weights()        
+        if args.use_individual:
+            opt_weights, opt_thresholds = _load_optimized_params("individual")
+        elif args.use_combo:
+            opt_weights, opt_thresholds = _load_optimized_params("combo")
+        elif args.use_stepwise:
+            opt_weights, opt_thresholds = _load_optimized_params("stepwise")
+        else:
+            opt_weights, opt_thresholds = _load_optimized_params()
         if opt_weights:
             manager._weight_overrides = opt_weights
+        if opt_thresholds:
+            manager._threshold_overrides = opt_thresholds
 
     avanza = setup_env()
     ticker_ids = next(

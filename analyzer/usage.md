@@ -12,7 +12,13 @@ python main.py --no-opt	Live analysis but ignores optimized weights, uses the ha
 
 
 # Typical workflow
-
+```bash
 python main.py --save — run periodically to collect data snapshots
-python main.py --optimize — once you have enough snapshots, optimize weights
-python main.py — from now on, live analysis uses the optimized weights automatically
+python main.py --optimize-individual — once you have enough snapshots, optimize weights or
+python main.py --optimize-combo — once you have enough snapshots, optimize weights or
+python main.py --optimize-stepwise
+python analyzer/main.py --use-individual         # explicit: uses optimization_results_individual.json
+python analyzer/main.py --use-combo              # uses optimization_results_combo.json
+python analyzer/main.py --use-stepwise           # uses optimization_results_stepwise.json
+python analyzer/main.py --no-opt                 # ignore all optimized weights and thresholds
+````
