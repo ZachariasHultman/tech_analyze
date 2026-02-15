@@ -46,11 +46,11 @@ def setup_env():
     return avanza_user
 
 
-def _load_optimized_weights(variant=None):
-    """Load optimized weights from the appropriate results file.
+def _load_optimized_params(variant=None):
+    """Load optimized weights and thresholds from the appropriate results file.
 
     variant: None (default/legacy), "individual", "combo", or "stepwise"
-    Returns the weight dict or None.
+    Returns (weights_dict, thresholds_dict) — either may be None.
     """
     import json
     if variant == "individual":
@@ -68,17 +68,18 @@ def _load_optimized_weights(variant=None):
 
     weights_path = os.path.join(project_root, filename)
     if not os.path.exists(weights_path):
-        return None
+        return None, None
     try:
         with open(weights_path) as f:
             data = json.load(f)
         weights = data.get("optimized_weights")
+        thresholds = data.get("optimized_thresholds")
         if weights:
-            print(f"Loaded optimized weights from {weights_path}")
-            return weights
+            print(f"Loaded optimized params from {weights_path}")
+            return weights, thresholds
     except Exception as e:
-        print(f"Warning: could not load optimized weights: {e}")
-    return None
+        print(f"Warning: could not load optimized params: {e}")
+    return None, None
 
 
 def main():
@@ -174,18 +175,20 @@ Usage examples:
     # --- Live analysis ---
     manager = SummaryManager()
 
-    # Load optimized weights unless --no-opt
+    # Load optimized weights and thresholds unless --no-opt
     if not args.no_opt:
         if args.use_individual:
-            opt_weights = _load_optimized_weights("individual")
+            opt_weights, opt_thresholds = _load_optimized_params("individual")
         elif args.use_combo:
-            opt_weights = _load_optimized_weights("combo")
+            opt_weights, opt_thresholds = _load_optimized_params("combo")
         elif args.use_stepwise:
-            opt_weights = _load_optimized_weights("stepwise")
+            opt_weights, opt_thresholds = _load_optimized_params("stepwise")
         else:
-            opt_weights = _load_optimized_weights()
+            opt_weights, opt_thresholds = _load_optimized_params()
         if opt_weights:
             manager._weight_overrides = opt_weights
+        if opt_thresholds:
+            manager._threshold_overrides = opt_thresholds
 
     avanza = setup_env()
     ticker_ids = next(
