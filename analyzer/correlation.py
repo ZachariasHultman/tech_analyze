@@ -15,6 +15,7 @@ from itertools import product
 import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
+from scipy import optimize as sp_optimize
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
@@ -474,7 +475,7 @@ def optimize_weights_and_thresholds(
         "optimized_spearman": round(avg_optimized, 4),
     }
 
-    out_path = "optimization_results.json"
+    out_path = "optimization_results_individual.json"
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2, default=str)
     print(f"\nSaved optimization results to {out_path}")
@@ -564,6 +565,343 @@ def _compute_reliability(df, target_timespans):
 
 
 # ======================================================================
+# Shared helpers for combo / stepwise optimization
+# ======================================================================
+
+MOMENTUM_METRICS = {"price momentum status"}
+MOMENTUM_WEIGHT_CAP = 1.0
+WEIGHT_FLOORS = {
+    "piotroski f-score status": 0.5,
+    "dividend yield status": 0.25,
+    "earnings quality status": 0.25,
+}
+
+
+def _apply_weight_constraints(weights_dict):
+    """Enforce momentum cap and weight floors, clamp to [0, 2]."""
+    for m, w in weights_dict.items():
+        w = max(0.0, min(2.0, w))
+        if m in MOMENTUM_METRICS:
+            w = min(w, MOMENTUM_WEIGHT_CAP)
+        w = max(w, WEIGHT_FLOORS.get(m, 0.0))
+        weights_dict[m] = round(w * 4) / 4  # snap to 0.25
+    return weights_dict
+
+
+def _score_with_weights(df_ts, metrics, weights_dict):
+    """Score a timespan slice with custom weights, return (scores, returns) aligned."""
+    sm = SummaryManager()
+    sm._weight_overrides = weights_dict
+    sm.process_historical(df_ts, metrics)
+    calculate_score(sm, metrics_to_score=metrics)
+
+    scored = sm.summary
+    if scored is None or (isinstance(scored, pd.DataFrame) and scored.empty):
+        scored = sm.summary_investment
+    if scored is None or (isinstance(scored, pd.DataFrame) and scored.empty):
+        return None, None
+    if isinstance(scored, dict):
+        scored = pd.DataFrame(scored).T
+
+    s = pd.to_numeric(scored.get("points", pd.Series(dtype=float)), errors="coerce")
+    returns = df_ts.set_index("company")["total_return"]
+    common = s.index.intersection(returns.index)
+    if len(common) < 5:
+        return None, None
+
+    sv = s.loc[common].astype(float)
+    rv = returns.loc[common].astype(float)
+    valid = sv.notna() & rv.notna()
+    if valid.sum() < 5:
+        return None, None
+    return sv[valid], rv[valid]
+
+
+def _avg_spearman_across_windows(weights_dict, df_total, target_timespans, metrics):
+    """Compute average Spearman correlation across timespans for a given weight set."""
+    corrs = []
+    for ts in target_timespans:
+        df_ts = df_total[df_total["timespan"] == ts].copy()
+        if len(df_ts) < 5:
+            continue
+        sv, rv = _score_with_weights(df_ts, metrics, weights_dict)
+        if sv is None:
+            continue
+        rho, _ = sp_stats.spearmanr(sv, rv)
+        if not np.isnan(rho):
+            corrs.append(rho)
+    return np.mean(corrs) if corrs else 0.0
+
+
+def _get_starting_weights(csv_path):
+    """Run method 1 (independent correlation) to get starting weights."""
+    result = optimize_weights_and_thresholds(csv_path=csv_path)
+    if not result or "optimized_weights" not in result:
+        # Fallback: equal weights
+        metrics = _all_scored_metrics()
+        return {m: 1.0 for m in metrics}
+    return result["optimized_weights"]
+
+
+def _prepare_data(csv_path):
+    """Load data and determine target timespans."""
+    df = _load_timespan_csv(csv_path)
+    if df.empty:
+        return None, None, None, None
+    metrics = _all_scored_metrics()
+    target_timespans = [t for t in df["timespan"].unique() if "TOTAL" in str(t)]
+    if not target_timespans:
+        target_timespans = list(df["timespan"].unique())
+    df_total = df[df["timespan"].isin(target_timespans)]
+    return df, df_total, target_timespans, metrics
+
+
+def _cv_score(weights_dict, df_total, target_timespans, metrics):
+    """Leave-one-out cross-validation score across time windows.
+
+    For each window: train weights are evaluated on the held-out window.
+    Since we're evaluating a fixed weight set (not re-fitting), this measures
+    how well the weights generalize across different time periods.
+    """
+    if len(target_timespans) < 2:
+        return _avg_spearman_across_windows(weights_dict, df_total, target_timespans, metrics)
+
+    val_corrs = []
+    for held_out in target_timespans:
+        df_val = df_total[df_total["timespan"] == held_out].copy()
+        if len(df_val) < 5:
+            continue
+        sv, rv = _score_with_weights(df_val, metrics, weights_dict)
+        if sv is None:
+            continue
+        rho, _ = sp_stats.spearmanr(sv, rv)
+        if not np.isnan(rho):
+            val_corrs.append(rho)
+
+    return np.mean(val_corrs) if val_corrs else 0.0
+
+
+# ======================================================================
+# Phase C: Grid sweep + cross-validation (combo)
+# ======================================================================
+
+def optimize_combo(csv_path="metrics_by_timespan.csv"):
+    """Grid sweep around independent-correlation weights with cross-validation.
+
+    1. Get starting weights from method 1
+    2. For each metric, try weights in [start-0.5, start+0.5] step 0.25
+    3. Evaluate each combination using CV across time windows
+    4. Pick the best combination
+
+    To keep the search tractable, metrics are optimized in groups:
+    sweep one metric at a time while holding others at their current best.
+    This is coordinate descent on a grid.
+    """
+    print("\n" + "=" * 70)
+    print("  COMBO OPTIMIZATION (Grid Sweep + Cross-Validation)")
+    print("=" * 70)
+
+    # Get starting point from method 1
+    print("\n[Step 1] Running independent correlation to get starting weights...")
+    start_weights = _get_starting_weights(csv_path)
+
+    df, df_total, target_timespans, metrics = _prepare_data(csv_path)
+    if df is None:
+        print("[WARN] No data.")
+        return {}
+
+    print(f"\n[Step 2] Grid sweep over {len(metrics)} metrics, "
+          f"{len(target_timespans)} time windows...")
+
+    best_weights = dict(start_weights)
+    best_cv = _cv_score(best_weights, df_total, target_timespans, metrics)
+    print(f"  Starting CV Spearman: {best_cv:+.4f}")
+
+    # Coordinate descent: sweep one metric at a time, repeat until stable
+    max_rounds = 3
+    for round_num in range(1, max_rounds + 1):
+        improved = False
+        for m in metrics:
+            current_w = best_weights.get(m, 0.0)
+            # Grid: 5 steps around current weight
+            candidates = [
+                round((current_w + delta) * 4) / 4
+                for delta in [-0.5, -0.25, 0.0, 0.25, 0.5]
+            ]
+            # Clamp and deduplicate
+            candidates = sorted(set(max(0.0, min(2.0, c)) for c in candidates))
+
+            for cand_w in candidates:
+                if cand_w == best_weights.get(m, 0.0):
+                    continue
+                trial = dict(best_weights)
+                trial[m] = cand_w
+                trial = _apply_weight_constraints(trial)
+
+                cv = _cv_score(trial, df_total, target_timespans, metrics)
+                if cv > best_cv + 1e-6:
+                    best_cv = cv
+                    best_weights = trial
+                    improved = True
+
+        print(f"  Round {round_num}: CV Spearman = {best_cv:+.4f}")
+        if not improved:
+            print("  Converged.")
+            break
+
+    best_weights = _apply_weight_constraints(best_weights)
+
+    # Compute baseline for comparison
+    baseline_cv = _cv_score(
+        {m: 1.0 for m in metrics}, df_total, target_timespans, metrics
+    )
+
+    # Report
+    print("\n" + "-" * 70)
+    print("  COMBO OPTIMIZATION RESULTS")
+    print("-" * 70)
+    print(f"\n  Equal-weight CV Spearman:    {baseline_cv:+.4f}")
+    print(f"  Combo-optimized CV Spearman: {best_cv:+.4f}")
+    print(f"\nOptimized weights:")
+    for m in sorted(best_weights, key=lambda x: best_weights[x], reverse=True):
+        w = best_weights[m]
+        sw = start_weights.get(m, 0.0)
+        delta = w - sw
+        print(f"  {m:40s}  w={w:.2f}  (indep={sw:.2f}, Δ={delta:+.2f})")
+
+    # Reliability
+    reliability = _compute_reliability(df, target_timespans)
+
+    # Save
+    result = {
+        "method": "combo_grid_cv",
+        "optimized_weights": best_weights,
+        "cv_spearman": round(best_cv, 4),
+        "baseline_cv_spearman": round(baseline_cv, 4),
+        "independent_weights": start_weights,
+    }
+
+    out_path = "optimization_results_combo.json"
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2, default=str)
+    print(f"\nSaved to {out_path}")
+
+    if reliability is not None and not reliability.empty:
+        reliability.to_csv("company_reliability_combo.csv", index=False)
+
+    print("=" * 70)
+    return result
+
+
+# ======================================================================
+# Phase D: Scipy numerical optimization (stepwise)
+# ======================================================================
+
+def optimize_stepwise(csv_path="metrics_by_timespan.csv"):
+    """Numerical optimization of all weights simultaneously using scipy.
+
+    Uses Nelder-Mead (derivative-free) to maximize average Spearman
+    correlation across time windows with cross-validation.
+    """
+    print("\n" + "=" * 70)
+    print("  STEPWISE OPTIMIZATION (Scipy Nelder-Mead + Cross-Validation)")
+    print("=" * 70)
+
+    print("\n[Step 1] Running independent correlation to get starting weights...")
+    start_weights = _get_starting_weights(csv_path)
+
+    df, df_total, target_timespans, metrics = _prepare_data(csv_path)
+    if df is None:
+        print("[WARN] No data.")
+        return {}
+
+    # Order metrics consistently for vector operations
+    metric_list = sorted(metrics)
+    x0 = np.array([start_weights.get(m, 0.0) for m in metric_list])
+
+    print(f"\n[Step 2] Optimizing {len(metric_list)} weights over "
+          f"{len(target_timespans)} time windows...")
+
+    eval_count = [0]
+
+    def objective(x):
+        """Negative CV Spearman (we minimize)."""
+        w_dict = {}
+        for i, m in enumerate(metric_list):
+            w_dict[m] = float(np.clip(x[i], 0.0, 2.0))
+        w_dict = _apply_weight_constraints(w_dict)
+        cv = _cv_score(w_dict, df_total, target_timespans, metrics)
+        eval_count[0] += 1
+        if eval_count[0] % 50 == 0:
+            print(f"    eval {eval_count[0]}: CV Spearman = {cv:+.4f}")
+        return -cv
+
+    result_opt = sp_optimize.minimize(
+        objective,
+        x0,
+        method="Nelder-Mead",
+        options={
+            "maxiter": 500,
+            "maxfev": 2000,
+            "xatol": 0.05,
+            "fatol": 1e-4,
+            "adaptive": True,
+        },
+    )
+
+    # Extract final weights
+    best_weights = {}
+    for i, m in enumerate(metric_list):
+        best_weights[m] = float(np.clip(result_opt.x[i], 0.0, 2.0))
+    best_weights = _apply_weight_constraints(best_weights)
+
+    best_cv = -result_opt.fun
+    baseline_cv = _cv_score(
+        {m: 1.0 for m in metrics}, df_total, target_timespans, metrics
+    )
+
+    # Report
+    print(f"\n  Converged after {result_opt.nfev} evaluations")
+    print("\n" + "-" * 70)
+    print("  STEPWISE OPTIMIZATION RESULTS")
+    print("-" * 70)
+    print(f"\n  Equal-weight CV Spearman:       {baseline_cv:+.4f}")
+    print(f"  Stepwise-optimized CV Spearman: {best_cv:+.4f}")
+    print(f"\nOptimized weights:")
+    for m in sorted(best_weights, key=lambda x: best_weights[x], reverse=True):
+        w = best_weights[m]
+        sw = start_weights.get(m, 0.0)
+        delta = w - sw
+        print(f"  {m:40s}  w={w:.2f}  (indep={sw:.2f}, Δ={delta:+.2f})")
+
+    # Reliability
+    reliability = _compute_reliability(df, target_timespans)
+
+    # Save
+    result = {
+        "method": "stepwise_nelder_mead_cv",
+        "optimized_weights": best_weights,
+        "cv_spearman": round(best_cv, 4),
+        "baseline_cv_spearman": round(baseline_cv, 4),
+        "independent_weights": start_weights,
+        "scipy_converged": bool(result_opt.success),
+        "scipy_message": result_opt.message,
+        "n_evaluations": int(result_opt.nfev),
+    }
+
+    out_path = "optimization_results_stepwise.json"
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2, default=str)
+    print(f"\nSaved to {out_path}")
+
+    if reliability is not None and not reliability.empty:
+        reliability.to_csv("company_reliability_stepwise.csv", index=False)
+
+    print("=" * 70)
+    return result
+
+
+# ======================================================================
 # CLI entry point
 # ======================================================================
 
@@ -575,15 +913,23 @@ if __name__ == "__main__":
                     help="Run baseline correlation report")
     ap.add_argument("--optimize", action="store_true",
                     help="Run correlation-based weight optimization")
+    ap.add_argument("--optimize-combo", action="store_true",
+                    help="Grid sweep + cross-validation optimization")
+    ap.add_argument("--optimize-stepwise", action="store_true",
+                    help="Scipy numerical optimization + cross-validation")
     ap.add_argument("--csv", default="metrics_by_timespan.csv",
                     help="Path to metrics_by_timespan.csv")
     args = ap.parse_args()
 
-    if args.baseline:
+    if args.optimize_combo:
+        optimize_combo(args.csv)
+    elif args.optimize_stepwise:
+        optimize_stepwise(args.csv)
+    elif args.baseline:
         baseline_correlation(args.csv)
     elif args.optimize:
         optimize_weights_and_thresholds(csv_path=args.csv)
     else:
         print("Running baseline correlation analysis...")
-        print("(Use --optimize for weight optimization + reliability scoring)")
+        print("(Use --optimize, --optimize-combo, or --optimize-stepwise)")
         baseline_correlation(args.csv)
