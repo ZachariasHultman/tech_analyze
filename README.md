@@ -19,7 +19,11 @@ python3 analyzer/main.py --save
 ```
 Run metric optimizer
 ```bash
-python3 analyzer/main.py --optimize
+python3 analyzer/main.py --optimize-combo
+```
+Use optimized
+```bash
+python analyzer/main.py --use-combo  
 ```
 
 # Secret Sauce
