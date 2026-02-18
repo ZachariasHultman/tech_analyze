@@ -380,15 +380,24 @@ def optimize_weights_and_thresholds(
     print("\n[Step 3] Optimizing thresholds per-metric...")
 
     default_thresholds = _get_default_thresholds()
-    optimized_thresholds = dict(default_thresholds)
+    # Warm-start: use previous individual thresholds if available
+    prev_w, prev_t = _load_previous_results("individual")
+    if prev_t:
+        print("  Warm-starting thresholds from previous individual results")
+        optimized_thresholds = dict(prev_t)
+    else:
+        optimized_thresholds = dict(default_thresholds)
 
     for m in metrics:
         if optimized_weights.get(m, 0) == 0:
             continue  # skip dropped metrics
-        if m not in default_thresholds:
-            continue
+        if m not in optimized_thresholds:
+            if m in default_thresholds:
+                optimized_thresholds[m] = default_thresholds[m]
+            else:
+                continue
 
-        cur = default_thresholds[m]
+        cur = optimized_thresholds[m]
         candidates = _threshold_grid_for_metric(m, cur["nok"], cur["ok"], n_steps=2)
 
         best_thr = cur
@@ -704,8 +713,66 @@ def _avg_spearman_across_windows(weights_dict, df_total, target_timespans, metri
     return np.mean(corrs) if corrs else 0.0
 
 
-def _get_starting_weights_and_thresholds(csv_path):
-    """Run method 1 (individual) to get starting weights and thresholds."""
+def _load_previous_results(variant):
+    """Load previous optimization results if they exist.
+
+    variant: "individual", "combo", or "stepwise"
+    Returns (weights_dict, thresholds_dict) or (None, None) if not found.
+    """
+    filenames = {
+        "individual": "optimization_results_individual.json",
+        "combo": "optimization_results_combo.json",
+        "stepwise": "optimization_results_stepwise.json",
+    }
+    filename = filenames.get(variant)
+    if not filename:
+        return None, None
+
+    path = os.path.join(os.getcwd(), filename)
+    if not os.path.exists(path):
+        # Also check project root
+        path = os.path.join(project_root, filename)
+    if not os.path.exists(path):
+        return None, None
+
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        weights = data.get("optimized_weights")
+        thresholds = data.get("optimized_thresholds")
+        if weights:
+            print(f"  Loaded previous results from {path}")
+            return weights, thresholds
+    except Exception as e:
+        print(f"  [WARN] Could not load {path}: {e}")
+    return None, None
+
+
+def _get_starting_weights_and_thresholds(csv_path, variant):
+    """Get starting weights and thresholds for an optimization run.
+
+    Priority:
+    1. Previous results for this variant (warm-start / iterative refinement)
+    2. Previous individual results (as base for combo/stepwise)
+    3. Run individual optimization fresh (fallback)
+    """
+    # 1. Check for previous results of the same method
+    prev_w, prev_t = _load_previous_results(variant)
+    if prev_w:
+        print(f"  → Warm-starting from previous {variant} results")
+        thresholds = prev_t if prev_t else _get_default_thresholds()
+        return prev_w, thresholds
+
+    # 2. For combo/stepwise, check for existing individual results
+    if variant in ("combo", "stepwise"):
+        ind_w, ind_t = _load_previous_results("individual")
+        if ind_w:
+            print(f"  → Starting from previous individual results")
+            thresholds = ind_t if ind_t else _get_default_thresholds()
+            return ind_w, thresholds
+
+    # 3. Run individual optimization fresh
+    print(f"  → No previous results found, running individual optimization...")
     result = optimize_weights_and_thresholds(csv_path=csv_path)
     if not result or "optimized_weights" not in result:
         metrics = _all_scored_metrics()
@@ -814,8 +881,8 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
     print("  COMBO OPTIMIZATION (Grid Sweep + Cross-Validation)")
     print("=" * 70)
 
-    print("\n[Step 1] Running independent correlation to get starting point...")
-    start_weights, start_thresholds = _get_starting_weights_and_thresholds(csv_path)
+    print("\n[Step 1] Getting starting point...")
+    start_weights, start_thresholds = _get_starting_weights_and_thresholds(csv_path, "combo")
 
     df, df_total, target_timespans, metrics = _prepare_data(csv_path)
     if df is None:
@@ -953,8 +1020,8 @@ def optimize_stepwise(csv_path="metrics_by_timespan.csv"):
     print("  STEPWISE OPTIMIZATION (Scipy Nelder-Mead + Cross-Validation)")
     print("=" * 70)
 
-    print("\n[Step 1] Running independent correlation to get starting point...")
-    start_weights, start_thresholds = _get_starting_weights_and_thresholds(csv_path)
+    print("\n[Step 1] Getting starting point...")
+    start_weights, start_thresholds = _get_starting_weights_and_thresholds(csv_path, "stepwise")
 
     df, df_total, target_timespans, metrics = _prepare_data(csv_path)
     if df is None:
