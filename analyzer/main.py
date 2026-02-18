@@ -201,8 +201,13 @@ Usage examples:
         None,
     )["orderbookIds"]
 
+    skipped = []
     for ticker_id in tqdm(ticker_ids, desc="Processing tickers"):
-        ticker_info = avanza.get_stock_info(ticker_id)
+        try:
+            ticker_info = avanza.get_stock_info(ticker_id)
+        except Exception as e:
+            skipped.append((ticker_id, str(e)))
+            continue
 
         if not ticker_info["sectors"] or ticker_id == "1640718":
             continue
@@ -232,6 +237,13 @@ Usage examples:
                 f"data/{ticker_name}_{date.today()}.csv",
                 asof=date.today(),
             )
+
+    if skipped:
+        print(f"\n[WARN] Skipped {len(skipped)} ticker(s) due to API errors:")
+        for tid, err in skipped:
+            print(f"  ID {tid}: {err}")
+            print(f"    → https://www.avanza.se/aktier/om-aktien.html/{tid}/")
+        print()
 
     calculate_score(manager)
 
