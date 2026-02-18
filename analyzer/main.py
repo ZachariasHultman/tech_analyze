@@ -90,13 +90,29 @@ def _extract_orderbook_id(index_name):
     return None
 
 
-def _update_watchlist(avanza, manager, top_n=10):
-    """Add top-scoring stocks to the 'Bör köpa' watchlist.
+def _load_reliability_map():
+    """Load company reliability scores from company_reliability.csv."""
+    rel_path = os.path.join(project_root, "company_reliability.csv")
+    reliability = {}
+    if os.path.exists(rel_path):
+        try:
+            rel_df = pd.read_csv(rel_path)
+            for _, r in rel_df.iterrows():
+                reliability[r["company"]] = {
+                    "spearman": r["spearman"],
+                    "reliable": r.get("reliable", r["spearman"] > 0.1),
+                }
+        except Exception:
+            pass
+    return reliability
 
-    - Gets or identifies the watchlist
-    - Extracts top N stocks by points from both summary tables
-    - Skips stocks already on the list
-    - Adds new ones
+
+def _update_watchlist(avanza, manager, top_n=10):
+    """Add top-scoring stocks with good reliability to 'Bör köpa' watchlist.
+
+    - Filters by both score (points) and reliability (spearman > 0.1)
+    - Adds qualified stocks that aren't already on the list
+    - Removes stocks from the list that no longer qualify
     """
     watchlists = avanza.get_watchlists()
 
@@ -118,6 +134,9 @@ def _update_watchlist(avanza, manager, top_n=10):
     watchlist_id = _wl_attr(target, "watchListId") or _wl_attr(target, "id")
     existing_ids = set(str(oid) for oid in (_wl_attr(target, "orderbookIds") or []))
 
+    # Load reliability data
+    reliability = _load_reliability_map()
+
     # Collect all scored stocks from both summaries
     frames = []
     for summary in [manager.summary, manager.summary_investment]:
@@ -131,13 +150,42 @@ def _update_watchlist(avanza, manager, top_n=10):
 
     combined = pd.concat(frames)
     combined["_pts"] = pd.to_numeric(combined["points"], errors="coerce")
-    combined = combined.sort_values("_pts", ascending=False).head(top_n)
+
+    # Add reliability info and filter
+    combined["_spearman"] = combined.index.map(
+        lambda c: reliability.get(c, {}).get("spearman", float("nan"))
+    )
+    combined["_reliable"] = combined.index.map(
+        lambda c: reliability.get(c, {}).get("reliable", False)
+    )
+
+    # Only keep stocks that are both high-scoring and reliable
+    qualified = combined[combined["_reliable"]].copy()
+    qualified = qualified.sort_values("_pts", ascending=False).head(top_n)
+
+    # Build set of orderbook IDs that should be on the list
+    qualified_ids = set()
+    for idx in qualified.index:
+        oid = _extract_orderbook_id(idx)
+        if oid:
+            qualified_ids.add(oid)
 
     added = []
     already = []
     failed = []
+    removed = []
+    skipped_unreliable = []
 
-    for idx in combined.index:
+    # Report stocks that were filtered out due to bad reliability
+    unreliable = combined[~combined["_reliable"]].sort_values("_pts", ascending=False)
+    for idx in unreliable.head(5).index:
+        pts = unreliable.loc[idx, "_pts"]
+        sp = unreliable.loc[idx, "_spearman"]
+        if pd.notna(pts) and pts > 0:
+            skipped_unreliable.append((idx, pts, sp))
+
+    # Add qualified stocks not yet on list
+    for idx in qualified.index:
         orderbook_id = _extract_orderbook_id(idx)
         if not orderbook_id:
             failed.append((idx, "could not extract orderbookId"))
@@ -153,20 +201,48 @@ def _update_watchlist(avanza, manager, top_n=10):
         except Exception as e:
             failed.append((idx, str(e)))
 
+    # Remove stocks from watchlist that no longer qualify
+    # Build a reverse map: orderbookId -> company name (from combined)
+    id_to_name = {}
+    for idx in combined.index:
+        oid = _extract_orderbook_id(idx)
+        if oid:
+            id_to_name[oid] = idx
+
+    for oid in existing_ids:
+        if oid not in qualified_ids:
+            name = id_to_name.get(oid, f"Unknown ({oid})")
+            try:
+                avanza.remove_from_watchlist(oid, watchlist_id)
+                removed.append(name)
+            except Exception as e:
+                failed.append((name, f"remove failed: {e}"))
+
     # Report
     print(f"\n{'=' * 70}")
-    print(f"  WATCHLIST UPDATE: 'Bör köpa' (top {top_n})")
+    print(f"  WATCHLIST UPDATE: 'Bör köpa' (top {top_n}, reliable only)")
     print(f"{'=' * 70}")
     if added:
         print(f"\n  Added {len(added)} stock(s):")
         for name in added:
-            pts = combined.loc[name, "_pts"]
-            print(f"    + {name}  ({pts:+.2f} pts)")
+            pts = qualified.loc[name, "_pts"]
+            sp = qualified.loc[name, "_spearman"]
+            print(f"    + {name}  ({pts:+.2f} pts, r={sp:.2f})")
     if already:
         print(f"\n  Already on list ({len(already)}):")
         for name in already:
-            pts = combined.loc[name, "_pts"]
-            print(f"    = {name}  ({pts:+.2f} pts)")
+            pts = qualified.loc[name, "_pts"]
+            sp = qualified.loc[name, "_spearman"]
+            print(f"    = {name}  ({pts:+.2f} pts, r={sp:.2f})")
+    if removed:
+        print(f"\n  Removed {len(removed)} stock(s) (no longer qualify):")
+        for name in removed:
+            print(f"    - {name}")
+    if skipped_unreliable:
+        print(f"\n  Skipped (high score but unreliable):")
+        for name, pts, sp in skipped_unreliable:
+            sp_str = f"{sp:.2f}" if pd.notna(sp) else "N/A"
+            print(f"    ~ {name}  ({pts:+.2f} pts, r={sp_str})")
     if failed:
         print(f"\n  Failed ({len(failed)}):")
         for name, err in failed:
