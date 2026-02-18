@@ -99,8 +99,15 @@ def _update_watchlist(avanza, manager, top_n=10):
     - Adds new ones
     """
     watchlists = avanza.get_watchlists()
+
+    def _wl_attr(wl, key):
+        """Get attribute from watchlist (supports both dict and pydantic model)."""
+        if isinstance(wl, dict):
+            return wl.get(key)
+        return getattr(wl, key, None)
+
     target = next(
-        (wl for wl in watchlists if wl.get("name") == "Bör köpa"), None
+        (wl for wl in watchlists if _wl_attr(wl, "name") == "Bör köpa"), None
     )
 
     if target is None:
@@ -108,8 +115,8 @@ def _update_watchlist(avanza, manager, top_n=10):
         print("  Please create it manually in Avanza first, then re-run.")
         return
 
-    watchlist_id = target["id"]
-    existing_ids = set(str(oid) for oid in target.get("orderbookIds", []))
+    watchlist_id = _wl_attr(target, "watchListId") or _wl_attr(target, "id")
+    existing_ids = set(str(oid) for oid in (_wl_attr(target, "orderbookIds") or []))
 
     # Collect all scored stocks from both summaries
     frames = []
