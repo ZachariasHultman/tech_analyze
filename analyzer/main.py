@@ -82,6 +82,91 @@ def _load_optimized_params(variant=None):
     return None, None
 
 
+def _extract_orderbook_id(index_name):
+    """Extract the orderbookId from an index like 'Glencore plc 2165695'."""
+    parts = str(index_name).rsplit(" ", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[1]
+    return None
+
+
+def _update_watchlist(avanza, manager, top_n=10):
+    """Add top-scoring stocks to the 'Bör köpa' watchlist.
+
+    - Gets or identifies the watchlist
+    - Extracts top N stocks by points from both summary tables
+    - Skips stocks already on the list
+    - Adds new ones
+    """
+    watchlists = avanza.get_watchlists()
+    target = next(
+        (wl for wl in watchlists if wl.get("name") == "Bör köpa"), None
+    )
+
+    if target is None:
+        print("\n[WARN] Watchlist 'Bör köpa' not found on Avanza.")
+        print("  Please create it manually in Avanza first, then re-run.")
+        return
+
+    watchlist_id = target["id"]
+    existing_ids = set(str(oid) for oid in target.get("orderbookIds", []))
+
+    # Collect all scored stocks from both summaries
+    frames = []
+    for summary in [manager.summary, manager.summary_investment]:
+        if summary is not None and isinstance(summary, pd.DataFrame) and not summary.empty:
+            if "points" in summary.columns:
+                frames.append(summary)
+
+    if not frames:
+        print("\n[WARN] No scored stocks to add to watchlist.")
+        return
+
+    combined = pd.concat(frames)
+    combined["_pts"] = pd.to_numeric(combined["points"], errors="coerce")
+    combined = combined.sort_values("_pts", ascending=False).head(top_n)
+
+    added = []
+    already = []
+    failed = []
+
+    for idx in combined.index:
+        orderbook_id = _extract_orderbook_id(idx)
+        if not orderbook_id:
+            failed.append((idx, "could not extract orderbookId"))
+            continue
+
+        if orderbook_id in existing_ids:
+            already.append(idx)
+            continue
+
+        try:
+            avanza.add_to_watchlist(orderbook_id, watchlist_id)
+            added.append(idx)
+        except Exception as e:
+            failed.append((idx, str(e)))
+
+    # Report
+    print(f"\n{'=' * 70}")
+    print(f"  WATCHLIST UPDATE: 'Bör köpa' (top {top_n})")
+    print(f"{'=' * 70}")
+    if added:
+        print(f"\n  Added {len(added)} stock(s):")
+        for name in added:
+            pts = combined.loc[name, "_pts"]
+            print(f"    + {name}  ({pts:+.2f} pts)")
+    if already:
+        print(f"\n  Already on list ({len(already)}):")
+        for name in already:
+            pts = combined.loc[name, "_pts"]
+            print(f"    = {name}  ({pts:+.2f} pts)")
+    if failed:
+        print(f"\n  Failed ({len(failed)}):")
+        for name, err in failed:
+            print(f"    ! {name}: {err}")
+    print(f"{'=' * 70}\n")
+
+
 def main():
     pd.set_option("display.max_rows", None)  # Show all rows
     pd.set_option("display.max_colwidth", None)  # Show full cell content
@@ -101,6 +186,8 @@ Usage examples:
   python main.py --use-individual     Use individual optimization results for live analysis
   python main.py --use-combo          Use combo optimization results for live analysis
   python main.py --use-stepwise       Use stepwise optimization results for live analysis
+  python main.py --watchlist          Add top 10 stocks to 'Bör köpa' watchlist
+  python main.py --watchlist --watchlist-top 5   Add top 5 instead
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -154,6 +241,17 @@ Usage examples:
         "--use-stepwise",
         action="store_true",
         help="Use stepwise optimization results for live analysis",
+    )
+    ap.add_argument(
+        "--watchlist",
+        action="store_true",
+        help="Add top-scoring stocks to 'Bör köpa' watchlist on Avanza",
+    )
+    ap.add_argument(
+        "--watchlist-top",
+        type=int,
+        default=10,
+        help="Number of top stocks to add to watchlist (default: 10)",
     )
     args = ap.parse_args()
     os.makedirs("data", exist_ok=True)
@@ -248,6 +346,9 @@ Usage examples:
     calculate_score(manager)
 
     manager._display(save_df=True)
+
+    if args.watchlist:
+        _update_watchlist(avanza, manager, top_n=args.watchlist_top)
 
     return 0
 
