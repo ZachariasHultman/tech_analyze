@@ -26,8 +26,21 @@ Use optimized
 python analyzer/main.py --use-combo  
 ```
 
+# Run live analysis and add top 10 to watchlist
+```bash
+python analyzer/main.py --watchlist
+```
+# Top 5 instead
+```bash
+python analyzer/main.py --watchlist --watchlist-top 5
+```
+# Combine with optimization variant
+```bash
+python analyzer/main.py --use-combo --watchlist
+```
+
 # Secret Sauce
-The metrics.py file is missing on purpose—it’s where all the magic happens. It contains my secret formula for what makes a stock “good” (or at least what I think makes it good).
+The metrics.py file is missing on purpose—it’s where all the magic happens. It contains my secret formula for what makes a stock “good” (or at least what I think makes it good). If you add a new company then its needed to re optimize to get the reliability score.
 
 # Disclaimer
 I have no affiliation with this Swedish bank, nor do I have any formal education in economics. This script is just an experiment, loosely based on things I’ve read from smarter people on the internet. Use at your own risk.
