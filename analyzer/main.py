@@ -356,24 +356,19 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
     lines = [f"Stock Screener — {date.today()}", ""]
 
     if push_results:
-        name = push_results["target_name"]
-        n    = push_results["top_n"]
+        n = push_results["top_n"]
         lines.append("=" * 50)
-        lines.append(f"  {name.upper()} (top {n} by score × reliability)")
+        lines.append(f"  CONSIDER BUYING (top {n})")
         lines.append("=" * 50)
 
-        if push_results["added"]:
-            lines.append(f"\nAdded ({len(push_results['added'])}):")
-            for nm, pts, sp, comb in push_results["added"]:
-                lines.append(f"  + {nm}  ({pts:+.2f} pts, r={sp:.2f})")
-
-        if push_results["already"]:
-            lines.append(f"\nAlready on list ({len(push_results['already'])}):")
-            for nm, pts, sp, comb in push_results["already"]:
-                lines.append(f"  = {nm}  ({pts:+.2f} pts, r={sp:.2f})")
+        top10 = push_results["added"] + push_results["already"]
+        top10.sort(key=lambda x: x[3], reverse=True)  # sort by combined score
+        for nm, pts, sp, comb in top10:
+            tag = "NEW" if (nm, pts, sp, comb) in push_results["added"] else "   "
+            lines.append(f"  {tag} {nm}  ({pts:+.2f} pts, r={sp:.2f})")
 
         if push_results["removed"]:
-            lines.append(f"\nRemoved ({len(push_results['removed'])}):")
+            lines.append(f"\nRemoved from list ({len(push_results['removed'])}):")
             for nm in push_results["removed"]:
                 lines.append(f"  - {nm}")
 
