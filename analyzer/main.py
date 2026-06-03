@@ -9,6 +9,31 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+
+def _load_dotenv():
+    """Load .env from project root into environment, without overriding existing vars.
+    Handles both KEY=VALUE and export KEY=VALUE formats.
+    """
+    env_path = os.path.join(project_root, ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            line = line.removeprefix("export").strip()
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
+_load_dotenv()
+
 from avanza.avanza import Avanza
 from avanza.models import *
 import os
