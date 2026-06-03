@@ -94,13 +94,14 @@ def _load_reliability_map():
     """Load company reliability scores from company_reliability.csv."""
     rel_path = os.path.join(project_root, "company_reliability.csv")
     reliability = {}
+    reliability_val=0.4
     if os.path.exists(rel_path):
         try:
             rel_df = pd.read_csv(rel_path)
             for _, r in rel_df.iterrows():
                 reliability[r["company"]] = {
                     "spearman": r["spearman"],
-                    "reliable": r.get("reliable", r["spearman"] > 0.1),
+                    "reliable": r.get("reliable", r["spearman"] > reliability_val),
                 }
         except Exception:
             pass
@@ -110,7 +111,7 @@ def _load_reliability_map():
 def _update_watchlist(avanza, manager, top_n=10):
     """Add top-scoring stocks with good reliability to 'Bör köpa' watchlist.
 
-    - Filters by both score (points) and reliability (spearman > 0.1)
+    - Filters by both score (points) and reliability (spearman > 0.4)
     - Adds qualified stocks that aren't already on the list
     - Removes stocks from the list that no longer qualify
     """
@@ -250,6 +251,46 @@ def _update_watchlist(avanza, manager, top_n=10):
     print(f"{'=' * 70}\n")
 
 
+def _fetch_inspiration_tickers(avanza, requested_names: list[str]) -> tuple[set[str], list[str]]:
+    """Fetch orderbookIds from Avanza inspiration lists matching any of requested_names.
+
+    Matching is case-insensitive substring — "mest ägda" matches "Mest ägda aktier".
+    Returns (ticker_id_set, matched_list_names).
+    """
+    all_lists = avanza.get_inspiration_lists()
+
+    def _get(obj, key):
+        return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+    found_ids: set[str] = set()
+    matched: list[str] = []
+
+    for req in requested_names:
+        req_lower = req.lower()
+        hit = next(
+            (lst for lst in all_lists
+             if req_lower in (_get(lst, "name") or "").lower()
+             or req_lower == (_get(lst, "id") or "").lower()),
+            None,
+        )
+        if hit is None:
+            print(f"[WARN] Inspiration list not found: '{req}'. Run --discover to see available lists.")
+            continue
+
+        list_id = _get(hit, "id")
+        list_name = _get(hit, "name")
+        detail = avanza.get_inspiration_list(list_id)
+        orderbooks = _get(detail, "orderbooks") or []
+
+        for ob in orderbooks:
+            ob_id = _get(ob, "id")
+            if ob_id:
+                found_ids.add(str(ob_id))
+        matched.append(f"{list_name} ({len(orderbooks)} stocks)")
+
+    return found_ids, matched
+
+
 def main():
     pd.set_option("display.max_rows", None)  # Show all rows
     pd.set_option("display.max_colwidth", None)  # Show full cell content
@@ -258,19 +299,25 @@ def main():
     ap = argparse.ArgumentParser(
         description="Stock scoring & analysis tool",
         epilog="""
-Usage examples:
-  python main.py                    Run live analysis (uses optimized weights if available)
-  python main.py --save             Run live analysis AND save data snapshots to data/
-  python main.py --correlate        Show per-metric correlation with stock returns
-  python main.py --optimize-individual Optimize weights (independent correlation)
-  python main.py --optimize-combo     Optimize weights (grid sweep + cross-validation)
-  python main.py --optimize-stepwise  Optimize weights (scipy numerical + cross-validation)
-  python main.py --no-opt             Run live analysis with default (hardcoded) weights
-  python main.py --use-individual     Use individual optimization results for live analysis
-  python main.py --use-combo          Use combo optimization results for live analysis
-  python main.py --use-stepwise       Use stepwise optimization results for live analysis
-  python main.py --watchlist          Add top 10 stocks to 'Bör köpa' watchlist
-  python main.py --watchlist --watchlist-top 5   Add top 5 instead
+--- Stock universe (pick one or combine) ---
+  python main.py                               Default: uses watchlist named "Test"
+  python main.py --watchlists Test Utdelare    Use one or more personal watchlists
+  python main.py --inspiration "Mest ägda"     Use an Avanza inspiration list by name
+  python main.py --discover                    List all available inspiration lists
+
+--- Data & analysis ---
+  python main.py --save                        Save today's snapshot to data/
+  python main.py --correlate                   Show correlation of scores with past returns
+  python main.py --correlate --optimize        Re-optimize metric weights (do occasionally)
+
+--- Watchlist management ---
+  python main.py --watchlist                   Push top 10 to 'Bör köpa' on Avanza
+  python main.py --watchlist --watchlist-top 5
+
+--- Weight variants ---
+  python main.py --no-opt                      Ignore saved weights, use hardcoded defaults
+  python main.py --use-combo                   Use combo-optimized weights
+  python main.py --use-stepwise                Use stepwise-optimized weights
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -326,6 +373,28 @@ Usage examples:
         help="Use stepwise optimization results for live analysis",
     )
     ap.add_argument(
+        "--watchlists",
+        nargs="+",
+        default=["Test"],
+        metavar="NAME",
+        help='Names of Avanza personal watchlists to analyze (default: "Test"). '
+             'Use --discover to see Avanza inspiration lists instead.',
+    )
+    ap.add_argument(
+        "--inspiration",
+        nargs="+",
+        default=[],
+        metavar="NAME",
+        help="Names of Avanza inspiration lists to include (partial, case-insensitive match). "
+             "Run --discover first to see what's available. "
+             "Can be combined with --watchlists.",
+    )
+    ap.add_argument(
+        "--discover",
+        action="store_true",
+        help="Print all available Avanza inspiration lists (names + IDs) and exit.",
+    )
+    ap.add_argument(
         "--watchlist",
         action="store_true",
         help="Add top-scoring stocks to 'Bör köpa' watchlist on Avanza",
@@ -372,15 +441,55 @@ Usage examples:
             manager._threshold_overrides = opt_thresholds
 
     avanza = setup_env()
-    ticker_ids = next(
-        (
-            item
-            for item in avanza.get_watchlists()
-            if item.get("name")
-            == "Test"  # "Utdelare"  # "Test"  # "Mina favoritaktier"  # "Berkshire"   # "Mina favoritaktier"  # "Äger"
-        ),
-        None,
-    )["orderbookIds"]
+
+    # --discover: print all available inspiration lists and exit
+    if args.discover:
+        all_lists = avanza.get_inspiration_lists()
+        def _get(obj, key):
+            return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+        print(f"\n{'='*60}")
+        print("  Available Avanza inspiration lists")
+        print(f"  Use: python main.py --inspiration \"<name>\"")
+        print(f"{'='*60}")
+        for lst in all_lists:
+            name = _get(lst, "name") or ""
+            list_id = _get(lst, "id") or ""
+            books = _get(lst, "orderbooks") or []
+            instr = _get(lst, "instrumentType") or ""
+            if instr.upper() == "STOCK":
+                print(f"  {name:<45} id={list_id}  ({len(books)} stocks)")
+        print(f"{'='*60}\n")
+        return 0
+
+    # Collect tickers from personal watchlists
+    ticker_id_set: set[str] = set()
+    sources: list[str] = []
+
+    all_watchlists = avanza.get_watchlists()
+    missing_wls = []
+    for wl_name in args.watchlists:
+        wl = next((w for w in all_watchlists if w.get("name") == wl_name), None)
+        if wl is None:
+            missing_wls.append(wl_name)
+            continue
+        ids = [str(oid) for oid in (wl.get("orderbookIds") or [])]
+        ticker_id_set.update(ids)
+        sources.append(f"{wl_name} ({len(ids)} stocks)")
+    if missing_wls:
+        print(f"[WARN] Watchlist(s) not found on Avanza: {', '.join(missing_wls)}")
+
+    # Add tickers from inspiration lists (if requested)
+    if args.inspiration:
+        insp_ids, insp_names = _fetch_inspiration_tickers(avanza, args.inspiration)
+        ticker_id_set.update(insp_ids)
+        sources.extend(insp_names)
+
+    if not ticker_id_set:
+        print("[ERROR] No stocks found. Check --watchlists / --inspiration names, or run --discover.")
+        return 1
+
+    ticker_ids = list(ticker_id_set)
+    print(f"Analyzing {len(ticker_ids)} unique tickers from: {', '.join(sources)}")
 
     skipped = []
     for ticker_id in tqdm(ticker_ids, desc="Processing tickers"):

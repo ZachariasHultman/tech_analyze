@@ -12,6 +12,11 @@ from tabulate import tabulate
 import math
 import pandas as pd
 
+# Cross-sectional rank thresholds used by _assign_points_rank.
+# Bottom 35% of the peer group → negative score, top 35% → positive.
+_RANK_NOK = 0.35
+_RANK_OK = 0.65
+
 # base fields needed to compute ratios (always accepted by _update)
 REQUIRED_BASE_COLS = {"roe", "pe", "cagr", "fcfy", "de"}
 
@@ -307,6 +312,29 @@ class SummaryManager:
         s2 = _score_scalar(float(xv2), nok2, ok2)
         # average the two component scores for composite metrics
         return (s1 + s2) / 2.0
+
+    def _assign_points_rank(self, row, metric: str, rank_val: float) -> float:
+        """Score a pre-computed cross-sectional percentile rank (0–1, 1=best).
+
+        rank_val should already be direction-corrected so that 1.0 always
+        means "best in the peer group" regardless of whether the raw metric
+        is higher-is-better or lower-is-better.
+
+        Symmetric thresholds: top 35% → +weight, bottom 35% → −weight,
+        middle 30% → linear interpolation near zero.
+        """
+        weight = self._assign_weight(metric)
+        if weight == 0:
+            return 0.0
+        if pd.isna(rank_val):
+            return 0.0
+        if rank_val >= _RANK_OK:
+            return float(weight)
+        if rank_val <= _RANK_NOK:
+            return -float(weight)
+        span = _RANK_OK - _RANK_NOK
+        t = (rank_val - _RANK_NOK) / span  # 0 at NOK, 1 at OK
+        return float(weight) * (2 * t - 1)
 
     def _display(self, save_df=False):
         """Displays DataFrame with tabulate formatting for a cleaner output."""

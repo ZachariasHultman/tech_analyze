@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from analyzer.metrics import HIGHEST_WEIGHT_METRICS, RATIO_SPECS
+from analyzer.metrics import HIGHEST_WEIGHT_METRICS, RATIO_SPECS, DIRECTION_OVERRIDES
 from analyzer.helper import *
 from analyzer.financial_metrics import *
 
@@ -301,7 +301,18 @@ def get_data(
         return ticker_name, None
 
 
-def calculate_score(manager, metrics_to_score=None):
+def calculate_score(manager, metrics_to_score=None, use_cross_sectional_ranks=True):
+    """Score all companies held in manager.
+
+    use_cross_sectional_ranks (default True):
+        Score each metric by where the company ranks within the peer group
+        (cross-sectional percentile, 0–1) rather than against fixed absolute
+        thresholds.  This makes every metric sector-agnostic automatically:
+        a utility with decent-for-utilities ROE ranks in the top half and
+        scores positively without needing a separate utility threshold.
+        Falls back to absolute-threshold scoring when fewer than 5 companies
+        are present in the group (ranks are unstable at very small n).
+    """
 
     def apply_scores(summary, template, manager, metrics_to_score=None):
         excluded_columns = {"sector", "points"}
@@ -311,8 +322,31 @@ def calculate_score(manager, metrics_to_score=None):
         if summary.empty:
             return pd.DataFrame()
 
-        # --- derive sector-agnostic ratios before scoring ---
+        # Derive composite ratios (ROE/PE, CAGR/PE, etc.) before scoring
         summary = enrich_ratios(summary)
+
+        # ── Cross-sectional percentile ranks (1 = best in group) ─────────
+        # For direction +1 (higher raw value = better): rank 1.0 → highest value.
+        # For direction -1 (lower raw value = better): rank 1.0 → lowest value
+        # (achieved by inverting the percentile).
+        # This encodes direction into the rank so _assign_points_rank can
+        # always treat rank 1.0 as "best" uniformly.
+        cross_ranks: dict = {}
+        if use_cross_sectional_ranks and len(summary) >= 5:
+            for col in template:
+                if col in excluded_columns or col not in summary.columns:
+                    continue
+                if metrics_to_score is not None and col not in metrics_to_score:
+                    continue
+                direction = DIRECTION_OVERRIDES.get(col, +1)
+                if col in RATIO_SPECS:
+                    direction = RATIO_SPECS[col]["dir"]
+                vals = pd.to_numeric(summary[col], errors="coerce")
+                if vals.notna().sum() >= 3:
+                    pct = vals.rank(pct=True, na_option="keep")
+                    if direction == -1:
+                        pct = 1.0 - pct
+                    cross_ranks[col] = pct
 
         score_data = {}
 
@@ -322,10 +356,18 @@ def calculate_score(manager, metrics_to_score=None):
             if metrics_to_score is not None and col not in metrics_to_score:
                 continue
 
-            def assign(row):
-                return manager._assign_points(row, col)
-
-            score_data[col + "_score"] = summary.apply(assign, axis=1)
+            if col in cross_ranks:
+                _ranks = cross_ranks[col]
+                def assign_rank(row, _col=col, _ranks=_ranks):
+                    rank_val = _ranks.get(row.name)
+                    if rank_val is None or pd.isna(rank_val):
+                        return 0.0
+                    return manager._assign_points_rank(row, _col, float(rank_val))
+                score_data[col + "_score"] = summary.apply(assign_rank, axis=1)
+            else:
+                def assign(row, _col=col):
+                    return manager._assign_points(row, _col)
+                score_data[col + "_score"] = summary.apply(assign, axis=1)
 
         for key, val in score_data.items():
             summary[key] = val

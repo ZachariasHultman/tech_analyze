@@ -114,6 +114,12 @@ def baseline_correlation(csv_path="metrics_by_timespan.csv"):
         print("[WARN] No data found.")
         return pd.DataFrame()
 
+    n_companies = df["company"].nunique()
+    if n_companies < 30:
+        print(f"\n[WARN] Only {n_companies} unique companies in historical data.")
+        print("  Spearman correlations are noisy below ~30 companies.")
+        print("  Use --watchlists to include more Avanza watchlists and grow the universe.\n")
+
     results = []
 
     for timespan in sorted(df["timespan"].unique()):
@@ -276,9 +282,15 @@ def optimize_weights_and_thresholds(
 
     metrics = _all_scored_metrics()
 
-    # Use TOTAL windows (most relevant for 3-5 year horizon)
+    # Use TOTAL windows plus the 5Y rolling one-year periods.
+    # 5Y_YoY-1 through 5Y_YoY-5 are non-overlapping independent annual windows,
+    # giving up to 5× more data points for the correlation without look-ahead bias.
     if target_timespans is None:
-        target_timespans = [t for t in df["timespan"].unique() if "TOTAL" in str(t)]
+        all_ts = df["timespan"].unique()
+        target_timespans = [
+            t for t in all_ts
+            if "TOTAL" in str(t) or "5Y_YoY" in str(t)
+        ]
     if not target_timespans:
         target_timespans = list(df["timespan"].unique())
 
@@ -564,9 +576,8 @@ def _compute_reliability(df, target_timespans):
             continue
 
         rho, pval = sp_stats.spearmanr(data["scores"], data["returns"])
-        # "Reliable" = positive correlation with p < 0.3
-        # (lenient threshold because we have few data points per company)
-        reliable = (not np.isnan(rho)) and rho > 0.1 and pval < 0.3
+        # "Reliable" = meaningfully positive correlation with p < 0.1
+        reliable = (not np.isnan(rho)) and rho > 0.2 and pval < 0.1
         rows.append({
             "company": company,
             "spearman": round(rho, 4) if not np.isnan(rho) else np.nan,
@@ -788,9 +799,13 @@ def _prepare_data(csv_path):
     if df.empty:
         return None, None, None, None
     metrics = _all_scored_metrics()
-    target_timespans = [t for t in df["timespan"].unique() if "TOTAL" in str(t)]
+    all_ts = df["timespan"].unique()
+    target_timespans = [
+        t for t in all_ts
+        if "TOTAL" in str(t) or "5Y_YoY" in str(t)
+    ]
     if not target_timespans:
-        target_timespans = list(df["timespan"].unique())
+        target_timespans = list(all_ts)
     df_total = df[df["timespan"].isin(target_timespans)]
     return df, df_total, target_timespans, metrics
 
@@ -898,7 +913,7 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
     print(f"  Starting CV Spearman: {best_cv:+.4f}")
 
     # Coordinate descent: sweep weight AND threshold per metric, repeat
-    max_rounds = 3
+    max_rounds = 10
     for round_num in range(1, max_rounds + 1):
         improved = False
         for m in metrics:
@@ -906,7 +921,7 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
             current_w = best_weights.get(m, 0.0)
             weight_candidates = sorted(set(
                 max(0.0, min(2.0, round((current_w + d) * 4) / 4))
-                for d in [-0.5, -0.25, 0.0, 0.25, 0.5]
+                for d in np.arange(-0.5, 0.5, 0.1)
             ))
 
             for cand_w in weight_candidates:
