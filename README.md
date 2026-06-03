@@ -57,11 +57,11 @@ uv run python3 main.py --preset omxs30 omxs-mid
 # Combine a personal watchlist with a preset
 uv run python3 main.py --watchlists Test --preset omxs30
 
-# Push top 10 scoring + reliable stocks to "Bör köpa" watchlist
-uv run python3 main.py --watchlist
+# Push top 10 scoring + reliable stocks to "Bör köpa" (default)
+uv run python3 main.py --push
 
-# Top 5 instead
-uv run python3 main.py --watchlist --watchlist-top 5
+# Push top 5 to a different watchlist
+uv run python3 main.py --push --push-top 5 --push-to "Min lista"
 ```
 
 ---
@@ -90,27 +90,17 @@ Presets use `search_for_stock` to look up each company by name, so they don't re
 
 The optimizer needs historical snapshots of each company's metrics *and* its subsequent price returns. Here's how to build that up properly:
 
-### Step 1 — Choose a broad universe (do this once)
+### Step 1 — Save historical data (do this once)
 
 Pick enough stocks that the cross-sectional correlation is statistically meaningful. Aim for **30+ companies**. More is better.
 
 ```bash
-# Run with a broad set and save today's snapshot
 uv run python3 main.py --save --preset omxs30 omxs-mid
 ```
 
-Each run with `--save` writes one CSV per company to `data/`. These accumulate over time.
+Each run with `--save` writes one CSV per company to `data/`. Crucially, each CSV already contains **multi-year historical series** straight from Avanza — typically 5–10 years of yearly financials (revenue, EPS, PE, ROE) and 5 years of daily price data. You do **not** need to collect snapshots over months; a single save gives the optimizer all the rolling windows it needs.
 
-### Step 2 — Keep saving snapshots over time
-
-Run `--save` regularly — monthly or quarterly is enough. The optimizer needs snapshots from different points in time to compute forward returns (what happened to the price *after* the snapshot was taken).
-
-```bash
-# Add to a cron job or just run manually each month
-uv run python3 main.py --save --preset omxs30 omxs-mid
-```
-
-You need **at least 1–2 years of snapshots** before the correlation analysis is meaningful. The more historical depth, the more reliable the weights.
+Re-save when you want to pick up new quarterly earnings reports or extend the price series — quarterly is plenty.
 
 ### Step 3 — Run the correlation analysis
 
@@ -152,10 +142,10 @@ uv run python3 main.py --preset omxs30 omxs-mid
 ## Weight variants
 
 ```bash
-python3 main.py --no-opt          # Use hardcoded default weights (ignore optimizer output)
-python3 main.py --use-individual  # Use individual-correlation weights (default when file exists)
-python3 main.py --use-combo       # Use grid-sweep + cross-validation weights
-python3 main.py --use-stepwise    # Use scipy Nelder-Mead weights
+uv run python3 main.py --no-opt          # Use hardcoded default weights (ignore optimizer output)
+uv run python3 main.py --use-individual  # Use individual-correlation weights (default when file exists)
+uv run python3 main.py --use-combo       # Use grid-sweep + cross-validation weights
+uv run python3 main.py --use-stepwise    # Use scipy Nelder-Mead weights
 ```
 
 `--use-individual` is the most trustworthy with a small universe. `--use-combo` and `--use-stepwise` are more likely to overfit until you have 50+ companies × 2+ years of data.
@@ -177,5 +167,6 @@ python3 main.py --use-stepwise    # Use scipy Nelder-Mead weights
 | `--use-individual` | Use individual-correlation weights |
 | `--use-combo` | Use combo-optimized weights |
 | `--use-stepwise` | Use stepwise-optimized weights |
-| `--watchlist` | Push top-scoring reliable stocks to "Bör köpa" |
-| `--watchlist-top N` | How many stocks to push (default: 10) |
+| `--push` | Push top-scoring reliable stocks to an Avanza watchlist |
+| `--push-to NAME` | Which watchlist to push to (default: `Bör köpa`) |
+| `--push-top N` | How many stocks to push (default: 10) |

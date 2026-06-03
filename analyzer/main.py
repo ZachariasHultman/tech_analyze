@@ -108,8 +108,8 @@ def _load_reliability_map():
     return reliability
 
 
-def _update_watchlist(avanza, manager, top_n=10):
-    """Add top-scoring stocks with good reliability to 'Bör köpa' watchlist.
+def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
+    """Add top-scoring stocks with good reliability to the target watchlist.
 
     - Filters by both score (points) and reliability (spearman > 0.4)
     - Adds qualified stocks that aren't already on the list
@@ -124,11 +124,11 @@ def _update_watchlist(avanza, manager, top_n=10):
         return getattr(wl, key, None)
 
     target = next(
-        (wl for wl in watchlists if _wl_attr(wl, "name") == "Bör köpa"), None
+        (wl for wl in watchlists if _wl_attr(wl, "name") == target_name), None
     )
 
     if target is None:
-        print("\n[WARN] Watchlist 'Bör köpa' not found on Avanza.")
+        print(f"\n[WARN] Watchlist '{target_name}' not found on Avanza.")
         print("  Please create it manually in Avanza first, then re-run.")
         return
 
@@ -221,7 +221,7 @@ def _update_watchlist(avanza, manager, top_n=10):
 
     # Report
     print(f"\n{'=' * 70}")
-    print(f"  WATCHLIST UPDATE: 'Bör köpa' (top {top_n}, reliable only)")
+    print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n}, reliable only)")
     print(f"{'=' * 70}")
     if added:
         print(f"\n  Added {len(added)} stock(s):")
@@ -335,9 +335,10 @@ def main():
   python main.py --correlate                   Show correlation of scores with past returns
   python main.py --correlate --optimize        Re-optimize metric weights (do occasionally)
 
---- Watchlist management ---
-  python main.py --watchlist                   Push top 10 to 'Bör köpa' on Avanza
-  python main.py --watchlist --watchlist-top 5
+--- Push results to Avanza ---
+  python main.py --push                        Push top 10 to 'Bör köpa' (default)
+  python main.py --push --push-to "Min lista"  Push to a different watchlist
+  python main.py --push --push-top 5           Push top 5 instead of 10
 
 --- Weight variants ---
   python main.py --no-opt                      Ignore saved weights, use hardcoded defaults
@@ -415,15 +416,22 @@ def main():
              "Can be combined with --watchlists.",
     )
     ap.add_argument(
-        "--watchlist",
+        "--push",
         action="store_true",
-        help="Add top-scoring stocks to 'Bör köpa' watchlist on Avanza",
+        help="Push top-scoring reliable stocks to an Avanza watchlist",
     )
     ap.add_argument(
-        "--watchlist-top",
+        "--push-to",
+        default="Bör köpa",
+        metavar="NAME",
+        help='Name of the Avanza watchlist to push results to (default: "Bör köpa")',
+    )
+    ap.add_argument(
+        "--push-top",
         type=int,
         default=10,
-        help="Number of top stocks to add to watchlist (default: 10)",
+        metavar="N",
+        help="How many top stocks to push (default: 10)",
     )
     args = ap.parse_args()
     os.makedirs("data", exist_ok=True)
@@ -541,8 +549,8 @@ def main():
 
     manager._display(save_df=True)
 
-    if args.watchlist:
-        _update_watchlist(avanza, manager, top_n=args.watchlist_top)
+    if args.push:
+        _update_watchlist(avanza, manager, top_n=args.push_top, target_name=args.push_to)
 
     return 0
 
