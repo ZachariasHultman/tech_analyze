@@ -14,6 +14,10 @@ cd "$REPO_DIR"
 
 echo "=== $(date) ==="
 
+# Keep only the last 600 lines (~3 runs)
+LOG_FILE="$REPO_DIR/logs/cron.log"
+[ -f "$LOG_FILE" ] && tail -n 600 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+
 # Pull latest code from git (weights/reliability are SCP'd separately from Mac)
 git pull --ff-only
 
