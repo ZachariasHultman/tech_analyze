@@ -8,7 +8,7 @@ import json
 import numpy as np
 import pandas as pd
 
-from metrics import extract_sector
+from analyzer.metrics import extract_sector
 from analyzer.metrics import RATIO_SPECS  # single source of truth
 from analyzer.financial_metrics import (
     calculate_revenue_y_cagr,

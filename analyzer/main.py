@@ -13,13 +13,13 @@ from avanza.avanza import Avanza
 from avanza.models import *
 import os
 import pandas as pd
-from helper import *
-from summary_manager import SummaryManager
-from data_processing import *
+from analyzer.helper import *
+from analyzer.summary_manager import SummaryManager
+from analyzer.data_processing import *
 from importlib.metadata import version
 
-from historical_calc import calculate_metrics_given_hist
-from correlation import baseline_correlation, optimize_weights_and_thresholds, optimize_combo, optimize_stepwise
+from analyzer.historical_calc import calculate_metrics_given_hist
+from analyzer.correlation import baseline_correlation, optimize_weights_and_thresholds, optimize_combo, optimize_stepwise
 from datetime import date
 import argparse
 
@@ -251,44 +251,69 @@ def _update_watchlist(avanza, manager, top_n=10):
     print(f"{'=' * 70}\n")
 
 
-def _fetch_inspiration_tickers(avanza, requested_names: list[str]) -> tuple[set[str], list[str]]:
-    """Fetch orderbookIds from Avanza inspiration lists matching any of requested_names.
+# OMXS30 and OMXS Mid Cap tickers as of 2024-2025.
+# These are searched by name via search_for_stock so they survive minor name changes.
+_PRESETS: dict[str, list[str]] = {
+    "omxs30": [
+        "ABB", "Alfa Laval", "Assa Abloy B", "AstraZeneca",
+        "Atlas Copco A", "Atlas Copco B", "Autoliv",
+        "Boliden", "Electrolux B", "Ericsson B", "Essity B",
+        "Evolution", "Getinge B", "Hexagon B", "H&M B",
+        "Investor B", "Kinnevik B", "Nordea Bank",
+        "Sandvik", "SEB A", "SCA B", "SKF B", "SSAB A",
+        "Swedbank A", "Tele2 B", "Telia", "Volvo B",
+        "Husqvarna B", "Latour B", "Nibe B",
+    ],
+    "omxs-mid": [
+        "Addtech B", "Avanza Bank", "Bilia A", "BioGaia B",
+        "Bufab", "Catena", "Clas Ohlson B", "Dustin",
+        "Fabege", "Hexpol B", "Hufvudstaden A",
+        "Indutrade", "Intrum", "JM", "Kungsleden",
+        "Lifco B", "Lindab", "Nobia", "OEM International B",
+        "Peab B", "Ratos B", "Skistar B", "Sweco B",
+        "Troax", "Veidekke", "Vitec Software B",
+    ],
+}
 
-    Matching is case-insensitive substring — "mest ägda" matches "Mest ägda aktier".
-    Returns (ticker_id_set, matched_list_names).
-    """
-    all_lists = avanza.get_inspiration_lists()
 
-    def _get(obj, key):
-        return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+def _search_preset(avanza, preset_name: str) -> tuple[set[str], str]:
+    """Look up preset stock names via search_for_stock. Returns (id_set, label)."""
+    names = _PRESETS.get(preset_name.lower())
+    if names is None:
+        available = ", ".join(_PRESETS)
+        print(f"[WARN] Unknown preset '{preset_name}'. Available: {available}")
+        return set(), ""
 
-    found_ids: set[str] = set()
-    matched: list[str] = []
+    from avanza.avanza import InstrumentType
+    found: set[str] = set()
+    not_found: list[str] = []
 
-    for req in requested_names:
-        req_lower = req.lower()
-        hit = next(
-            (lst for lst in all_lists
-             if req_lower in (_get(lst, "name") or "").lower()
-             or req_lower == (_get(lst, "id") or "").lower()),
-            None,
-        )
-        if hit is None:
-            print(f"[WARN] Inspiration list not found: '{req}'. Run --discover to see available lists.")
-            continue
+    print(f"  Searching {len(names)} stocks for preset '{preset_name}'...")
+    for name in names:
+        try:
+            hits = avanza.search_for_stock(name, limit=3)
+            if not hits:
+                not_found.append(name)
+                continue
+            # Take the first Swedish (SE) hit, fall back to first hit overall
+            hit = next(
+                (h for h in hits
+                 if (h.get("flagCode") or getattr(h, "flagCode", None) or "").upper() == "SE"),
+                hits[0],
+            )
+            hit_id = hit.get("id") if isinstance(hit, dict) else getattr(hit, "id", None)
+            if hit_id:
+                found.add(str(hit_id))
+            else:
+                not_found.append(name)
+        except Exception as e:
+            not_found.append(f"{name} ({e})")
 
-        list_id = _get(hit, "id")
-        list_name = _get(hit, "name")
-        detail = avanza.get_inspiration_list(list_id)
-        orderbooks = _get(detail, "orderbooks") or []
+    if not_found:
+        print(f"  [WARN] Could not find: {', '.join(not_found)}")
 
-        for ob in orderbooks:
-            ob_id = _get(ob, "id")
-            if ob_id:
-                found_ids.add(str(ob_id))
-        matched.append(f"{list_name} ({len(orderbooks)} stocks)")
-
-    return found_ids, matched
+    label = f"preset:{preset_name} ({len(found)} stocks)"
+    return found, label
 
 
 def main():
@@ -302,8 +327,8 @@ def main():
 --- Stock universe (pick one or combine) ---
   python main.py                               Default: uses watchlist named "Test"
   python main.py --watchlists Test Utdelare    Use one or more personal watchlists
-  python main.py --inspiration "Mest ägda"     Use an Avanza inspiration list by name
-  python main.py --discover                    List all available inspiration lists
+  python main.py --preset omxs30               Use built-in OMXS30 preset (~30 stocks)
+  python main.py --preset omxs30 omxs-mid      Combine presets (~55 stocks)
 
 --- Data & analysis ---
   python main.py --save                        Save today's snapshot to data/
@@ -381,18 +406,13 @@ def main():
              'Use --discover to see Avanza inspiration lists instead.',
     )
     ap.add_argument(
-        "--inspiration",
+        "--preset",
         nargs="+",
         default=[],
         metavar="NAME",
-        help="Names of Avanza inspiration lists to include (partial, case-insensitive match). "
-             "Run --discover first to see what's available. "
+        help=f"Built-in stock presets to include. Available: {', '.join(_PRESETS)}. "
+             "Stocks are looked up via search, so no hardcoded IDs needed. "
              "Can be combined with --watchlists.",
-    )
-    ap.add_argument(
-        "--discover",
-        action="store_true",
-        help="Print all available Avanza inspiration lists (names + IDs) and exit.",
     )
     ap.add_argument(
         "--watchlist",
@@ -442,25 +462,6 @@ def main():
 
     avanza = setup_env()
 
-    # --discover: print all available inspiration lists and exit
-    if args.discover:
-        all_lists = avanza.get_inspiration_lists()
-        def _get(obj, key):
-            return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
-        print(f"\n{'='*60}")
-        print("  Available Avanza inspiration lists")
-        print(f"  Use: python main.py --inspiration \"<name>\"")
-        print(f"{'='*60}")
-        for lst in all_lists:
-            name = _get(lst, "name") or ""
-            list_id = _get(lst, "id") or ""
-            books = _get(lst, "orderbooks") or []
-            instr = _get(lst, "instrumentType") or ""
-            if instr.upper() == "STOCK":
-                print(f"  {name:<45} id={list_id}  ({len(books)} stocks)")
-        print(f"{'='*60}\n")
-        return 0
-
     # Collect tickers from personal watchlists
     ticker_id_set: set[str] = set()
     sources: list[str] = []
@@ -478,11 +479,12 @@ def main():
     if missing_wls:
         print(f"[WARN] Watchlist(s) not found on Avanza: {', '.join(missing_wls)}")
 
-    # Add tickers from inspiration lists (if requested)
-    if args.inspiration:
-        insp_ids, insp_names = _fetch_inspiration_tickers(avanza, args.inspiration)
-        ticker_id_set.update(insp_ids)
-        sources.extend(insp_names)
+    # Add tickers from built-in presets (search-based, no hardcoded IDs)
+    for preset_name in args.preset:
+        preset_ids, label = _search_preset(avanza, preset_name)
+        ticker_id_set.update(preset_ids)
+        if label:
+            sources.append(label)
 
     if not ticker_id_set:
         print("[ERROR] No stocks found. Check --watchlists / --inspiration names, or run --discover.")

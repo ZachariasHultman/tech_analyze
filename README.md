@@ -20,8 +20,9 @@ Install dependencies with [uv](https://github.com/astral-sh/uv):
 
 ```bash
 uv sync
-cd analyzer
 ```
+
+After syncing, `uv run tech-analyze` is available as a shortcut for `uv run python3 main.py`.
 
 ---
 
@@ -39,42 +40,49 @@ A **reliability score** tracks whether each company's fundamental score has hist
 
 ```bash
 # Score your stocks (default: watchlist named "Test")
-python main.py
+uv run python3 main.py
 
 # Use a different personal watchlist
-python main.py --watchlists Utdelare
+uv run python3 main.py --watchlists Utdelare
 
 # Use multiple watchlists at once (deduplicates)
-python main.py --watchlists Test Utdelare Äger
+uv run python3 main.py --watchlists Test Utdelare Äger
 
-# Use an Avanza inspiration list (see --discover for names)
-python main.py --inspiration "mest ägda"
+# Use the built-in OMXS30 preset (~30 stocks, searched by name)
+uv run python3 main.py --preset omxs30
 
-# Combine personal watchlist + inspiration list
-python main.py --watchlists Test --inspiration "mest ägda"
+# Combine OMXS30 + Mid Cap for a broad universe (~55 stocks)
+uv run python3 main.py --preset omxs30 omxs-mid
+
+# Combine a personal watchlist with a preset
+uv run python3 main.py --watchlists Test --preset omxs30
 
 # Push top 10 scoring + reliable stocks to "Bör köpa" watchlist
-python main.py --watchlist
+uv run python3 main.py --watchlist
 
 # Top 5 instead
-python main.py --watchlist --watchlist-top 5
+uv run python3 main.py --watchlist --watchlist-top 5
 ```
 
 ---
 
 ## Expanding the universe
 
-The more stocks you include, the more reliable the correlation analysis becomes. Nothing stops you from pulling in several inspiration lists at once — they deduplicate automatically.
+The more stocks you include, the more reliable the correlation analysis becomes. Available presets:
+
+| Preset | Contents | ~Size |
+|---|---|---|
+| `omxs30` | OMXS30 large caps | 30 |
+| `omxs-mid` | OMXS Mid Cap selection | 26 |
 
 ```bash
-# See all available Avanza inspiration lists
-python main.py --discover
-
-# Example: combine a few large lists for a broad Nordic universe
-python main.py --inspiration "mest ägda" "stockholmsbörsen" "hållbara bolag"
+# Broadest built-in universe
+uv run python3 main.py --preset omxs30 omxs-mid
 ```
 
-> **Note on S&P 500 / US stocks:** The `get_analysis()` endpoint only returns meaningful financial data (revenue, margins, D/E, etc.) for Nordic stocks. US stocks will silently produce empty metrics. Stick to Nordic lists.
+Presets use `search_for_stock` to look up each company by name, so they don't rely on hardcoded IDs that can go stale.
+
+> **Note on S&P 500 / US stocks:** The `get_analysis()` endpoint only returns meaningful financial data for Nordic stocks. US stocks silently produce empty metrics. Stick to Nordic lists.
 
 ---
 
@@ -87,11 +95,8 @@ The optimizer needs historical snapshots of each company's metrics *and* its sub
 Pick enough stocks that the cross-sectional correlation is statistically meaningful. Aim for **30+ companies**. More is better.
 
 ```bash
-# See what inspiration lists are available
-python main.py --discover
-
 # Run with a broad set and save today's snapshot
-python main.py --save --inspiration "mest ägda" "stockholmsbörsen"
+uv run python3 main.py --save --preset omxs30 omxs-mid
 ```
 
 Each run with `--save` writes one CSV per company to `data/`. These accumulate over time.
@@ -102,7 +107,7 @@ Run `--save` regularly — monthly or quarterly is enough. The optimizer needs s
 
 ```bash
 # Add to a cron job or just run manually each month
-python main.py --save --inspiration "mest ägda" "stockholmsbörsen"
+uv run python3 main.py --save --preset omxs30 omxs-mid
 ```
 
 You need **at least 1–2 years of snapshots** before the correlation analysis is meaningful. The more historical depth, the more reliable the weights.
@@ -112,7 +117,7 @@ You need **at least 1–2 years of snapshots** before the correlation analysis i
 Once you have data from multiple time points, check which metrics actually predicted returns:
 
 ```bash
-python main.py --correlate
+uv run python3 main.py --correlate
 ```
 
 This prints a baseline report: Spearman correlation between score and return for each time window, top/bottom quintile spread, and per-metric correlations. Look for:
@@ -123,7 +128,7 @@ This prints a baseline report: Spearman correlation between score and return for
 ### Step 4 — Optimize metric weights (do this occasionally, not every run)
 
 ```bash
-python main.py --correlate --optimize
+uv run python3 main.py --correlate --optimize
 ```
 
 This re-weights each metric proportional to how well it predicted returns in your historical data. The result is saved to `optimization_results_individual.json` and picked up automatically on future runs.
@@ -139,7 +144,7 @@ This re-weights each metric proportional to how well it predicted returns in you
 
 ```bash
 # Live scoring uses the optimized weights automatically
-python main.py --inspiration "mest ägda" "stockholmsbörsen"
+uv run python3 main.py --preset omxs30 omxs-mid
 ```
 
 ---
@@ -147,10 +152,10 @@ python main.py --inspiration "mest ägda" "stockholmsbörsen"
 ## Weight variants
 
 ```bash
-python main.py --no-opt          # Use hardcoded default weights (ignore optimizer output)
-python main.py --use-individual  # Use individual-correlation weights (default when file exists)
-python main.py --use-combo       # Use grid-sweep + cross-validation weights
-python main.py --use-stepwise    # Use scipy Nelder-Mead weights
+python3 main.py --no-opt          # Use hardcoded default weights (ignore optimizer output)
+python3 main.py --use-individual  # Use individual-correlation weights (default when file exists)
+python3 main.py --use-combo       # Use grid-sweep + cross-validation weights
+python3 main.py --use-stepwise    # Use scipy Nelder-Mead weights
 ```
 
 `--use-individual` is the most trustworthy with a small universe. `--use-combo` and `--use-stepwise` are more likely to overfit until you have 50+ companies × 2+ years of data.
@@ -162,8 +167,7 @@ python main.py --use-stepwise    # Use scipy Nelder-Mead weights
 | Flag | Description |
 |---|---|
 | `--watchlists NAME ...` | Personal Avanza watchlists to analyze (default: `Test`) |
-| `--inspiration NAME ...` | Avanza inspiration lists by name (partial match, case-insensitive) |
-| `--discover` | Print all available inspiration lists and exit |
+| `--preset NAME ...` | Built-in presets: `omxs30`, `omxs-mid` |
 | `--save` | Save today's metric snapshot to `data/` |
 | `--correlate` | Run baseline correlation report against historical snapshots |
 | `--optimize` | Re-optimize metric weights from historical data |
