@@ -317,12 +317,12 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
         comb = float(combined.loc[idx, "_combined"]) if pd.notna(combined.loc[idx, "_combined"]) else None
 
         reasons = []
-        if pts is not None and pts < 0:
-            reasons.append("negative fundamental score")
-        if sp is not None and sp < 0.1:
-            reasons.append("score doesn't predict returns for this stock")
-        if comb is not None and comb < 1.5 and not reasons:
-            reasons.append("low combined score")
+        # Only flag genuine deterioration: negative score where the relationship is known
+        if pts is not None and pts < 0 and (sp is None or sp > 0.2):
+            reasons.append("fundamentals have deteriorated")
+        # Flag stocks where the score actively predicts the wrong direction
+        if sp is not None and sp < -0.15:
+            reasons.append("score moves opposite to returns for this stock")
 
         if reasons:
             signals.append({"name": idx, "pts": pts, "spearman": sp, "combined": comb, "reasons": ", ".join(reasons)})
