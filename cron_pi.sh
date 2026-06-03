@@ -5,6 +5,10 @@
 
 set -e
 
+# Load project credentials from .env (keeps this isolated from other cron jobs)
+# shellcheck source=/dev/null
+[ -f "$(dirname "$0")/.env" ] && set -a && source "$(dirname "$0")/.env" && set +a
+
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_DIR"
 

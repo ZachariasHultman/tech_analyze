@@ -325,7 +325,7 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
     email_from    = os.getenv("EMAIL_FROM") or smtp_user
 
     if not smtp_user or not smtp_password or not email_to:
-        print("[WARN] Email not sent — set SMTP_USER, SMTP_PASSWORD, EMAIL_TO in .env")
+        print("[WARN] Email not sent — SMTP_USER, SMTP_PASSWORD, EMAIL_TO must be set in environment")
         return
 
     lines = [f"Stock Screener — {date.today()}", ""]
