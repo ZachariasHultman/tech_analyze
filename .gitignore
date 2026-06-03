@@ -6,7 +6,6 @@
 *.tmp
 *.json
 
-
 # Ignore compiled files
 *.o
 *.exe

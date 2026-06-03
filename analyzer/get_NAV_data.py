@@ -35,5 +35,4 @@ def get_nav_data(ticker_name):
         df = pd.read_csv(csv_data)
         return df
     else:
-        print(f"Failed to download file. Status code: {response.status_code}")
-        print(f"Response content: {response.text}")
+        pass  # NAV data unavailable for this ticker (expected for non-Swedish investment companies)

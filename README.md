@@ -8,12 +8,19 @@ A fundamental stock screener that pulls data from the unofficial Avanza API and 
 
 ## Setup
 
-Requires a `.env` file with your Avanza credentials:
+Requires a `.env` file with your Avanza credentials and (optionally) Gmail for email reports:
 
 ```
 USERNAME=your_avanza_username
 PASSWORD=your_avanza_password
 MY_TOTP_SECRET=your_totp_secret
+
+# Optional — for monthly email reports (same vars as stryket)
+SMTP_USER=you@gmail.com
+SMTP_PASSWORD=xxxx        # Gmail app password (not your login password)
+                          # Generate at: myaccount.google.com/apppasswords
+EMAIL_TO=you@gmail.com
+EMAIL_FROM=you@gmail.com  # optional, defaults to SMTP_USER
 ```
 
 Install dependencies with [uv](https://github.com/astral-sh/uv):
@@ -86,56 +93,125 @@ Presets use `search_for_stock` to look up each company by name, so they don't re
 
 ---
 
-## Building a solid backtest dataset — step by step
+## Workflow
 
-The optimizer needs historical snapshots of each company's metrics *and* its subsequent price returns. Here's how to build that up properly:
+### One-time setup
 
-### Step 1 — Save historical data (do this once)
+**Step 1 — Save historical data for a broad universe**
 
-Pick enough stocks that the cross-sectional correlation is statistically meaningful. Aim for **30+ companies**. More is better.
-
-```bash
-uv run python3 main.py --save --preset omxs30 omxs-mid
-```
-
-Each run with `--save` writes one CSV per company to `data/`. Crucially, each CSV already contains **multi-year historical series** straight from Avanza — typically 5–10 years of yearly financials (revenue, EPS, PE, ROE) and 5 years of daily price data. You do **not** need to collect snapshots over months; a single save gives the optimizer all the rolling windows it needs.
-
-Re-save when you want to pick up new quarterly earnings reports or extend the price series — quarterly is plenty.
-
-### Step 3 — Run the correlation analysis
-
-Once you have data from multiple time points, check which metrics actually predicted returns:
+Aim for 30+ companies. Each save pulls multi-year financial history and 5 years of daily prices from Avanza in one go — you don't need to collect snapshots over months.
 
 ```bash
-uv run python3 main.py --correlate
+uv run python3 main.py --save --preset omxs30 omxs-mid --watchlists Test Utdelare Äger
 ```
 
-This prints a baseline report: Spearman correlation between score and return for each time window, top/bottom quintile spread, and per-metric correlations. Look for:
-- Average Spearman > 0.2 → the scoring system has predictive value
-- A clear spread between the top and bottom quintile return
-- Warning if fewer than 30 companies — correlation results are noisy below that
-
-### Step 4 — Optimize metric weights (do this occasionally, not every run)
+**Step 2 — Optimize metric weights and compute reliability**
 
 ```bash
 uv run python3 main.py --correlate --optimize
 ```
 
-This re-weights each metric proportional to how well it predicted returns in your historical data. The result is saved to `optimization_results_individual.json` and picked up automatically on future runs.
+This calculates which metrics historically predicted returns, saves optimized weights to `optimization_results_individual.json`, and saves per-company reliability scores to `company_reliability.csv`. Both files are picked up automatically on every future run.
 
-**Re-run this when:**
-- You've expanded the universe significantly (more stocks)
-- 6+ months have passed since the last run
-- The correlation report shows the current weights are underperforming
+---
 
-**Do not re-run this every week** — the correlation doesn't shift that fast, and with a small universe you risk overfitting to noise.
+### Daily use
 
-### Step 5 — Normal use going forward
+Optimized weights and reliability are loaded automatically — no extra flags needed.
 
 ```bash
-# Live scoring uses the optimized weights automatically
-uv run python3 main.py --preset omxs30 omxs-mid
+# Score a watchlist and push top 10 reliable stocks to "Bör köpa"
+uv run python3 main.py --watchlists Äger --push
+
+# Just score, no push
+uv run python3 main.py --watchlists Äger
 ```
+
+---
+
+### Maintenance
+
+| When | Command |
+|---|---|
+| **After new quarterly earnings** | `uv run python3 main.py --save --preset omxs30 omxs-mid ...` |
+| **After re-saving** | `uv run python3 main.py --correlate --optimize` |
+| **If you only changed a threshold in code** | `uv run python3 main.py --correlate` (skips optimize, just refreshes reliability) |
+| **If you add new stocks to universe** | Re-save then re-optimize |
+
+Re-saving quarterly is enough. Re-optimizing is only needed after a re-save or when you've significantly expanded the universe.
+
+---
+
+## Raspberry Pi deployment
+
+The Pi only runs the monthly scoring job — no `--save`, no `--optimize`. Those stay on your Mac. The optimized weights (`optimization_results_individual.json`) and reliability scores (`company_reliability.csv`) are committed to git so the Pi picks them up automatically.
+
+### First-time Pi setup
+
+```bash
+# On Pi
+git clone <your-repo-url> ~/tech_analyze
+cd ~/tech_analyze
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+
+# Copy credentials and output files from Mac
+scp .env pi@raspberrypi:~/tech_analyze/.env
+scp optimization_results_individual.json company_reliability.csv pi@raspberrypi:~/tech_analyze/
+```
+
+### Set up the monthly cron job
+
+```bash
+# On Pi
+crontab -e
+```
+
+Add this line (runs at 08:00 on the 1st of each month):
+```
+0 8 1 * * /home/pi/tech_analyze/cron_pi.sh >> /home/pi/tech_analyze/cron.log 2>&1
+```
+
+### Workflow between Mac and Pi
+
+| Where | When | Action |
+|---|---|---|
+| Mac | Quarterly | `--save --preset omxs30 ... --correlate --optimize` |
+| Mac | After optimize | `scp optimization_results_individual.json company_reliability.csv pi@raspberrypi:~/tech_analyze/` |
+| Pi | Automatic (cron) | `cron_pi.sh` — pulls code via git, scores, pushes to Avanza, sends email |
+
+### Manual Pi run (test it first)
+
+```bash
+ssh pi@raspberrypi
+cd ~/tech_analyze
+./cron_pi.sh
+```
+
+---
+
+## Sell signals
+
+Add `--sell-from Äger` to flag stocks in your portfolio that have deteriorating fundamentals. A stock is flagged when:
+- Its fundamental score is negative, or
+- Its score doesn't reliably predict its returns (unreliable company), or
+- Its combined score (pts × reliability) falls below 1.5
+
+```bash
+uv run python3 main.py --watchlists Äger --sell-from Äger
+```
+
+Sell signals are also included automatically in the email when `--email` is used.
+
+---
+
+## Email reports
+
+```bash
+uv run python3 main.py --watchlists Äger --push --sell-from Äger --email
+```
+
+Sends a plain-text email with the watchlist update and any sell signals. Requires `EMAIL_*` vars in `.env` (see Setup).
 
 ---
 
@@ -170,3 +246,5 @@ uv run python3 main.py --use-stepwise    # Use scipy Nelder-Mead weights
 | `--push` | Push top-scoring reliable stocks to an Avanza watchlist |
 | `--push-to NAME` | Which watchlist to push to (default: `Bör köpa`) |
 | `--push-top N` | How many stocks to push (default: 10) |
+| `--sell-from NAME` | Check this watchlist for sell signals |
+| `--email` | Send email summary (requires `EMAIL_*` in `.env`) |

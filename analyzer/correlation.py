@@ -576,8 +576,10 @@ def _compute_reliability(df, target_timespans):
             continue
 
         rho, pval = sp_stats.spearmanr(data["scores"], data["returns"])
-        # "Reliable" = meaningfully positive correlation with p < 0.1
-        reliable = (not np.isnan(rho)) and rho > 0.2 and pval < 0.1
+        # With ~11 windows per company, p-values are too noisy to use as a gate.
+        # Use rho > 0.4 alone — equivalent to roughly p < 0.22 at n=11, which
+        # is a meaningful positive relationship given the small sample.
+        reliable = (not np.isnan(rho)) and rho > 0.4
         rows.append({
             "company": company,
             "spearman": round(rho, 4) if not np.isnan(rho) else np.nan,

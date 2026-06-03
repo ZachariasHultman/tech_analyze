@@ -152,17 +152,18 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
     combined = pd.concat(frames)
     combined["_pts"] = pd.to_numeric(combined["points"], errors="coerce")
 
-    # Add reliability info and filter
+    # Add reliability info
     combined["_spearman"] = combined.index.map(
         lambda c: reliability.get(c, {}).get("spearman", float("nan"))
     )
-    combined["_reliable"] = combined.index.map(
-        lambda c: reliability.get(c, {}).get("reliable", False)
-    )
 
-    # Only keep stocks that are both high-scoring and reliable
-    qualified = combined[combined["_reliable"]].copy()
-    qualified = qualified.sort_values("_pts", ascending=False).head(top_n)
+    # Combined rank: score × reliability (both matter, neither gates the other).
+    # Stocks with negative reliability are clamped to 0 so they can't rank highly.
+    combined["_combined"] = combined["_pts"] * combined["_spearman"].clip(lower=0)
+
+    # Require a minimum positive reliability so pure-noise stocks are excluded
+    qualified = combined[combined["_spearman"] > 0.1].copy()
+    qualified = qualified.sort_values("_combined", ascending=False).head(top_n)
 
     # Build set of orderbook IDs that should be on the list
     qualified_ids = set()
@@ -175,15 +176,6 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
     already = []
     failed = []
     removed = []
-    skipped_unreliable = []
-
-    # Report stocks that were filtered out due to bad reliability
-    unreliable = combined[~combined["_reliable"]].sort_values("_pts", ascending=False)
-    for idx in unreliable.head(5).index:
-        pts = unreliable.loc[idx, "_pts"]
-        sp = unreliable.loc[idx, "_spearman"]
-        if pd.notna(pts) and pts > 0:
-            skipped_unreliable.append((idx, pts, sp))
 
     # Add qualified stocks not yet on list
     for idx in qualified.index:
@@ -203,7 +195,6 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
             failed.append((idx, str(e)))
 
     # Remove stocks from watchlist that no longer qualify
-    # Build a reverse map: orderbookId -> company name (from combined)
     id_to_name = {}
     for idx in combined.index:
         oid = _extract_orderbook_id(idx)
@@ -219,36 +210,174 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
             except Exception as e:
                 failed.append((name, f"remove failed: {e}"))
 
+    def _row(name):
+        return (
+            name,
+            float(qualified.loc[name, "_pts"]),
+            float(qualified.loc[name, "_spearman"]),
+            float(qualified.loc[name, "_combined"]),
+        )
+
+    added_rows   = [_row(n) for n in added]
+    already_rows = [_row(n) for n in already]
+
     # Report
     print(f"\n{'=' * 70}")
-    print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n}, reliable only)")
+    print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by score × reliability)")
     print(f"{'=' * 70}")
-    if added:
-        print(f"\n  Added {len(added)} stock(s):")
-        for name in added:
-            pts = qualified.loc[name, "_pts"]
-            sp = qualified.loc[name, "_spearman"]
-            print(f"    + {name}  ({pts:+.2f} pts, r={sp:.2f})")
-    if already:
-        print(f"\n  Already on list ({len(already)}):")
-        for name in already:
-            pts = qualified.loc[name, "_pts"]
-            sp = qualified.loc[name, "_spearman"]
-            print(f"    = {name}  ({pts:+.2f} pts, r={sp:.2f})")
+    if added_rows:
+        print(f"\n  Added {len(added_rows)} stock(s):")
+        for name, pts, sp, comb in added_rows:
+            print(f"    + {name}  ({pts:+.2f} pts, r={sp:.2f}, combined={comb:.2f})")
+    if already_rows:
+        print(f"\n  Already on list ({len(already_rows)}):")
+        for name, pts, sp, comb in already_rows:
+            print(f"    = {name}  ({pts:+.2f} pts, r={sp:.2f}, combined={comb:.2f})")
     if removed:
-        print(f"\n  Removed {len(removed)} stock(s) (no longer qualify):")
+        print(f"\n  Removed {len(removed)} stock(s) (no longer in top {top_n}):")
         for name in removed:
             print(f"    - {name}")
-    if skipped_unreliable:
-        print(f"\n  Skipped (high score but unreliable):")
-        for name, pts, sp in skipped_unreliable:
-            sp_str = f"{sp:.2f}" if pd.notna(sp) else "N/A"
-            print(f"    ~ {name}  ({pts:+.2f} pts, r={sp_str})")
     if failed:
         print(f"\n  Failed ({len(failed)}):")
         for name, err in failed:
             print(f"    ! {name}: {err}")
     print(f"{'=' * 70}\n")
+
+    return {
+        "target_name": target_name,
+        "top_n": top_n,
+        "added": added_rows,
+        "already": already_rows,
+        "removed": removed,
+        "failed": failed,
+    }
+
+
+def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dict]:
+    """Flag stocks in portfolio_watchlist that have deteriorating fundamentals.
+
+    A stock is flagged when its combined score (pts × reliability) is below 1.5,
+    or when its fundamental score is negative and reliability is established.
+    Returns a list of dicts sorted worst-first.
+    """
+    reliability = _load_reliability_map()
+
+    all_wls = avanza.get_watchlists()
+    wl = next((w for w in all_wls if w.get("name") == portfolio_watchlist), None)
+    if wl is None:
+        print(f"[WARN] Watchlist '{portfolio_watchlist}' not found — skipping sell check.")
+        return []
+
+    portfolio_ids = set(str(oid) for oid in (wl.get("orderbookIds") or []))
+
+    frames = []
+    for summary in [manager.summary, manager.summary_investment]:
+        if summary is not None and isinstance(summary, pd.DataFrame) and not summary.empty:
+            frames.append(summary)
+    if not frames:
+        return []
+
+    combined = pd.concat(frames)
+    combined["_pts"]      = pd.to_numeric(combined["points"], errors="coerce")
+    combined["_spearman"] = combined.index.map(lambda c: reliability.get(c, {}).get("spearman", float("nan")))
+    combined["_combined"] = combined["_pts"] * combined["_spearman"].clip(lower=0)
+
+    signals = []
+    for idx in combined.index:
+        oid = _extract_orderbook_id(idx)
+        if oid not in portfolio_ids:
+            continue
+        pts  = float(combined.loc[idx, "_pts"])   if pd.notna(combined.loc[idx, "_pts"])      else None
+        sp   = float(combined.loc[idx, "_spearman"]) if pd.notna(combined.loc[idx, "_spearman"]) else None
+        comb = float(combined.loc[idx, "_combined"]) if pd.notna(combined.loc[idx, "_combined"]) else None
+
+        reasons = []
+        if pts is not None and pts < 0:
+            reasons.append("negative fundamental score")
+        if sp is not None and sp < 0.1:
+            reasons.append("score doesn't predict returns for this stock")
+        if comb is not None and comb < 1.5 and not reasons:
+            reasons.append("low combined score")
+
+        if reasons:
+            signals.append({"name": idx, "pts": pts, "spearman": sp, "combined": comb, "reasons": ", ".join(reasons)})
+
+    return sorted(signals, key=lambda x: (x["combined"] or 0))
+
+
+def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
+    """Send a plain-text email summary via Gmail SMTP (STARTTLS, port 587).
+
+    Requires in .env (same vars as stryket):
+      SMTP_USER=you@gmail.com
+      SMTP_PASSWORD=xxxx        (Gmail app password)
+      EMAIL_TO=you@gmail.com
+      EMAIL_FROM=you@gmail.com  (optional, defaults to SMTP_USER)
+    """
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from datetime import date
+
+    smtp_user     = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    email_to      = os.getenv("EMAIL_TO")
+    email_from    = os.getenv("EMAIL_FROM") or smtp_user
+
+    if not smtp_user or not smtp_password or not email_to:
+        print("[WARN] Email not sent — set SMTP_USER, SMTP_PASSWORD, EMAIL_TO in .env")
+        return
+
+    lines = [f"Stock Screener — {date.today()}", ""]
+
+    if push_results:
+        name = push_results["target_name"]
+        n    = push_results["top_n"]
+        lines.append("=" * 50)
+        lines.append(f"  {name.upper()} (top {n} by score × reliability)")
+        lines.append("=" * 50)
+
+        if push_results["added"]:
+            lines.append(f"\nAdded ({len(push_results['added'])}):")
+            for nm, pts, sp, comb in push_results["added"]:
+                lines.append(f"  + {nm}  ({pts:+.2f} pts, r={sp:.2f})")
+
+        if push_results["already"]:
+            lines.append(f"\nAlready on list ({len(push_results['already'])}):")
+            for nm, pts, sp, comb in push_results["already"]:
+                lines.append(f"  = {nm}  ({pts:+.2f} pts, r={sp:.2f})")
+
+        if push_results["removed"]:
+            lines.append(f"\nRemoved ({len(push_results['removed'])}):")
+            for nm in push_results["removed"]:
+                lines.append(f"  - {nm}")
+
+    if sell_signals:
+        lines.append("\n" + "=" * 50)
+        lines.append("  CONSIDER SELLING")
+        lines.append("=" * 50)
+        for sig in sell_signals:
+            pts_str = f"{sig['pts']:+.2f}" if sig["pts"] is not None else "N/A"
+            sp_str  = f"{sig['spearman']:.2f}" if sig["spearman"] is not None else "N/A"
+            lines.append(f"  ! {sig['name']}  ({pts_str} pts, r={sp_str}) — {sig['reasons']}")
+    else:
+        lines.append("\n✓ No sell signals in portfolio.")
+
+    body = "\n".join(lines)
+    msg = MIMEMultipart()
+    msg["From"]    = email_from
+    msg["To"]      = email_to
+    msg["Subject"] = f"Stock Update {date.today()}"
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(email_from, [email_to], msg.as_string())
+        print(f"Email sent to {email_to}")
+    except Exception as e:
+        print(f"[WARN] Failed to send email: {e}")
 
 
 # OMXS30 and OMXS Mid Cap tickers as of 2024-2025.
@@ -284,24 +413,25 @@ def _search_preset(avanza, preset_name: str) -> tuple[set[str], str]:
         print(f"[WARN] Unknown preset '{preset_name}'. Available: {available}")
         return set(), ""
 
-    from avanza.avanza import InstrumentType
     found: set[str] = set()
     not_found: list[str] = []
+
+    def _get(obj, key):
+        return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
 
     print(f"  Searching {len(names)} stocks for preset '{preset_name}'...")
     for name in names:
         try:
-            hits = avanza.search_for_stock(name, limit=3)
+            hits = avanza.search_for_stock(name, limit=5)
             if not hits:
                 not_found.append(name)
                 continue
-            # Take the first Swedish (SE) hit, fall back to first hit overall
+            # Prefer first Swedish hit (flagCode=SE), fall back to first result
             hit = next(
-                (h for h in hits
-                 if (h.get("flagCode") or getattr(h, "flagCode", None) or "").upper() == "SE"),
+                (h for h in hits if (_get(h, "flagCode") or "").upper() == "SE"),
                 hits[0],
             )
-            hit_id = hit.get("id") if isinstance(hit, dict) else getattr(hit, "id", None)
+            hit_id = _get(hit, "orderBookId")
             if hit_id:
                 found.add(str(hit_id))
             else:
@@ -399,12 +529,13 @@ def main():
         help="Use stepwise optimization results for live analysis",
     )
     ap.add_argument(
-        "--watchlists",
+        "--watchlists", "--watchlist",
         nargs="+",
-        default=["Test"],
+        default=None,
         metavar="NAME",
-        help='Names of Avanza personal watchlists to analyze (default: "Test"). '
-             'Use --discover to see Avanza inspiration lists instead.',
+        dest="watchlists",
+        help='Names of Avanza personal watchlists to read stocks from. '
+             'Defaults to "Test" only when no --preset is given.',
     )
     ap.add_argument(
         "--preset",
@@ -414,6 +545,17 @@ def main():
         help=f"Built-in stock presets to include. Available: {', '.join(_PRESETS)}. "
              "Stocks are looked up via search, so no hardcoded IDs needed. "
              "Can be combined with --watchlists.",
+    )
+    ap.add_argument(
+        "--email",
+        action="store_true",
+        help="Send an email summary after the run (requires EMAIL_* vars in .env)",
+    )
+    ap.add_argument(
+        "--sell-from",
+        default=None,
+        metavar="NAME",
+        help='Watchlist to check for sell signals (e.g. "Äger"). Included in email.',
     )
     ap.add_argument(
         "--push",
@@ -474,9 +616,12 @@ def main():
     ticker_id_set: set[str] = set()
     sources: list[str] = []
 
+    # Fall back to "Test" only when the user gave neither --watchlists nor --preset
+    watchlist_names = args.watchlists or ([] if args.preset else ["Test"])
+
     all_watchlists = avanza.get_watchlists()
     missing_wls = []
-    for wl_name in args.watchlists:
+    for wl_name in watchlist_names:
         wl = next((w for w in all_watchlists if w.get("name") == wl_name), None)
         if wl is None:
             missing_wls.append(wl_name)
@@ -549,8 +694,27 @@ def main():
 
     manager._display(save_df=True)
 
+    push_results = None
     if args.push:
-        _update_watchlist(avanza, manager, top_n=args.push_top, target_name=args.push_to)
+        push_results = _update_watchlist(avanza, manager, top_n=args.push_top, target_name=args.push_to)
+
+    sell_signals = []
+    if args.sell_from:
+        sell_signals = _compute_sell_signals(avanza, manager, args.sell_from)
+        if sell_signals:
+            print(f"\n{'=' * 70}")
+            print(f"  SELL SIGNALS IN '{args.sell_from}'")
+            print(f"{'=' * 70}")
+            for sig in sell_signals:
+                pts_str = f"{sig['pts']:+.2f}" if sig["pts"] is not None else "N/A"
+                sp_str  = f"{sig['spearman']:.2f}" if sig["spearman"] is not None else "N/A"
+                print(f"  ! {sig['name']}  ({pts_str} pts, r={sp_str}) — {sig['reasons']}")
+            print(f"{'=' * 70}\n")
+        else:
+            print(f"\n✓ No sell signals in '{args.sell_from}'.\n")
+
+    if args.email:
+        _send_email(push_results, sell_signals)
 
     return 0
 

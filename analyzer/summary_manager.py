@@ -414,7 +414,7 @@ class SummaryManager:
             if df.empty:
                 return df
 
-            df2 = df.applymap(_unwrap_deep)
+            df2 = df.map(_unwrap_deep)
 
             # Create flags from *_score while we still have them
             def _flags_row(row):
@@ -449,7 +449,7 @@ class SummaryManager:
             def _round2(x):
                 return round(x, 2) if isinstance(x, (int, float)) else x
 
-            export = export.applymap(_round2)
+            export = export.map(_round2)
 
             # Nice NA
             export = export.where(export.notna(), other="N/A")
@@ -459,7 +459,7 @@ class SummaryManager:
             """For terminal view (with ANSI colors)."""
             if df.empty:
                 return df
-            df2 = df.applymap(_unwrap_deep)
+            df2 = df.map(_unwrap_deep)
             df2 = df2.apply(_colorize_row, axis=1)
 
             def _fmt_cell(x):
@@ -467,7 +467,7 @@ class SummaryManager:
                     return x
                 return _fmt2(x)
 
-            df2 = df2.applymap(_fmt_cell)
+            df2 = df2.map(_fmt_cell)
 
             drop_cols = [
                 c
