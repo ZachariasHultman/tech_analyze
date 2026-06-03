@@ -1,7 +1,7 @@
 #!/bin/bash
 # Monthly stock screener run for Raspberry Pi.
 # Add to crontab with: crontab -e
-#   0 8 1 * * /home/pi/tech_analyze/cron_pi.sh >> /home/pi/tech_analyze/cron.log 2>&1
+#   0 8 1 * * /home/zacharias/tech_analyze/cron_pi.sh >> /home/zacharias/tech_analyze/logs/cron.log 2>&1
 
 set -e
 

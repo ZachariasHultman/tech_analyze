@@ -41,5 +41,6 @@ lathund.md
 metrics.py
 
 data/
+logs/
 
 .venv/
