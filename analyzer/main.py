@@ -302,7 +302,7 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
     if not frames:
         return []
 
-    combined = pd.concat(frames)
+    combined = pd.concat([f.dropna(axis=1, how="all") for f in frames])
     combined["_pts"]      = pd.to_numeric(combined["points"], errors="coerce")
     combined["_spearman"] = combined.index.map(lambda c: reliability.get(c, {}).get("spearman", float("nan")))
     combined["_combined"] = combined["_pts"] * combined["_spearman"].clip(lower=0)
@@ -318,7 +318,7 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
 
         reasons = []
         # Only flag genuine deterioration: negative score where the relationship is known
-        if pts is not None and pts < 0 and (sp is None or sp > 0.2):
+        if pts is not None and pts < 0 and sp is not None and sp > 0.2:
             reasons.append("fundamentals have deteriorated")
         # Flag stocks where the score actively predicts the wrong direction
         if sp is not None and sp < -0.15:
