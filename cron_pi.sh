@@ -1,7 +1,7 @@
 #!/bin/bash
-# Monthly stock screener run for Raspberry Pi.
+# Weekly stock screener run for Raspberry Pi.
 # Add to crontab with: crontab -e
-#   0 8 1 * * /home/zacharias/tech_analyze/cron_pi.sh >> /home/zacharias/tech_analyze/logs/cron.log 2>&1
+#   0 8 * * 1 /home/zacharias/tech_analyze/cron_pi.sh >> /home/zacharias/tech_analyze/logs/cron.log 2>&1
 
 set -e
 
@@ -12,11 +12,9 @@ set -e
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_DIR"
 
-echo "=== $(date) ==="
-
-# Keep only the last 600 lines (~3 runs)
 LOG_FILE="$REPO_DIR/logs/cron.log"
-[ -f "$LOG_FILE" ] && tail -n 600 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+
+echo "=== $(date) ==="
 
 # Pull latest code from git (weights/reliability are SCP'd separately from Mac)
 git pull --ff-only
@@ -30,3 +28,6 @@ uv run python3 main.py \
   --email
 
 echo "=== Done ==="
+
+# Trim log after all output is flushed (~3 runs of ~200 lines each)
+[ -f "$LOG_FILE" ] && tail -n 600 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
