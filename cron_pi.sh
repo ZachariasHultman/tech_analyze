@@ -5,6 +5,9 @@
 
 set -e
 
+# Cron runs with a minimal PATH; uv lives in ~/.local/bin
+export PATH="$HOME/.local/bin:$PATH"
+
 # Load project credentials from .env (keeps this isolated from other cron jobs)
 # shellcheck source=/dev/null
 [ -f "$(dirname "$0")/.env" ] && set -a && source "$(dirname "$0")/.env" && set +a
