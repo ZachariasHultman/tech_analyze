@@ -115,6 +115,31 @@ def _load_optimized_params(variant=None):
     return None, None
 
 
+def to_yahoo_symbol(ticker_info) -> str | None:
+    """Map an Avanza ticker_info dict to a Yahoo Finance ticker symbol.
+
+    Returns None for unrecognized country codes, or when a DE ticker's
+    symbol doesn't start with a recognizable letter prefix — callers should
+    skip yfinance-dependent metrics (FCFY) for that stock rather than crash.
+    """
+    listing = ticker_info.get("listing", {}) if isinstance(ticker_info, dict) else {}
+    symbol = listing.get("tickerSymbol")
+    country = listing.get("countryCode")
+    if not symbol or not country:
+        return None
+
+    if country == "SE":
+        return symbol.replace(" ", "-") + ".ST"
+    if country == "DK":
+        return symbol.replace(" ", "-") + ".CO"
+    if country == "NO":
+        return symbol.replace(" ", "-") + ".OL"
+    if country == "DE":
+        m = re.match(r"^[A-Z]+", symbol)
+        return m.group() + ".DE" if m else None
+    return None
+
+
 def _extract_orderbook_id(index_name):
     """Extract the orderbookId from an index like 'Glencore plc 2165695'."""
     parts = str(index_name).rsplit(" ", 1)
@@ -683,17 +708,16 @@ def main():
 
         if not ticker_info["sectors"] or ticker_id == "1640718":
             continue
-        yahoo_ticker_name = ticker_info["listing"]["tickerSymbol"]
-        if ticker_info["listing"]["countryCode"] == "SE":
-            yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".ST"
-        elif ticker_info["listing"]["countryCode"] == "DK":
-            yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".CO"
-        elif ticker_info["listing"]["countryCode"] == "NO":
-            yahoo_ticker_name = yahoo_ticker_name.replace(" ", "-") + ".OL"
-        elif ticker_info["listing"]["countryCode"] == "DE":
-            yahoo_ticker_name = re.match(r"^[A-Z]+", yahoo_ticker_name)
-            yahoo_ticker_name = yahoo_ticker_name.group() + ".DE"
-        yahoo = yf.Ticker(yahoo_ticker_name)
+        yahoo_symbol = to_yahoo_symbol(ticker_info)
+        if yahoo_symbol is None:
+            print(
+                f"[WARN] No Yahoo ticker mapping for "
+                f"{ticker_info.get('name', ticker_id)} "
+                f"(countryCode={ticker_info['listing'].get('countryCode')}) — skipping FCFY."
+            )
+            yahoo = None
+        else:
+            yahoo = yf.Ticker(yahoo_symbol)
 
         ticker_name, hist = get_data(
             ticker_id,
