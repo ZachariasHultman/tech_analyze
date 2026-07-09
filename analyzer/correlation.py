@@ -507,8 +507,6 @@ def optimize_weights_and_thresholds(
         json.dump(result, f, indent=2, default=str)
     print(f"\nSaved optimization results to {out_path}")
 
-    _save_thresholds_to_metrics_py(optimized_thresholds, "INDIVIDUAL")
-
     if reliability is not None and not reliability.empty:
         reliability.to_csv("company_reliability.csv", index=False)
         print(f"Saved company reliability to company_reliability.csv")
@@ -835,52 +833,6 @@ def _cv_score(weights_dict, df_total, target_timespans, metrics,
     return np.mean(val_corrs) if val_corrs else 0.0
 
 
-def _save_thresholds_to_metrics_py(thresholds_dict, variant):
-    """Append/update OPTIMIZED_THRESHOLDS_<VARIANT> dict in metrics.py.
-
-    variant: "INDIVIDUAL", "COMBO", or "STEPWISE"
-    """
-    metrics_path = os.path.join(os.path.dirname(__file__), "metrics.py")
-    if not os.path.exists(metrics_path):
-        print(f"[WARN] metrics.py not found at {metrics_path}, skipping threshold save.")
-        return
-
-    dict_name = f"OPTIMIZED_THRESHOLDS_{variant.upper()}"
-
-    with open(metrics_path, "r") as f:
-        content = f.read()
-
-    # Build the new dict string
-    lines = [f"{dict_name} = {{"]
-    for m in sorted(thresholds_dict.keys()):
-        t = thresholds_dict[m]
-        lines.append(f'    "{m}": ({t["nok"]}, {t["ok"]}),')
-    lines.append("}")
-    new_block = "\n".join(lines) + "\n"
-
-    # Check if dict already exists — replace it
-    import re
-    pattern = rf'^{dict_name}\s*=\s*\{{.*?\}}\s*$'
-    match = re.search(pattern, content, re.MULTILINE | re.DOTALL)
-
-    if match:
-        content = content[:match.start()] + new_block + content[match.end():]
-    else:
-        # Append before the get_metrics_threshold function, or at end
-        insert_marker = "\n\ndef get_metrics_threshold"
-        if insert_marker in content:
-            content = content.replace(
-                insert_marker,
-                "\n\n" + new_block + insert_marker
-            )
-        else:
-            content = content.rstrip() + "\n\n\n" + new_block
-
-    with open(metrics_path, "w") as f:
-        f.write(content)
-    print(f"  Saved {dict_name} to {metrics_path}")
-
-
 # ======================================================================
 # Phase C: Grid sweep + cross-validation (combo)
 # ======================================================================
@@ -1010,8 +962,6 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2, default=str)
     print(f"\nSaved to {out_path}")
-
-    _save_thresholds_to_metrics_py(best_thresholds, "COMBO")
 
     if reliability is not None and not reliability.empty:
         reliability.to_csv("company_reliability_combo.csv", index=False)
@@ -1178,8 +1128,6 @@ def optimize_stepwise(csv_path="metrics_by_timespan.csv"):
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2, default=str)
     print(f"\nSaved to {out_path}")
-
-    _save_thresholds_to_metrics_py(best_thresholds, "STEPWISE")
 
     if reliability is not None and not reliability.empty:
         reliability.to_csv("company_reliability_stepwise.csv", index=False)
