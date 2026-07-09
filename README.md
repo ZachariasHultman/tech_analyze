@@ -11,9 +11,12 @@ A fundamental stock screener that pulls data from the unofficial Avanza API and 
 Requires a `.env` file with your Avanza credentials and (optionally) Gmail for email reports:
 
 ```
-USERNAME=your_avanza_username
-PASSWORD=your_avanza_password
-MY_TOTP_SECRET=your_totp_secret
+AVANZA_USERNAME=your_avanza_username
+AVANZA_PASSWORD=your_avanza_password
+AVANZA_TOTP_SECRET=your_totp_secret
+
+# Legacy names (USERNAME / PASSWORD / MY_TOTP_SECRET) are still read as a
+# fallback if the AVANZA_* vars above aren't set.
 
 # Optional — for monthly email reports (same vars as stryket)
 SMTP_USER=you@gmail.com

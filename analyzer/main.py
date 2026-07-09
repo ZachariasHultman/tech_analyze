@@ -56,17 +56,19 @@ import argparse
 
 
 def setup_env():
-    username = os.getenv("USERNAME")
+    # AVANZA_* preferred; falls back to the legacy USERNAME/PASSWORD/MY_TOTP_SECRET
+    # names for older .env files.
+    username = os.getenv("AVANZA_USERNAME") or os.getenv("USERNAME")
     if username is None:
-        raise Exception("Expected .env file to have a key named USERNAME")
+        raise Exception("Expected .env file to have a key named AVANZA_USERNAME (or legacy USERNAME)")
 
-    password = os.getenv("PASSWORD")
+    password = os.getenv("AVANZA_PASSWORD") or os.getenv("PASSWORD")
     if password is None:
-        raise Exception("Expected .env file to have a key named PASSWORD")
+        raise Exception("Expected .env file to have a key named AVANZA_PASSWORD (or legacy PASSWORD)")
 
-    totpSecret = os.getenv("MY_TOTP_SECRET")
+    totpSecret = os.getenv("AVANZA_TOTP_SECRET") or os.getenv("MY_TOTP_SECRET")
     if totpSecret is None:
-        raise Exception("Expected .env file to have a key named TOTP_SECRET")
+        raise Exception("Expected .env file to have a key named AVANZA_TOTP_SECRET (or legacy MY_TOTP_SECRET)")
     # totp = pyotp.TOTP(totpSecret, digest=hashlib.sha1)
     # print(totpSecret)
     # print(totp.now())
