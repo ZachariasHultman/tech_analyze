@@ -217,12 +217,17 @@ def convert_cell(cell, col):
     return cell
 
 
-def get_hist_data():
+def get_hist_data(data_dir="data"):
     frames = []
-    for csv in Path("data").glob("*.csv"):
+    for csv in Path(data_dir).glob("*.csv"):
         key = csv.stem.split("_")[0]
+        # filename is "<key>_<YYYY-MM-DD>.csv" — last underscore-separated
+        # token is the snapshot date, used below to keep the most recent
+        # snapshot per company instead of an arbitrary filesystem-order pick.
+        snap_date = csv.stem.rsplit("_", 1)[-1]
         tmp = pd.read_csv(csv)
         tmp.insert(0, "company", key)
+        tmp.insert(1, "_snapshot_date", snap_date)
         frames.append(tmp)
 
     df = pd.concat(frames, ignore_index=True).set_index("company", drop=False)
@@ -232,11 +237,16 @@ def get_hist_data():
     for col in df.columns:
         if col == "ohlc":
             df[col] = df[col].apply(parse_ohlc_series)
-        else:
+        elif col != "_snapshot_date":
             df[col] = df[col].apply(lambda c: convert_cell(c, col))
             if col == "sector":
                 df[col] = df[col].apply(extract_sector)
-    return df.groupby(level=0).first()  # 1 row per company
+
+    # Keep the most recent snapshot per company (by filename date), not
+    # whichever file pd.concat/glob happened to see first.
+    df["_snapshot_date"] = pd.to_datetime(df["_snapshot_date"], errors="coerce")
+    df = df.sort_values("_snapshot_date", ascending=False)
+    return df.groupby(level=0).first().drop(columns=["_snapshot_date"])  # 1 row per company
 
 
 # ------------------------------------------------------------------ main
