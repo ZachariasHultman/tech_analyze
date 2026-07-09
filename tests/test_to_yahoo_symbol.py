@@ -33,8 +33,18 @@ def test_to_yahoo_symbol_de_no_regex_match_returns_none():
     assert to_yahoo_symbol(_info("123", "DE")) is None
 
 
+def test_to_yahoo_symbol_us_passthrough():
+    # US-listed stocks: Avanza's raw tickerSymbol already matches the bare
+    # Yahoo symbol (no suffix needed) — verified against live data (GM,
+    # KR, DIS all resolve real yfinance cashflow with the bare symbol).
+    assert to_yahoo_symbol(_info("GM", "US")) == "GM"
+
+
 def test_to_yahoo_symbol_unknown_country_returns_none():
-    assert to_yahoo_symbol(_info("XYZ", "US")) is None
+    # Genuinely unmapped exchange (e.g. Finland) — NOT a safe passthrough:
+    # Yahoo requires a ".HE" suffix there, so guessing the bare symbol
+    # would silently resolve to nothing. Skip rather than guess.
+    assert to_yahoo_symbol(_info("UPM", "FI")) is None
 
 
 def test_to_yahoo_symbol_missing_fields_returns_none():

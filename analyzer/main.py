@@ -122,6 +122,14 @@ def to_yahoo_symbol(ticker_info) -> str | None:
     Returns None for unrecognized country codes, or when a DE ticker's
     symbol doesn't start with a recognizable letter prefix — callers should
     skip yfinance-dependent metrics (FCFY) for that stock rather than crash.
+
+    US is a no-suffix passthrough: Avanza's raw tickerSymbol for
+    NYSE/NASDAQ-listed stocks already matches the bare Yahoo symbol
+    (verified against live data, e.g. "GM", "KR", "DIS") — this mirrors the
+    pre-fix fallthrough behavior, which happened to be correct for US.
+    Other unmapped countries (e.g. FI) are NOT a safe passthrough — Yahoo
+    requires an exchange suffix there (e.g. "UPM" resolves nothing, only
+    "UPM.HE" does) — so they still return None rather than guessing.
     """
     listing = ticker_info.get("listing", {}) if isinstance(ticker_info, dict) else {}
     symbol = listing.get("tickerSymbol")
@@ -138,6 +146,8 @@ def to_yahoo_symbol(ticker_info) -> str | None:
     if country == "DE":
         m = re.match(r"^[A-Z]+", symbol)
         return m.group() + ".DE" if m else None
+    if country == "US":
+        return symbol
     return None
 
 
