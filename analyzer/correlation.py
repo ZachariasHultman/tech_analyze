@@ -362,10 +362,12 @@ def optimize_weights_and_thresholds(
     # Minimum weight floors for academically proven metrics.
     # These may show weak/negative correlation due to data quality issues
     # in the historical adapter, but are well-established in research.
+    # "earnings quality status" excluded: OCF is never populated in either
+    # the live or historical path, so this metric is permanently 0.
+    # Re-add if OCF wiring is done later.
     WEIGHT_FLOORS = {
         "piotroski f-score status": 0.5,
         "dividend yield status": 0.25,
-        "earnings quality status": 0.25,
     }
 
     # Scale to [0, 2] range proportional to correlation strength
@@ -603,10 +605,12 @@ def _compute_reliability(df, target_timespans):
 
 MOMENTUM_METRICS = {"price momentum status"}
 MOMENTUM_WEIGHT_CAP = 1.0
+# "earnings quality status" excluded: OCF is never populated in either the
+# live or historical path, so this metric is permanently 0. Re-add if OCF
+# wiring is done later.
 WEIGHT_FLOORS = {
     "piotroski f-score status": 0.5,
     "dividend yield status": 0.25,
-    "earnings quality status": 0.25,
 }
 
 

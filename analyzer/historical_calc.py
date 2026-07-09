@@ -70,46 +70,6 @@ def _trend_metric(obj):
     return (ser.iloc[-1] - ser.iloc[0]) / abs(ser.iloc[0])
 
 
-# ------------------------------------------------------------------
-# Reduce a datapoint to one value inside the current window
-# ------------------------------------------------------------------
-# ------------------------------------------------------------------
-# reduce a datapoint to one number inside *filtered* window
-# ------------------------------------------------------------------
-def _aggregate_for_timespan(metric_name: str, obj):
-    """
-    • If obj is scalar → float(obj)
-    • If DataFrame/Series → median of numeric values
-    • If obj is *stringified* dict of dates → convert → median
-    """
-    # -------------------------------------------------- scalar or NaN
-    if obj is None or (isinstance(obj, float) and np.isnan(obj)):
-        return None
-    if isinstance(obj, (int, float)):
-        return float(obj)
-
-    # -------------------------------------------------- stringified dict
-    if isinstance(obj, str) and obj.strip().startswith("{"):
-        try:
-            parsed = json.loads(obj)
-            # parsed is dict {date: value}
-            ser = pd.Series(parsed, dtype=float).dropna().sort_index()
-        except (json.JSONDecodeError, ValueError):
-            return None
-    # -------------------------------------------------- DataFrame
-    elif isinstance(obj, pd.DataFrame):
-        if obj.empty or "value" not in obj.columns:
-            return None
-        ser = obj["value"].dropna().astype(float)
-    # -------------------------------------------------- Series
-    elif isinstance(obj, pd.Series):
-        ser = obj.dropna().astype(float)
-    else:
-        return None
-
-    return ser.median() if not ser.empty else None
-
-
 def _trend_metric_yoy(obj, window_start):
     ser = _series_from_df(obj)
     if ser.empty:
