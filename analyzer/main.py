@@ -50,6 +50,7 @@ from analyzer.config import (
     RELIABILITY_MIN_QUALIFY,
     RELIABILITY_ESTABLISHED,
     RELIABILITY_INVERSE,
+    EXCLUDED_TICKER_IDS,
 )
 from datetime import date
 import argparse
@@ -165,6 +166,13 @@ def _load_reliability_map():
     return reliability
 
 
+def _wl_attr(wl, key):
+    """Get attribute from a watchlist (supports both dict and pydantic model)."""
+    if isinstance(wl, dict):
+        return wl.get(key)
+    return getattr(wl, key, None)
+
+
 def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
     """Add top-scoring stocks with good reliability to the target watchlist.
 
@@ -173,12 +181,6 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
     - Removes stocks from the list that no longer qualify
     """
     watchlists = avanza.get_watchlists()
-
-    def _wl_attr(wl, key):
-        """Get attribute from watchlist (supports both dict and pydantic model)."""
-        if isinstance(wl, dict):
-            return wl.get(key)
-        return getattr(wl, key, None)
 
     target = next(
         (wl for wl in watchlists if _wl_attr(wl, "name") == target_name), None
@@ -320,12 +322,12 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
     reliability = _load_reliability_map()
 
     all_wls = avanza.get_watchlists()
-    wl = next((w for w in all_wls if w.get("name") == portfolio_watchlist), None)
+    wl = next((w for w in all_wls if _wl_attr(w, "name") == portfolio_watchlist), None)
     if wl is None:
         print(f"[WARN] Watchlist '{portfolio_watchlist}' not found — skipping sell check.")
         return []
 
-    portfolio_ids = set(str(oid) for oid in (wl.get("orderbookIds") or []))
+    portfolio_ids = set(str(oid) for oid in (_wl_attr(wl, "orderbookIds") or []))
 
     frames = []
     for summary in [manager.summary, manager.summary_investment]:
@@ -338,6 +340,10 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
     combined["_pts"]      = pd.to_numeric(combined["points"], errors="coerce")
     combined["_spearman"] = combined.index.map(lambda c: reliability.get(c, {}).get("spearman", float("nan")))
     combined["_combined"] = combined["_pts"] * combined["_spearman"].clip(lower=0)
+
+    scored_ids = {_extract_orderbook_id(i) for i in combined.index}
+    for missing_id in sorted(portfolio_ids - scored_ids):
+        print(f"[WARN] {missing_id} not analyzed — no signal possible.")
 
     signals = []
     for idx in combined.index:
@@ -449,7 +455,7 @@ _PRESETS: dict[str, list[str]] = {
         "Addtech B", "Avanza Bank", "Bilia A", "BioGaia B",
         "Bufab", "Catena", "Clas Ohlson B", "Dustin",
         "Fabege", "Hexpol B", "Hufvudstaden A",
-        "Indutrade", "Intrum", "JM", "Kungsleden",
+        "Indutrade", "Intrum", "JM",
         "Lifco B", "Lindab", "Nobia", "OEM International B",
         "Peab B", "Ratos B", "Skistar B", "Sweco B",
         "Troax", "Veidekke", "Vitec Software B",
@@ -674,11 +680,11 @@ def main():
     all_watchlists = avanza.get_watchlists()
     missing_wls = []
     for wl_name in watchlist_names:
-        wl = next((w for w in all_watchlists if w.get("name") == wl_name), None)
+        wl = next((w for w in all_watchlists if _wl_attr(w, "name") == wl_name), None)
         if wl is None:
             missing_wls.append(wl_name)
             continue
-        ids = [str(oid) for oid in (wl.get("orderbookIds") or [])]
+        ids = [str(oid) for oid in (_wl_attr(wl, "orderbookIds") or [])]
         ticker_id_set.update(ids)
         sources.append(f"{wl_name} ({len(ids)} stocks)")
     if missing_wls:
@@ -706,7 +712,7 @@ def main():
             skipped.append((ticker_id, str(e)))
             continue
 
-        if not ticker_info["sectors"] or ticker_id == "1640718":
+        if not ticker_info["sectors"] or ticker_id in EXCLUDED_TICKER_IDS:
             continue
         yahoo_symbol = to_yahoo_symbol(ticker_info)
         if yahoo_symbol is None:

@@ -4,7 +4,7 @@ from io import StringIO
 
 def get_nav_data(ticker_name):
     # URL for the request
-    url = "http://ibindex.se/ibi//company/downloadPriceData.req"
+    url = "https://ibindex.se/ibi//company/downloadPriceData.req"
 
     # Request payload
     payload = {
@@ -19,10 +19,9 @@ def get_nav_data(ticker_name):
         "Accept-Language": "sv-SE,sv;q=0.9,en-US;q=0.8,en;q=0.7",
         "Connection": "keep-alive",
         "Content-Type": "application/json;charset=UTF-8",
-        "Cookie": "ibi-tracking=a58bf6f7-fbe9-4c72-890a-4bb112fd1dca",
         "Host": "ibindex.se",
-        "Origin": "http://ibindex.se",
-        "Referer": "http://ibindex.se/ibi/",
+        "Origin": "https://ibindex.se",
+        "Referer": "https://ibindex.se/ibi/",
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
     }
 
@@ -35,4 +34,6 @@ def get_nav_data(ticker_name):
         df = pd.read_csv(csv_data)
         return df
     else:
-        pass  # NAV data unavailable for this ticker (expected for non-Swedish investment companies)
+        # NAV data unavailable for this ticker (expected for non-Swedish investment companies)
+        print(f"[WARN] NAV data request failed for {ticker_name}: status {response.status_code}")
+        return None

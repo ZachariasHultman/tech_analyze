@@ -83,7 +83,7 @@ The more stocks you include, the more reliable the correlation analysis becomes.
 | Preset | Contents | ~Size |
 |---|---|---|
 | `omxs30` | OMXS30 large caps | 30 |
-| `omxs-mid` | OMXS Mid Cap selection | 26 |
+| `omxs-mid` | OMXS Mid Cap selection | 25 |
 
 ```bash
 # Broadest built-in universe

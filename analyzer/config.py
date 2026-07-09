@@ -7,3 +7,8 @@ RELIABILITY_DEFAULT_CUTOFF = 0.4   # _load_reliability_map: fallback "reliable" 
 RELIABILITY_MIN_QUALIFY = 0.1      # _update_watchlist: minimum spearman to qualify for the buy watchlist
 RELIABILITY_ESTABLISHED = 0.2      # _compute_sell_signals: spearman needed to trust a negative score
 RELIABILITY_INVERSE = -0.15        # _compute_sell_signals: spearman below this means score moves opposite to returns
+
+# Tickers excluded from the main analysis loop.
+# 1640718 — unidentified; original reason for exclusion unknown (not
+# recoverable from the repo or git history), kept from prior behavior.
+EXCLUDED_TICKER_IDS = {"1640718"}

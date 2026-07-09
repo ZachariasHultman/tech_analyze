@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 from avanza.models import *
 import pandas as pd
 from pathlib import Path
@@ -19,6 +18,11 @@ import numpy as np
 
 
 def save_snapshot(data, csv_path, asof):
+    """Write today's snapshot to csv_path.
+
+    Overwrites (not appends) if the file already exists — re-running --save
+    the same day replaces the file instead of accumulating duplicate rows.
+    """
     csv_path = Path(csv_path)
 
     # If data is a DataFrame, convert any datetime columns to ISO strings and write directly.
@@ -34,8 +38,7 @@ def save_snapshot(data, csv_path, asof):
             ):
                 df[col] = df[col].astype(str)
         df.insert(0, "asof", asof)
-        header = not csv_path.exists()
-        df.to_csv(csv_path, mode="a", index=False, header=header)
+        df.to_csv(csv_path, mode="w", index=False, header=True)
         return
 
     # Otherwise, data is a dict. Build a one‐row dict of JSON‐encoded strings.
@@ -74,54 +77,7 @@ def save_snapshot(data, csv_path, asof):
 
     df = pd.DataFrame([row])
     df.insert(0, "asof", asof)
-    header = not csv_path.exists()
-    df.to_csv(csv_path, mode="a", index=False, header=header)
-
-
-def z_score(data):
-    mean_val = np.mean(data)
-    min_val = min(data)
-    max_val = max(data)
-    normalized_data = [(x - mean_val) / (max_val - min_val) for x in data]
-    return normalized_data
-
-
-def plot_data_with_fit(data):
-    x = np.arange(len(data))
-    y = np.array(data)
-    slope_deg1 = np.polyfit(x, y, 1)
-    slope_deg2 = np.polyfit(x, y, 2)
-    slope_deg3 = np.polyfit(x, y, 3)
-    # Generate polynomial functions
-    poly_deg1 = np.poly1d(slope_deg1)
-    poly_deg2 = np.poly1d(slope_deg2)
-    poly_deg3 = np.poly1d(slope_deg3)
-
-    # Create a smooth range for x to plot the polynomials
-    x_smooth = np.linspace(min(x), max(x), 500)
-
-    # Calculate polynomial values
-    y_deg1 = poly_deg1(x_smooth)
-    y_deg2 = poly_deg2(x_smooth)
-    y_deg3 = poly_deg3(x_smooth)
-
-    # Plot original data
-    plt.scatter(x, y, label="Original Data", color="black", s=10)
-
-    # Plot polynomial fits
-    plt.plot(x_smooth, y_deg1, label="Degree 1 Fit", color="red", linestyle="--")
-    plt.plot(x_smooth, y_deg2, label="Degree 2 Fit", color="blue", linestyle="-.")
-    plt.plot(x_smooth, y_deg3, label="Degree 3 Fit", color="green")
-
-    # Add labels and legend
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.title("Polynomial Fits")
-    plt.legend()
-
-    # Show the plot
-    plt.grid(True)
-    plt.show()
+    df.to_csv(csv_path, mode="w", index=False, header=True)
 
 
 def calculate_slope(data, ticker=None):
