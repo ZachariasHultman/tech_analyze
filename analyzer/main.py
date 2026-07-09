@@ -45,6 +45,12 @@ from importlib.metadata import version
 
 from analyzer.historical_calc import calculate_metrics_given_hist
 from analyzer.correlation import baseline_correlation, optimize_weights_and_thresholds, optimize_combo, optimize_stepwise
+from analyzer.config import (
+    RELIABILITY_DEFAULT_CUTOFF,
+    RELIABILITY_MIN_QUALIFY,
+    RELIABILITY_ESTABLISHED,
+    RELIABILITY_INVERSE,
+)
 from datetime import date
 import argparse
 
@@ -119,14 +125,13 @@ def _load_reliability_map():
     """Load company reliability scores from company_reliability.csv."""
     rel_path = os.path.join(project_root, "company_reliability.csv")
     reliability = {}
-    reliability_val=0.4
     if os.path.exists(rel_path):
         try:
             rel_df = pd.read_csv(rel_path)
             for _, r in rel_df.iterrows():
                 reliability[r["company"]] = {
                     "spearman": r["spearman"],
-                    "reliable": r.get("reliable", r["spearman"] > reliability_val),
+                    "reliable": r.get("reliable", r["spearman"] > RELIABILITY_DEFAULT_CUTOFF),
                 }
         except Exception:
             pass
@@ -187,7 +192,7 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
     combined["_combined"] = combined["_pts"] * combined["_spearman"].clip(lower=0)
 
     # Require a minimum positive reliability so pure-noise stocks are excluded
-    qualified = combined[combined["_spearman"] > 0.1].copy()
+    qualified = combined[combined["_spearman"] > RELIABILITY_MIN_QUALIFY].copy()
     qualified = qualified.sort_values("_combined", ascending=False).head(top_n)
 
     # Build set of orderbook IDs that should be on the list
@@ -318,10 +323,10 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
 
         reasons = []
         # Only flag genuine deterioration: negative score where the relationship is known
-        if pts is not None and pts < 0 and sp is not None and sp > 0.2:
+        if pts is not None and pts < 0 and sp is not None and sp > RELIABILITY_ESTABLISHED:
             reasons.append("fundamentals have deteriorated")
         # Flag stocks where the score actively predicts the wrong direction
-        if sp is not None and sp < -0.15:
+        if sp is not None and sp < RELIABILITY_INVERSE:
             reasons.append("score moves opposite to returns for this stock")
 
         if reasons:

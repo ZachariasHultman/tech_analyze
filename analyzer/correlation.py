@@ -577,7 +577,12 @@ def _compute_reliability(df, target_timespans):
         # With ~11 windows per company, p-values are too noisy to use as a gate.
         # Use rho > 0.4 alone — equivalent to roughly p < 0.22 at n=11, which
         # is a meaningful positive relationship given the small sample.
-        reliable = (not np.isnan(rho)) and rho > 0.4
+        # Below n=8, the correlation estimate itself is too noisy to trust —
+        # null out rho (not just reliable=False) so downstream consumers
+        # treat it as missing rather than a real (if unreliable) value.
+        if n < 8:
+            rho = np.nan
+        reliable = (not np.isnan(rho)) and rho > 0.4 and n >= 8
         rows.append({
             "company": company,
             "spearman": round(rho, 4) if not np.isnan(rho) else np.nan,
