@@ -34,6 +34,19 @@ uv sync
 
 After syncing, `uv run tech-analyze` is available as a shortcut for `uv run python3 main.py`.
 
+### New machine setup
+
+Cloning the repo alone isn't enough to run it — the following are gitignored and must be transferred manually (scp from another machine that has them, or created fresh):
+
+| File | Required? | Notes |
+|---|---|---|
+| `.env` | Yes | Avanza credentials (see above); nothing runs without it |
+| `analyzer/metrics.py` | Yes | Scoring weights/thresholds — load-bearing, every module imports from it. Doesn't exist in a fresh clone. Either `cp analyzer/metrics.example.py analyzer/metrics.py` to bootstrap with placeholder values, or scp a tuned copy from an existing machine |
+| `optimization_results_individual.json` (or `_combo.json`/`_stepwise.json`) | Optional | Optimized weights/thresholds loaded at runtime; without it, `main.py` falls back to `metrics.py`'s hardcoded defaults |
+| `company_reliability.csv` | Optional | Per-company reliability scores; without it, the watchlist push/sell-signal logic treats every company as reliability=unknown |
+
+None of the four are ever committed (`*.json`/`*.csv` are blanket-ignored, and `metrics.py` is explicitly excluded).
+
 ---
 
 ## How it scores stocks
@@ -116,6 +129,8 @@ uv run python3 main.py --correlate --optimize
 
 This calculates which metrics historically predicted returns, saves optimized weights to `optimization_results_individual.json`, and saves per-company reliability scores to `company_reliability.csv`. Both files are picked up automatically on every future run.
 
+> **Note:** the backtest previously had a look-ahead bug (predictors were measured across the same window as the return they were correlated against). This is now fixed, but it means any `optimization_results_*.json` / `company_reliability.csv` saved before the fix are invalid — re-run Step 2 (`--correlate --optimize`) at least once after upgrading.
+
 ---
 
 ### Daily use
@@ -147,7 +162,7 @@ Re-saving quarterly is enough. Re-optimizing is only needed after a re-save or w
 
 ## Raspberry Pi deployment
 
-The Pi only runs the monthly scoring job — no `--save`, no `--optimize`. Those stay on your Mac. The optimized weights (`optimization_results_individual.json`) and reliability scores (`company_reliability.csv`) are committed to git so the Pi picks them up automatically.
+The Pi only runs the monthly scoring job — no `--save`, no `--optimize`. Those stay on your Mac. The optimized weights (`optimization_results_individual.json`) and reliability scores (`company_reliability.csv`) are gitignored (`*.json`/`*.csv` are blanket-ignored) — they're never committed, so they must be copied to the Pi manually via `scp` (see below) after each re-optimize.
 
 ### First-time Pi setup
 
