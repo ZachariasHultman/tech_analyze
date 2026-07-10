@@ -151,7 +151,14 @@ def calculate_revenue_yoy_hit_rate(
     q_sales = _as_vals(
         ticker_analysis.get("companyFinancialsByQuarter", {}).get("sales")
     )
-    if len(_clean(q_sales)) < 8:  # need at least 8 quarters to form some YoY
+    # 5 is the functional minimum: _rolling_yoy_from_quarterly needs a
+    # 4-quarter lag, so 5 raw quarters gives exactly one YoY data point.
+    # Avanza's quarterly financials are often only retained for ~2 years
+    # (7-8 quarters) -- requiring the full 12-quarter lookback discarded
+    # this metric entirely for most companies. Use whatever's available
+    # instead of throwing it away; the hit rate is just thinner with fewer
+    # points.
+    if len(_clean(q_sales)) < 5:
         return None, {"reason": "not_enough_quarters", "points": len(_clean(q_sales))}
     yoy = _rolling_yoy_from_quarterly(q_sales)
     last_window = yoy[-lookback_quarters:] if lookback_quarters > 0 else yoy
@@ -181,7 +188,13 @@ def calculate_eps_yoy_hit_rate(
             "earningsPerShare"
         )
     )
-    if len(_clean(q_eps)) < 8:
+    # See calculate_revenue_yoy_hit_rate: 5 is the functional minimum for one
+    # YoY data point. Note this only helps the live path -- the historical
+    # backtest adapter (_build_ticker_dicts) hardcodes this field to an empty
+    # list because quarterly EPS isn't captured in the CSV snapshots at all,
+    # so "eps yoy hit-rate status" will still be empty in --correlate/--optimize
+    # regardless of this floor.
+    if len(_clean(q_eps)) < 5:
         return None, {"reason": "not_enough_quarters", "points": len(_clean(q_eps))}
     yoy = _rolling_yoy_from_quarterly(q_eps)
     last_window = yoy[-lookback_quarters:] if lookback_quarters > 0 else yoy
@@ -358,26 +371,33 @@ def calculate_revenue_trend(ticker_analysis, ticker_id=None):
         if "value" in e and "date" in e
     ]
 
-    if len(qtr) > 1 and len(yr) > 1:
-        # last five annual values
-        y_vals = [d["value"] for d in yr][-5:]
-        # all quarterly values
-        q_vals = [d["value"] for d in qtr]
+    # Normalize slope to a percentage of the mean, so it's comparable
+    # across companies of different sizes. Raw slope on absolute revenue
+    # (e.g. 2e9 for PayPal) is meaningless for threshold comparison.
+    def _normalized_slope(vals):
+        s = float(calculate_slope(vals))
+        avg = sum(vals) / len(vals) if vals else 0
+        return s / abs(avg) if avg != 0 else 0.0
 
-        # Normalize slope to a percentage of the mean, so it's comparable
-        # across companies of different sizes. Raw slope on absolute revenue
-        # (e.g. 2e9 for PayPal) is meaningless for threshold comparison.
-        def _normalized_slope(vals):
-            s = float(calculate_slope(vals))
-            avg = sum(vals) / len(vals) if vals else 0
-            return s / abs(avg) if avg != 0 else 0.0
-
+    # Yearly and quarterly trends are independent -- a usable yearly trend
+    # shouldn't be thrown away just because quarterly history isn't deep
+    # enough (or vice versa). Quarterly financials are often only retained
+    # for ~2 years, while yearly data can go back much further, so requiring
+    # both used to null out the yearly trend for any window older than the
+    # quarterly data's start.
+    slope_year = None
+    if len(yr) > 1:
+        y_vals = [d["value"] for d in yr][-5:]  # last five annual values
         slope_year = _normalized_slope(y_vals)
+
+    slope_quarter = None
+    if len(qtr) > 1:
+        q_vals = [d["value"] for d in qtr]  # all quarterly values
         slope_quarter = _normalized_slope(q_vals)
 
-        return slope_year, slope_quarter, yr, qtr
-
-    return None, None, None, None
+    if slope_year is None and slope_quarter is None:
+        return None, None, None, None
+    return slope_year, slope_quarter, yr or None, qtr or None
 
 
 def calculate_PE(ticker_analysis):
