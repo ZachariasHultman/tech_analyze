@@ -300,6 +300,52 @@ def _safe_div(a, b):
         return None
 
 
+def _fund_forward_score(rev_start, rev_end, nm_start, nm_end,
+                        nde_start, nde_end, dps_start, dps_end, years):
+    """Forward-fundamentals target (0-4): did the company stay solid across the
+    window? Each available component contributes +1 when it passes:
+
+      1. forward revenue CAGR > 0
+      2. net margin didn't collapse (nm_end >= 0.8 * nm_start)
+      3. leverage didn't blow out (nde_end <= nde_start + 1.0)
+      4. dividend not cut (dps_end >= dps_start; never-paid counts as pass)
+
+    A component whose data is missing on either side is excluded and the score
+    is rescaled: passes * 4 / components_available. Fewer than 2 available
+    components -> NaN (not enough basis to judge). This is the ONE place
+    end_d-side (in-window) data is intentionally used -- it is the target being
+    validated against, not a predictor, so no look-ahead concern applies.
+    """
+    years = years if years and years > 0 else 1
+    passes = 0
+    available = 0
+
+    if rev_start is not None and rev_end is not None and rev_start > 0:
+        available += 1
+        if (rev_end / rev_start) ** (1.0 / years) - 1.0 > 0:
+            passes += 1
+
+    if nm_start is not None and nm_end is not None:
+        available += 1
+        if nm_end >= 0.8 * nm_start:
+            passes += 1
+
+    if nde_start is not None and nde_end is not None:
+        available += 1
+        if nde_end <= nde_start + 1.0:
+            passes += 1
+
+    # Dividend is unavailable only when there is no dividend data at all.
+    if dps_start is not None or dps_end is not None:
+        available += 1
+        if (dps_end or 0) >= (dps_start or 0):
+            passes += 1
+
+    if available < 2:
+        return float("nan")
+    return passes * 4.0 / available
+
+
 def _df_to_dict_list(df_or_obj, start=None, end=None):
     """Convert a CSV DataFrame (date, value cols) to list-of-dicts
     that financial_metrics functions expect: [{"value": x, "date": "...", "reportType": "FULL_YEAR"}, ...]
@@ -471,6 +517,23 @@ def calculate_metrics_given_hist() -> None:
                 }
                 ohlc_win = slice_df_between(ohlc_df, start_d, end_d)  # target var — stays windowed
 
+                # ---- Forward-fundamentals target (end_d-side, intentional) ----
+                # See _fund_forward_score: this is the target being validated
+                # against, not a predictor -- the only place in-window (end_d)
+                # fundamental data is deliberately read.
+                rev_start = _safe_last(slice_df_upto(row.get("revenue_year"), start_d))
+                rev_end   = _safe_last(slice_df_upto(row.get("revenue_year"), end_d))
+                nm_start  = _safe_last(slice_df_upto(row.get("profit_margin"), start_d))
+                nm_end    = _safe_last(slice_df_upto(row.get("profit_margin"), end_d))
+                nde_start = _safe_last(slice_df_upto(row.get("netDebtEbitdaRatio"), start_d))
+                nde_end   = _safe_last(slice_df_upto(row.get("netDebtEbitdaRatio"), end_d))
+                dps_start = _safe_last(slice_df_upto(row.get("dividend_per_share"), start_d))
+                dps_end   = _safe_last(slice_df_upto(row.get("dividend_per_share"), end_d))
+                fund_forward_score = _fund_forward_score(
+                    rev_start, rev_end, nm_start, nm_end,
+                    nde_start, nde_end, dps_start, dps_end, yrs_span,
+                )
+
                 # ---- Total return ----
                 try:
                     price_start = ohlc_win["close"].iloc[0]
@@ -510,6 +573,7 @@ def calculate_metrics_given_hist() -> None:
                     "roe": roe_val,
                     "fcfy": fcfy_val,
                     "cagr": price_cagr,
+                    "fund_forward_score": fund_forward_score,
                 }
 
                 # ---- Use financial_metrics functions (same as live flow) ----

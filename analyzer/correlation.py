@@ -23,6 +23,7 @@ if project_root not in sys.path:
 
 from analyzer.summary_manager import SummaryManager
 from analyzer.data_processing import calculate_score
+from analyzer.config import QUALITY_METRICS
 from analyzer.metrics import (
     RATIO_SPECS,
     GLOBAL_THRESHOLDS,
@@ -222,6 +223,24 @@ def baseline_correlation(csv_path="metrics_by_timespan.csv"):
                 sr, _ = sp_stats.spearmanr(ms[valid_m], r[valid_m])
                 metric_corrs[metric_name] = round(sr, 4)
 
+        # Quality-sleeve score vs forward-fundamentals target. Validates
+        # "is this a solid company?" separately from price: does a high
+        # quality score line up with fundamentals that actually held up
+        # over the window?
+        quality_fwd_sp = None
+        q_cols = [m + "_score" for m in QUALITY_METRICS if m + "_score" in scored.columns]
+        if q_cols and "fund_forward_score" in df_ts.columns:
+            qscore = scored[q_cols].sum(axis=1)
+            fwd = df_ts.set_index("company")["fund_forward_score"]
+            cq = qscore.index.intersection(fwd.index)
+            qs = pd.to_numeric(qscore.loc[cq], errors="coerce")
+            fs = pd.to_numeric(fwd.loc[cq], errors="coerce")
+            valid_q = qs.notna() & fs.notna()
+            if valid_q.sum() >= 5:
+                qsr, _ = sp_stats.spearmanr(qs[valid_q], fs[valid_q])
+                if not np.isnan(qsr):
+                    quality_fwd_sp = round(qsr, 4)
+
         results.append({
             "timespan": timespan,
             "n_companies": len(s),
@@ -233,6 +252,7 @@ def baseline_correlation(csv_path="metrics_by_timespan.csv"):
             "bot_quintile_return": round(bot_return, 4),
             "spread": round(spread, 4),
             "metric_correlations": metric_corrs,
+            "quality_fwd_spearman": quality_fwd_sp,
         })
 
     if not results:
@@ -257,6 +277,9 @@ def baseline_correlation(csv_path="metrics_by_timespan.csv"):
         print(f"  Top quintile avg return: {row['top_quintile_return']:+.2%}")
         print(f"  Bot quintile avg return: {row['bot_quintile_return']:+.2%}")
         print(f"  Spread (top - bot):      {row['spread']:+.2%}")
+        qfs = row.get("quality_fwd_spearman")
+        if qfs is not None:
+            print(f"  Quality vs fwd-fundamentals ρ = {qfs:+.4f}")
 
         mc = row.get("metric_correlations", {})
         if mc:
@@ -272,6 +295,10 @@ def baseline_correlation(csv_path="metrics_by_timespan.csv"):
     avg_spread = summary["spread"].mean()
     print(f"  Avg Spearman across timespans:  {avg_spearman:+.4f}")
     print(f"  Avg spread (top - bot):         {avg_spread:+.2%}")
+    if "quality_fwd_spearman" in summary.columns:
+        avg_qfs = pd.to_numeric(summary["quality_fwd_spearman"], errors="coerce").mean()
+        if not pd.isna(avg_qfs):
+            print(f"  Avg quality vs fwd-fundamentals ρ: {avg_qfs:+.4f}")
 
     if avg_spearman > 0.3:
         print("  → Strong positive correlation. Scoring system is predictive.")
