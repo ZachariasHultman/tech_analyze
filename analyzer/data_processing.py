@@ -333,7 +333,12 @@ def calculate_score(manager, metrics_to_score=None, use_cross_sectional_ranks=Tr
         # This encodes direction into the rank so _assign_points_rank can
         # always treat rank 1.0 as "best" uniformly.
         cross_ranks: dict = {}
+        skipped_metrics: list = []
         if use_cross_sectional_ranks and len(summary) >= 5:
+            # Require a metric to be populated for at least 60% of the peer
+            # group before trusting its cross-sectional ranking; sparser
+            # metrics fall through to the absolute-threshold path below.
+            min_samples = max(3, int(np.ceil(0.6 * len(summary))))
             for col in template:
                 if col in excluded_columns or col not in summary.columns:
                     continue
@@ -343,11 +348,24 @@ def calculate_score(manager, metrics_to_score=None, use_cross_sectional_ranks=Tr
                 if col in RATIO_SPECS:
                     direction = RATIO_SPECS[col]["dir"]
                 vals = pd.to_numeric(summary[col], errors="coerce")
-                if vals.notna().sum() >= 3:
+                # Winsorize cross-sectionally at the 2nd/98th percentile so a
+                # single extreme outlier can't dominate the percentile ranks.
+                lo, hi = vals.quantile(0.02), vals.quantile(0.98)
+                vals = vals.clip(lower=lo, upper=hi)
+                if vals.notna().sum() >= min_samples:
                     pct = vals.rank(pct=True, na_option="keep")
                     if direction == -1:
                         pct = 1.0 - pct
                     cross_ranks[col] = pct
+                else:
+                    skipped_metrics.append(col)
+
+            if skipped_metrics:
+                print(
+                    "[cross-sectional] too few samples "
+                    f"(<{min_samples}/{len(summary)}), using absolute thresholds: "
+                    + ", ".join(skipped_metrics)
+                )
 
         score_data = {}
 
