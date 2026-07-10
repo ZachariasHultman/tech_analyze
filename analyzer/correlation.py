@@ -37,8 +37,57 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 
 # ======================================================================
+# Module-level constants (shared across all three optimizers)
+# ======================================================================
+
+# Metrics whose correlation with returns is partly circular (price-derived,
+# not fundamentals). Cap their weight so fundamentals remain the primary driver.
+MOMENTUM_METRICS = {"price momentum status"}
+MOMENTUM_WEIGHT_CAP = 1.0
+
+# Minimum weight floors for academically proven metrics. These may show
+# weak/negative correlation due to data-quality issues in the historical
+# adapter, but are well-established in research. "earnings quality status"
+# excluded: OCF is never populated in either the live or historical path, so
+# this metric is permanently 0. Re-add if OCF wiring is done later.
+WEIGHT_FLOORS = {
+    "piotroski f-score status": 0.5,
+    "dividend yield status": 0.25,
+}
+
+
+# ======================================================================
 # Helpers
 # ======================================================================
+
+
+def _quintile_spread(scores, returns):
+    """Long-short decision-relevance metric: mean(top bucket) - mean(bottom bucket).
+
+    Sort by score, take the top and bottom buckets, return the difference in
+    their mean forward returns. Uses quintiles when n >= 25, terciles below
+    that (terciles need ~6 points for 2 per bucket). Returns np.nan when there
+    are too few points to split at all (n < 6).
+    """
+    s = pd.Series(list(scores) if not isinstance(scores, pd.Series) else scores).astype(float)
+    r = pd.Series(list(returns) if not isinstance(returns, pd.Series) else returns).astype(float)
+    if len(s) != len(r):
+        return np.nan
+    # Align positionally when indices differ (e.g. plain lists/arrays)
+    if not s.index.equals(r.index):
+        s = s.reset_index(drop=True)
+        r = r.reset_index(drop=True)
+    valid = s.notna() & r.notna()
+    s, r = s[valid], r[valid]
+    n = len(s)
+    if n < 6:
+        return np.nan
+    frac = 5 if n >= 25 else 3
+    q = max(n // frac, 1)
+    order = s.sort_values(ascending=False)
+    top = r.loc[order.index[:q]].mean()
+    bot = r.loc[order.index[-q:]].mean()
+    return float(top - bot)
 
 def _all_scored_metrics():
     """Return every metric that has a weight > 0."""
@@ -282,14 +331,14 @@ def optimize_weights_and_thresholds(
 
     metrics = _all_scored_metrics()
 
-    # Use TOTAL windows plus the 5Y rolling one-year periods.
-    # 5Y_YoY-1 through 5Y_YoY-5 are non-overlapping independent annual windows,
-    # giving up to 5× more data points for the correlation without look-ahead bias.
+    # Objective windows: 3Y/5Y TOTAL only. These are the cumulative multi-year
+    # windows the scoring system is meant to predict; the YoY sub-windows are
+    # reserved for the per-company reliability calc (item 3).
     if target_timespans is None:
         all_ts = df["timespan"].unique()
         target_timespans = [
             t for t in all_ts
-            if "TOTAL" in str(t) or "5Y_YoY" in str(t)
+            if "TOTAL" in str(t) and ("3Y" in str(t) or "5Y" in str(t))
         ]
     if not target_timespans:
         target_timespans = list(df["timespan"].unique())
@@ -353,22 +402,8 @@ def optimize_weights_and_thresholds(
         print("[WARN] No metrics with positive correlation found.")
         return {}
 
-    # Metrics whose correlation with returns is partly circular
-    # (they measure price-derived signals, not fundamentals).
-    # Cap their weight so fundamentals remain the primary driver.
-    MOMENTUM_METRICS = {"price momentum status"}
-    MOMENTUM_WEIGHT_CAP = 1.0
-
-    # Minimum weight floors for academically proven metrics.
-    # These may show weak/negative correlation due to data quality issues
-    # in the historical adapter, but are well-established in research.
-    # "earnings quality status" excluded: OCF is never populated in either
-    # the live or historical path, so this metric is permanently 0.
-    # Re-add if OCF wiring is done later.
-    WEIGHT_FLOORS = {
-        "piotroski f-score status": 0.5,
-        "dividend yield status": 0.25,
-    }
+    # MOMENTUM_METRICS / MOMENTUM_WEIGHT_CAP / WEIGHT_FLOORS are module-level
+    # constants (shared with combo/stepwise), defined near the top of this file.
 
     # Scale to [0, 2] range proportional to correlation strength
     # Exclude momentum from max_corr so fundamental metrics set the scale
@@ -415,16 +450,17 @@ def optimize_weights_and_thresholds(
         candidates = _threshold_grid_for_metric(m, cur["nok"], cur["ok"], n_steps=2)
 
         best_thr = cur
-        best_rho = -999
+        best_spread = -np.inf
 
         for cand in candidates:
             trial_thr = dict(optimized_thresholds)
             trial_thr[m] = cand
-            rho = _avg_spearman_across_windows(
+            # Objective: quintile long-short spread (decision-relevant)
+            spread = _avg_quintile_spread_across_windows(
                 optimized_weights, df_total, target_timespans, metrics, trial_thr
             )
-            if rho > best_rho:
-                best_rho = rho
+            if spread > best_spread:
+                best_spread = spread
                 best_thr = cand
 
         optimized_thresholds[m] = best_thr
@@ -432,10 +468,19 @@ def optimize_weights_and_thresholds(
     # ---- Step 4: Re-score with optimized weights + thresholds ----
     print("\n[Step 4] Re-scoring with optimized weights and thresholds...")
 
+    baseline_weights = {
+        m: (2.0 if m in HIGHEST_WEIGHT_METRICS else 1.5 if m in HIGH_WEIGHT_METRICS else 1.0)
+        for m in metrics
+    }
+    # Primary objective: quintile spread. Spearman kept as a diagnostic.
+    spread_baseline = _avg_quintile_spread_across_windows(
+        baseline_weights, df_total, target_timespans, metrics
+    )
+    spread_optimized = _avg_quintile_spread_across_windows(
+        optimized_weights, df_total, target_timespans, metrics, optimized_thresholds
+    )
     avg_baseline = _avg_spearman_across_windows(
-        {m: (2.0 if m in HIGHEST_WEIGHT_METRICS else 1.5 if m in HIGH_WEIGHT_METRICS else 1.0)
-         for m in metrics},
-        df_total, target_timespans, metrics
+        baseline_weights, df_total, target_timespans, metrics
     )
     avg_optimized = _avg_spearman_across_windows(
         optimized_weights, df_total, target_timespans, metrics, optimized_thresholds
@@ -463,10 +508,12 @@ def optimize_weights_and_thresholds(
     if no_data:
         print(f"\n  No data available for: {', '.join(no_data)}")
 
-    print(f"\n  Baseline avg Spearman:   {avg_baseline:+.4f}")
-    print(f"  Optimized avg Spearman:  {avg_optimized:+.4f}")
-    improvement = avg_optimized - avg_baseline
-    print(f"  Improvement:             {improvement:+.4f}")
+    print(f"\n  [objective] Baseline avg quintile spread:   {spread_baseline:+.4f}")
+    print(f"  [objective] Optimized avg quintile spread:  {spread_optimized:+.4f}")
+    print(f"  [objective] Improvement:                    {spread_optimized - spread_baseline:+.4f}")
+    print(f"\n  [diagnostic] Baseline avg Spearman:   {avg_baseline:+.4f}")
+    print(f"  [diagnostic] Optimized avg Spearman:  {avg_optimized:+.4f}")
+    print(f"  [diagnostic] Improvement:             {avg_optimized - avg_baseline:+.4f}")
 
     if reliability is not None and not reliability.empty:
         print("\n" + "-" * 70)
@@ -500,6 +547,8 @@ def optimize_weights_and_thresholds(
         "optimized_weights": optimized_weights,
         "optimized_thresholds": thr_serializable,
         "per_metric_correlations": {m: round(r, 4) for m, r in avg_corrs.items()},
+        "baseline_spread": round(spread_baseline, 4),
+        "optimized_spread": round(spread_optimized, 4),
         "baseline_spearman": round(avg_baseline, 4),
         "optimized_spearman": round(avg_optimized, 4),
     }
@@ -602,16 +651,6 @@ def _compute_reliability(df, target_timespans):
 # ======================================================================
 # Shared helpers for combo / stepwise optimization
 # ======================================================================
-
-MOMENTUM_METRICS = {"price momentum status"}
-MOMENTUM_WEIGHT_CAP = 1.0
-# "earnings quality status" excluded: OCF is never populated in either the
-# live or historical path, so this metric is permanently 0. Re-add if OCF
-# wiring is done later.
-WEIGHT_FLOORS = {
-    "piotroski f-score status": 0.5,
-    "dividend yield status": 0.25,
-}
 
 
 def _apply_weight_constraints(weights_dict):
@@ -733,6 +772,27 @@ def _avg_spearman_across_windows(weights_dict, df_total, target_timespans, metri
     return np.mean(corrs) if corrs else 0.0
 
 
+def _avg_quintile_spread_across_windows(weights_dict, df_total, target_timespans,
+                                        metrics, thresholds_dict=None):
+    """Average quintile long-short spread across timespans (optimizer objective).
+
+    Mirrors _avg_spearman_across_windows but scores each window by the
+    decision-relevant top-minus-bottom spread instead of raw Spearman.
+    """
+    spreads = []
+    for ts in target_timespans:
+        df_ts = df_total[df_total["timespan"] == ts].copy()
+        if len(df_ts) < 5:
+            continue
+        sv, rv = _score_with_weights(df_ts, metrics, weights_dict, thresholds_dict)
+        if sv is None:
+            continue
+        spread = _quintile_spread(sv, rv)
+        if spread is not None and not np.isnan(spread):
+            spreads.append(spread)
+    return np.mean(spreads) if spreads else 0.0
+
+
 def _load_previous_results(variant):
     """Load previous optimization results if they exist.
 
@@ -809,9 +869,10 @@ def _prepare_data(csv_path):
         return None, None, None, None
     metrics = _all_scored_metrics()
     all_ts = df["timespan"].unique()
+    # Objective windows: 3Y/5Y TOTAL only (see optimize_weights_and_thresholds).
     target_timespans = [
         t for t in all_ts
-        if "TOTAL" in str(t) or "5Y_YoY" in str(t)
+        if "TOTAL" in str(t) and ("3Y" in str(t) or "5Y" in str(t))
     ]
     if not target_timespans:
         target_timespans = list(all_ts)
@@ -821,25 +882,14 @@ def _prepare_data(csv_path):
 
 def _cv_score(weights_dict, df_total, target_timespans, metrics,
               thresholds_dict=None):
-    """Leave-one-out cross-validation score across time windows."""
-    if len(target_timespans) < 2:
-        return _avg_spearman_across_windows(
-            weights_dict, df_total, target_timespans, metrics, thresholds_dict
-        )
+    """Objective for combo/stepwise: average quintile long-short spread.
 
-    val_corrs = []
-    for held_out in target_timespans:
-        df_val = df_total[df_total["timespan"] == held_out].copy()
-        if len(df_val) < 5:
-            continue
-        sv, rv = _score_with_weights(df_val, metrics, weights_dict, thresholds_dict)
-        if sv is None:
-            continue
-        rho, _ = sp_stats.spearmanr(sv, rv)
-        if not np.isnan(rho):
-            val_corrs.append(rho)
-
-    return np.mean(val_corrs) if val_corrs else 0.0
+    Item 1 swapped the underlying metric from Spearman to quintile spread.
+    Item 5 replaces this window-averaged form with genuine company-fold CV.
+    """
+    return _avg_quintile_spread_across_windows(
+        weights_dict, df_total, target_timespans, metrics, thresholds_dict
+    )
 
 
 # ======================================================================
@@ -873,7 +923,7 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
     best_weights = dict(start_weights)
     best_thresholds = dict(start_thresholds)
     best_cv = _cv_score(best_weights, df_total, target_timespans, metrics, best_thresholds)
-    print(f"  Starting CV Spearman: {best_cv:+.4f}")
+    print(f"  Starting CV quintile spread: {best_cv:+.4f}")
 
     # Coordinate descent: sweep weight AND threshold per metric, repeat
     max_rounds = 10
@@ -919,7 +969,7 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
                         best_thresholds = trial_thr
                         improved = True
 
-        print(f"  Round {round_num}: CV Spearman = {best_cv:+.4f}")
+        print(f"  Round {round_num}: CV quintile spread = {best_cv:+.4f}")
         if not improved:
             print("  Converged.")
             break
@@ -935,8 +985,8 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
     print("\n" + "-" * 70)
     print("  COMBO OPTIMIZATION RESULTS")
     print("-" * 70)
-    print(f"\n  Equal-weight CV Spearman:    {baseline_cv:+.4f}")
-    print(f"  Combo-optimized CV Spearman: {best_cv:+.4f}")
+    print(f"\n  Equal-weight CV quintile spread:    {baseline_cv:+.4f}")
+    print(f"  Combo-optimized CV quintile spread: {best_cv:+.4f}")
     print(f"\nOptimized weights:")
     for m in sorted(best_weights, key=lambda x: best_weights[x], reverse=True):
         w = best_weights[m]
@@ -962,8 +1012,8 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
         "method": "combo_grid_cv",
         "optimized_weights": best_weights,
         "optimized_thresholds": thr_serializable,
-        "cv_spearman": round(best_cv, 4),
-        "baseline_cv_spearman": round(baseline_cv, 4),
+        "cv_quintile_spread": round(best_cv, 4),
+        "baseline_cv_quintile_spread": round(baseline_cv, 4),
         "independent_weights": start_weights,
     }
 
@@ -1025,7 +1075,7 @@ def optimize_stepwise(csv_path="metrics_by_timespan.csv"):
     eval_count = [0]
 
     def objective(x):
-        """Negative CV Spearman (we minimize)."""
+        """Negative CV quintile spread (we minimize)."""
         # Decode weights
         w_dict = {}
         for i, m in enumerate(metric_list):
@@ -1052,7 +1102,7 @@ def optimize_stepwise(csv_path="metrics_by_timespan.csv"):
         cv = _cv_score(w_dict, df_total, target_timespans, metrics, thr_dict)
         eval_count[0] += 1
         if eval_count[0] % 50 == 0:
-            print(f"    eval {eval_count[0]}: CV Spearman = {cv:+.4f}")
+            print(f"    eval {eval_count[0]}: CV quintile spread = {cv:+.4f}")
         return -cv
 
     result_opt = sp_optimize.minimize(
@@ -1098,8 +1148,8 @@ def optimize_stepwise(csv_path="metrics_by_timespan.csv"):
     print("\n" + "-" * 70)
     print("  STEPWISE OPTIMIZATION RESULTS")
     print("-" * 70)
-    print(f"\n  Equal-weight CV Spearman:       {baseline_cv:+.4f}")
-    print(f"  Stepwise-optimized CV Spearman: {best_cv:+.4f}")
+    print(f"\n  Equal-weight CV quintile spread:       {baseline_cv:+.4f}")
+    print(f"  Stepwise-optimized CV quintile spread: {best_cv:+.4f}")
     print(f"\nOptimized weights:")
     for m in sorted(best_weights, key=lambda x: best_weights[x], reverse=True):
         w = best_weights[m]
@@ -1125,8 +1175,8 @@ def optimize_stepwise(csv_path="metrics_by_timespan.csv"):
         "method": "stepwise_nelder_mead_cv",
         "optimized_weights": best_weights,
         "optimized_thresholds": thr_serializable,
-        "cv_spearman": round(best_cv, 4),
-        "baseline_cv_spearman": round(baseline_cv, 4),
+        "cv_quintile_spread": round(best_cv, 4),
+        "baseline_cv_quintile_spread": round(baseline_cv, 4),
         "independent_weights": start_weights,
         "scipy_converged": bool(result_opt.success),
         "scipy_message": result_opt.message,
