@@ -511,6 +511,26 @@ _PRESETS: dict[str, list[str]] = {
     ],
 }
 
+# Applied only when BOTH --preset and --watchlists are omitted entirely --
+# matches the universe cron_pi.sh already runs weekly, so a bare invocation
+# gives the same "everything" scope instead of quietly falling back to just
+# the "Test" watchlist. Giving either flag explicitly overrides this and
+# uses exactly what was passed, with no default mixed in.
+_DEFAULT_PRESETS = ["omxs30", "omxs-mid"]
+_DEFAULT_WATCHLISTS = ["Test", "Utdelare", "Äger", "Berkshire"]
+
+
+def _resolve_universe(preset_arg, watchlists_arg):
+    """Resolve --preset/--watchlists args to (preset_names, watchlist_names).
+
+    Falls back to the standard default universe only when BOTH were omitted
+    entirely (None). Giving either flag explicitly uses exactly what was
+    passed, with no default mixed in.
+    """
+    if preset_arg is None and watchlists_arg is None:
+        return _DEFAULT_PRESETS, _DEFAULT_WATCHLISTS
+    return preset_arg or [], watchlists_arg or []
+
 
 def _search_preset(avanza, preset_name: str) -> tuple[set[str], str]:
     """Look up preset stock names via search_for_stock. Returns (id_set, label)."""
@@ -642,16 +662,18 @@ def main():
         metavar="NAME",
         dest="watchlists",
         help='Names of Avanza personal watchlists to read stocks from. '
-             'Defaults to "Test" only when no --preset is given.',
+             f'Defaults to {_DEFAULT_WATCHLISTS} when neither this nor '
+             '--preset is given.',
     )
     ap.add_argument(
         "--preset",
         nargs="+",
-        default=[],
+        default=None,
         metavar="NAME",
         help=f"Built-in stock presets to include. Available: {', '.join(_PRESETS)}. "
              "Stocks are looked up via search, so no hardcoded IDs needed. "
-             "Can be combined with --watchlists.",
+             f"Can be combined with --watchlists. Defaults to {_DEFAULT_PRESETS} "
+             "when neither this nor --watchlists is given.",
     )
     ap.add_argument(
         "--email",
@@ -731,8 +753,7 @@ def main():
     ticker_id_set: set[str] = set()
     sources: list[str] = []
 
-    # Fall back to "Test" only when the user gave neither --watchlists nor --preset
-    watchlist_names = args.watchlists or ([] if args.preset else ["Test"])
+    preset_names, watchlist_names = _resolve_universe(args.preset, args.watchlists)
 
     all_watchlists = avanza.get_watchlists()
     missing_wls = []
@@ -748,7 +769,7 @@ def main():
         print(f"[WARN] Watchlist(s) not found on Avanza: {', '.join(missing_wls)}")
 
     # Add tickers from built-in presets (search-based, no hardcoded IDs)
-    for preset_name in args.preset:
+    for preset_name in preset_names:
         preset_ids, label = _search_preset(avanza, preset_name)
         ticker_id_set.update(preset_ids)
         if label:
