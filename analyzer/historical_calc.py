@@ -397,6 +397,7 @@ def _build_ticker_dicts(asof):
     """
     revenue_year = _df_to_dict_list(asof.get("revenue_year"))
     revenue_quarter = _df_to_dict_list(asof.get("revenue_quarter"))
+    eps_quarter = _df_to_dict_list(asof.get("eps_quarter"))
     profit_margin = _df_to_dict_list(asof.get("profit_margin"))
     profit_per_share = _df_to_dict_list(asof.get("profit_per_share"))
     roe_series = _df_to_dict_list(asof.get("roe"))
@@ -426,7 +427,7 @@ def _build_ticker_dicts(asof):
             "equityPerShare": equity_ps,
         },
         "companyKeyRatiosByQuarterQuarter": {
-            "earningsPerShare": [],  # quarterly EPS not stored separately in CSV
+            "earningsPerShare": eps_quarter,
         },
         "stockKeyRatiosByYear": {
             "evEbitRatio": ev_ebit,

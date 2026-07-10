@@ -20,6 +20,26 @@ def _extract_yearly_series(ticker_analysis, section, key):
         return None
 
 
+def _extract_quarterly_series(ticker_analysis, section, key):
+    """Extract a quarterly time-series from the Avanza API response.
+
+    Unlike _extract_yearly_series, no reportType filter -- quarterly entries
+    are tagged "Q1".."Q4", not "FULL_YEAR". The most recent entry can be a
+    not-yet-reported placeholder (has reportType/financialYear but no date
+    or value), so both are required to keep an entry.
+    """
+    try:
+        raw = ticker_analysis.get(section, {}).get(key, [])
+        hist = [
+            {"date": e["date"], "value": e["value"]}
+            for e in raw
+            if "date" in e and "value" in e
+        ]
+        return hist if hist else None
+    except Exception:
+        return None
+
+
 def _extract_dividend_series(ticker_analysis):
     """Extract dividend per share history from dividendsByYear."""
     try:
@@ -213,6 +233,9 @@ def get_data(
             hist["roe"] = roe_hist
             hist["revenue_year"] = rev_year_hist
             hist["revenue_quarter"] = rev_quarter_hist
+            hist["eps_quarter"] = _extract_quarterly_series(
+                ticker_analysis, "companyKeyRatiosByQuarterQuarter", "earningsPerShare"
+            )
             hist["de_ratio"] = de_ratio_hist
             hist["free_cashflow_yield"] = fcfy_hist
             hist["free_cashflow"] = free_cashflow_hist
