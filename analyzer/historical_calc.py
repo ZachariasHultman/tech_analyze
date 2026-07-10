@@ -25,24 +25,6 @@ from analyzer.financial_metrics import (
 )
 
 
-# ----------------------------------------------------------------------
-# Metric ↔ datapoint map
-# ----------------------------------------------------------------------
-METRIC_TO_DATAPOINT = {
-    "roe status": "roe",
-    "de status": "de_ratio",
-    "profit margin status": "profit_margin",
-    "net debt - ebitda status": "netDebtEbitdaRatio",
-    "nav discount status": "nav_discount",
-    "nav discount trend status": "nav_discount",
-    "calculated nav discount status": "calculated_nav_discount",
-    "fcf status": "free_cashflow",
-    "fcfy status": "free_cashflow_yield",
-    "revenue trend year status": "revenue_year",
-    "net debt - ebit status": "evEbit",
-}
-
-
 # ------------------------------------------------------------------ helpers
 def _series_from_df(obj):
     """Return numeric Series indexed by datetime, or empty Series."""
@@ -61,24 +43,6 @@ def _series_from_df(obj):
         return obj.dropna().astype(float).sort_index()
 
     return pd.Series([obj], dtype=float)
-
-
-def _trend_metric(obj):
-    ser = _series_from_df(obj)
-    if len(ser) < 2:
-        return None
-    return (ser.iloc[-1] - ser.iloc[0]) / abs(ser.iloc[0])
-
-
-def _trend_metric_yoy(obj, window_start):
-    ser = _series_from_df(obj)
-    if ser.empty:
-        return None
-    last = ser[ser.index >= window_start]
-    prev = ser[ser.index < window_start]
-    if last.empty or prev.empty or prev.iloc[-1] == 0:
-        return None
-    return (last.iloc[-1] - prev.iloc[-1]) / abs(prev.iloc[-1])
 
 
 def price_cagr_window(close_ser, start, end, yrs_in_span):

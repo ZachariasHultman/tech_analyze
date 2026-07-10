@@ -562,34 +562,6 @@ def calculate_closing_CAGR(
     return vals if any(v is not None for v in vals) else None
 
 
-def calculate_price_cagr_status(
-    avanza,
-    ticker,
-    *,
-    use_hist: bool = False,
-    hist_row: pd.Series | None = None,
-):
-    """
-    Returns a single CAGR over the global YEARS for price.
-    """
-    # one-value tuple with the global YEARS
-    try:
-        yspan = YEARS
-    except NameError:
-        yspan = 3  # fallback if YEARS not defined
-
-    vals = calculate_closing_CAGR(
-        avanza,
-        ticker,
-        use_hist=use_hist,
-        hist_row=hist_row,
-        years_tuple=(yspan,),
-    )
-    if not vals:
-        return None
-    return vals[0]
-
-
 def sync_currency(from_currency: str, to_currency: str = "SEK"):
     c = CurrencyConverter()
     if not from_currency or not to_currency:
@@ -715,43 +687,6 @@ def calculate_free_cashflow_yield(yahoo_ticker, stock_info, df_hist=None):
 # ------------------------------------------------------------------
 # EV / EBIT  – latest value + tidy history
 # ------------------------------------------------------------------
-def extract_ev_ebit_ratio(avanza_data):
-    """
-    Parameters
-    ----------
-    avanza_data : dict
-        Raw JSON block from Avanza's /stock endpoint.
-
-    Returns
-    -------
-    latest_ev_ebit : float | None
-        The single most-recent EV/EBIT value.
-    ev_ebit_hist : list[dict] | None
-        Full history, each item:
-            {"date": "YYYY-MM-DD", "value": <float>}
-        If nothing valid is found → (None, None)
-    """
-    raw = avanza_data.get("stockKeyRatiosByYear", {}).get("evEbitRatio", [])
-
-    records = []
-    for e in raw:
-        if e.get("reportType") != "FULL_YEAR" or "date" not in e:
-            continue
-        try:
-            date_iso = pd.to_datetime(e["date"]).strftime("%Y-%m-%d")
-            records.append({"date": date_iso, "value": float(e["value"])})
-        except Exception:  # malformed date or non-numeric value
-            continue
-
-    if not records:
-        return None, None
-
-    records.sort(key=lambda r: r["date"])  # chronological
-    latest_ev_ebit = records[-1]["value"]
-
-    return latest_ev_ebit, records
-
-
 # ------------------------------------------------------------------
 # Net-Debt / EBITDA  – tidy list + latest-five helper
 # ------------------------------------------------------------------
