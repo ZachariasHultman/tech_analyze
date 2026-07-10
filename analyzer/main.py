@@ -686,9 +686,12 @@ def main():
     os.makedirs("data", exist_ok=True)
 
     save_data = args.save or args.get_hist
+    want_correlate = (
+        args.correlate or args.optimize_individual or args.optimize_combo
+        or args.optimize_stepwise
+    )
 
-    # --correlate and --optimize*: use saved historical data
-    if args.correlate or args.optimize_individual or args.optimize_combo or args.optimize_stepwise:
+    def _run_correlate_optimize():
         calculate_metrics_given_hist()
         baseline_correlation("metrics_by_timespan.csv")
         if args.optimize_individual:
@@ -697,6 +700,11 @@ def main():
             optimize_combo("metrics_by_timespan.csv")
         if args.optimize_stepwise:
             optimize_stepwise("metrics_by_timespan.csv")
+
+    # --correlate/--optimize* without --save: just use already-saved
+    # historical data, no live Avanza fetch needed.
+    if want_correlate and not save_data:
+        _run_correlate_optimize()
         return 0
 
     # --- Live analysis ---
@@ -795,6 +803,14 @@ def main():
             print(f"  ID {tid}: {err}")
             print(f"    → https://www.avanza.se/aktier/om-aktien.html/{tid}/")
         print()
+
+    # --save combined with --correlate/--optimize*: fresh snapshots were just
+    # written above, so re-run the backtest/optimizer against them now,
+    # matching the documented `--save ... --correlate --optimize` workflow.
+    # (Without --save, this was already handled by the early return above.)
+    if want_correlate:
+        _run_correlate_optimize()
+        return 0
 
     calculate_score(manager)
 
