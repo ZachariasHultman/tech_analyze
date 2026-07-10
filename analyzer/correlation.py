@@ -456,13 +456,19 @@ def optimize_weights_and_thresholds(
     print("\n[Step 3] Optimizing thresholds per-metric...")
 
     default_thresholds = _get_default_thresholds()
-    # Warm-start: use previous individual thresholds if available
-    prev_w, prev_t = _load_previous_results("individual")
-    if prev_t:
-        print("  Warm-starting thresholds from previous individual results")
-        optimized_thresholds = dict(prev_t)
-    else:
-        optimized_thresholds = dict(default_thresholds)
+    # Always start the grid search from the fixed defaults in metrics.py, not
+    # the previous run's result. Warm-starting from prior output compounds:
+    # _threshold_grid_for_metric's search always lands on the edge of its
+    # +/-2-step window (n_steps=2, step = 0.3*span, so max shift = 0.6*span),
+    # so re-running --optimize repeatedly walked a threshold arbitrarily far
+    # in one direction with no bound and no re-anchoring -- confirmed on real
+    # data: roe_pe ratio status's "ok" threshold moved by exactly the same
+    # -0.6*span delta on every successive run (+0.07 -> -0.71 -> -1.1 -> ...),
+    # not converging, just accumulating noise from a small (~127-company)
+    # sample. Each run now re-derives thresholds fresh from the same stable
+    # baseline, so repeated runs on similar data give similar results
+    # instead of drifting further every time.
+    optimized_thresholds = dict(default_thresholds)
 
     for m in metrics:
         if optimized_weights.get(m, 0) == 0:
