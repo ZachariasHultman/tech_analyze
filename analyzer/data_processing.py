@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from analyzer.metrics import HIGHEST_WEIGHT_METRICS, RATIO_SPECS, DIRECTION_OVERRIDES
+from analyzer.config import QUALITY_METRICS, VALUE_METRICS
 from analyzer.helper import *
 from analyzer.financial_metrics import *
 
@@ -393,6 +394,32 @@ def calculate_score(manager, metrics_to_score=None, use_cross_sectional_ranks=Tr
                     (summary[existing_bonus_score_cols] < 0).all(axis=1).astype(int)
                 )
                 summary["points"] += all_positive - all_negative
+
+        # ── Two-sleeve scoring ───────────────────────────────────────────
+        # Split the flat point total into a quality sub-sum and a value
+        # sub-sum, percentile-rank each cross-sectionally (same primitive as
+        # the metric ranks above), and multiply the two percentiles so a
+        # stock scores well only when it is good on BOTH dimensions.
+        # `points` (above) is kept unchanged for continuity / legacy consumers.
+        quality_score_cols = [
+            m + "_score" for m in QUALITY_METRICS if m + "_score" in summary.columns
+        ]
+        value_score_cols = [
+            m + "_score" for m in VALUE_METRICS if m + "_score" in summary.columns
+        ]
+        quality_raw = (
+            summary[quality_score_cols].sum(axis=1)
+            if quality_score_cols
+            else pd.Series(0.0, index=summary.index)
+        )
+        value_raw = (
+            summary[value_score_cols].sum(axis=1)
+            if value_score_cols
+            else pd.Series(0.0, index=summary.index)
+        )
+        summary["quality_pct"] = quality_raw.rank(pct=True, na_option="keep")
+        summary["value_pct"] = value_raw.rank(pct=True, na_option="keep")
+        summary["combined_score"] = summary["quality_pct"] * summary["value_pct"]
 
         return summary
 

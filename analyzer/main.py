@@ -47,9 +47,9 @@ from analyzer.historical_calc import calculate_metrics_given_hist
 from analyzer.correlation import baseline_correlation, optimize_weights_and_thresholds, optimize_combo, optimize_stepwise
 from analyzer.config import (
     RELIABILITY_DEFAULT_CUTOFF,
-    RELIABILITY_MIN_QUALIFY,
     RELIABILITY_ESTABLISHED,
     RELIABILITY_INVERSE,
+    SLEEVE_GATE_MIN,
     EXCLUDED_TICKER_IDS,
 )
 from datetime import date
@@ -230,8 +230,13 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
     # Stocks with negative reliability are clamped to 0 so they can't rank highly.
     combined["_combined"] = combined["_pts"] * combined["_spearman"].clip(lower=0)
 
-    # Require a minimum positive reliability so pure-noise stocks are excluded
-    qualified = combined[combined["_spearman"] > RELIABILITY_MIN_QUALIFY].copy()
+    # Two-sleeve gate: qualify only stocks ranking well in BOTH quality and value.
+    combined["_quality"] = pd.to_numeric(combined.get("quality_pct"), errors="coerce")
+    combined["_value"] = pd.to_numeric(combined.get("value_pct"), errors="coerce")
+    qualified = combined[
+        (combined["_quality"] >= SLEEVE_GATE_MIN)
+        & (combined["_value"] >= SLEEVE_GATE_MIN)
+    ].copy()
     qualified = qualified.sort_values("_combined", ascending=False).head(top_n)
 
     # Build set of orderbook IDs that should be on the list
