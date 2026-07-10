@@ -250,8 +250,10 @@ uv run python3 main.py --use-stepwise    # Use scipy Nelder-Mead weights
 
 | Flag | Description |
 |---|---|
-| `--watchlists NAME ...` | Personal Avanza watchlists to analyze (default: `Test`) |
+| `--watchlists NAME ...` | Personal Avanza watchlists to analyze |
 | `--preset NAME ...` | Built-in presets: `omxs30`, `omxs-mid` |
+
+If neither `--watchlists` nor `--preset` is given, both default to the same universe `cron_pi.sh` uses: `--preset omxs30 omxs-mid --watchlists Test Utdelare Äger Berkshire`. Giving either flag explicitly uses exactly what you passed, with no default mixed in.
 | `--save` | Save today's metric snapshot to `data/` |
 | `--correlate` | Run baseline correlation report against historical snapshots |
 | `--optimize` | Re-optimize metric weights from historical data |
