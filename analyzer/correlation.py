@@ -489,7 +489,11 @@ def optimize_weights_and_thresholds(
     # ---- Step 5: Per-company fundamental reliability ----
     print("\n[Step 5] Computing per-company fundamental reliability...")
 
-    reliability = _compute_reliability(df, target_timespans)
+    # Reliability uses only the non-overlapping 5Y_YoY-* windows (3Y_YoY-k and
+    # 5Y_YoY-k are the same calendar window; TOTAL windows overlap each other),
+    # so each company's sample is genuinely independent (n capped at 5).
+    yoy_timespans = [t for t in df["timespan"].unique() if str(t).startswith("5Y_YoY-")]
+    reliability = _compute_reliability(df, yoy_timespans)
 
     # ---- Report ----
     print("\n" + "=" * 70)
@@ -577,12 +581,19 @@ def _compute_reliability(df, target_timespans):
     translate into good returns. An "unreliable" company (like PayPal)
     has good fundamentals but disconnected price performance.
 
-    Returns DataFrame with columns: company, spearman, n_windows, reliable
+    Returns DataFrame with columns:
+        company, spearman, spearman_shrunk, n_windows, reliable
     """
-    # Collect (score, return) pairs per company across all timespans
+    # Collect (score, return) pairs per company across the restricted windows.
+    # target_timespans is now honored (previously a dead parameter — the
+    # function recomputed its own list). Callers pass only the non-overlapping
+    # 5Y_YoY-* windows so each per-company sample is genuinely independent.
     company_pairs = defaultdict(lambda: {"scores": [], "returns": []})
 
-    all_timespans = sorted(df["timespan"].unique())
+    if target_timespans is not None:
+        all_timespans = sorted(target_timespans)
+    else:
+        all_timespans = sorted(df["timespan"].unique())
 
     for timespan in all_timespans:
         df_ts = df[df["timespan"] == timespan].copy()
@@ -615,28 +626,32 @@ def _compute_reliability(df, target_timespans):
     for company, data in company_pairs.items():
         n = len(data["scores"])
         if n < 3:
-            # Not enough windows to compute meaningful correlation
+            # 1-2 points can't produce a meaningful correlation at all.
             rows.append({
                 "company": company,
                 "spearman": np.nan,
+                "spearman_shrunk": np.nan,
                 "n_windows": n,
                 "reliable": False,
             })
             continue
 
         rho, pval = sp_stats.spearmanr(data["scores"], data["returns"])
-        # With ~11 windows per company, p-values are too noisy to use as a gate.
-        # Use rho > 0.4 alone — equivalent to roughly p < 0.22 at n=11, which
-        # is a meaningful positive relationship given the small sample.
-        # Below n=8, the correlation estimate itself is too noisy to trust —
-        # null out rho (not just reliable=False) so downstream consumers
-        # treat it as missing rather than a real (if unreliable) value.
-        if n < 8:
-            rho = np.nan
-        reliable = (not np.isnan(rho)) and rho > 0.4 and n >= 8
+        # Smooth shrinkage toward 0 instead of a hard n-cutoff: with the
+        # window restriction n is capped at 5, so any hard gate above n=5
+        # would null every company. spearman_shrunk = rho * n/(n+10) keeps
+        # small-sample estimates conservative (n=5 → factor ~0.33) without
+        # discarding them. `reliable` stays as an informational rho>0.4
+        # label but no longer gates anything downstream.
+        if np.isnan(rho):
+            shrunk = np.nan
+        else:
+            shrunk = rho * n / (n + 10)
+        reliable = (not np.isnan(rho)) and rho > 0.4
         rows.append({
             "company": company,
             "spearman": round(rho, 4) if not np.isnan(rho) else np.nan,
+            "spearman_shrunk": round(shrunk, 4) if not np.isnan(shrunk) else np.nan,
             "n_windows": n,
             "reliable": reliable,
         })
@@ -644,7 +659,9 @@ def _compute_reliability(df, target_timespans):
     if not rows:
         return pd.DataFrame()
 
-    result = pd.DataFrame(rows).sort_values("spearman", ascending=False, na_position="last")
+    result = pd.DataFrame(rows).sort_values(
+        "spearman_shrunk", ascending=False, na_position="last"
+    )
     return result
 
 
@@ -1003,7 +1020,11 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
             print(f"  {m:40s}  ({old['nok']}, {old['ok']}) → ({new['nok']}, {new['ok']})")
 
     # Reliability
-    reliability = _compute_reliability(df, target_timespans)
+    # Reliability uses only the non-overlapping 5Y_YoY-* windows (3Y_YoY-k and
+    # 5Y_YoY-k are the same calendar window; TOTAL windows overlap each other),
+    # so each company's sample is genuinely independent (n capped at 5).
+    yoy_timespans = [t for t in df["timespan"].unique() if str(t).startswith("5Y_YoY-")]
+    reliability = _compute_reliability(df, yoy_timespans)
 
     # Save
     thr_serializable = {m: {"nok": t["nok"], "ok": t["ok"]}
@@ -1166,7 +1187,11 @@ def optimize_stepwise(csv_path="metrics_by_timespan.csv"):
             print(f"  {m:40s}  ({old['nok']}, {old['ok']}) → ({new['nok']}, {new['ok']})")
 
     # Reliability
-    reliability = _compute_reliability(df, target_timespans)
+    # Reliability uses only the non-overlapping 5Y_YoY-* windows (3Y_YoY-k and
+    # 5Y_YoY-k are the same calendar window; TOTAL windows overlap each other),
+    # so each company's sample is genuinely independent (n capped at 5).
+    yoy_timespans = [t for t in df["timespan"].unique() if str(t).startswith("5Y_YoY-")]
+    reliability = _compute_reliability(df, yoy_timespans)
 
     # Save
     thr_serializable = {m: {"nok": t["nok"], "ok": t["ok"]}

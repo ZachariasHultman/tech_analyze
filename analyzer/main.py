@@ -169,6 +169,8 @@ def _load_reliability_map():
             for _, r in rel_df.iterrows():
                 reliability[r["company"]] = {
                     "spearman": r["spearman"],
+                    "spearman_shrunk": r.get("spearman_shrunk", r["spearman"]),
+                    "n_windows": r.get("n_windows", float("nan")),
                     "reliable": r.get("reliable", r["spearman"] > RELIABILITY_DEFAULT_CUTOFF),
                 }
         except Exception:
@@ -225,10 +227,19 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
     combined["_spearman"] = combined.index.map(
         lambda c: reliability.get(c, {}).get("spearman", float("nan"))
     )
+    combined["_shrunk"] = combined.index.map(
+        lambda c: reliability.get(c, {}).get("spearman_shrunk", float("nan"))
+    )
 
-    # Combined rank: score × reliability (both matter, neither gates the other).
-    # Stocks with negative reliability are clamped to 0 so they can't rank highly.
-    combined["_combined"] = combined["_pts"] * combined["_spearman"].clip(lower=0)
+    # Combined rank: combined_score scaled up by shrunk reliability. Reliability
+    # tilts the ranking but never zeroes a stock out (factor >= 1 when shrunk
+    # is missing or negative-but-clipped is not applied here — fillna(0) only).
+    combined["_combined_score"] = pd.to_numeric(
+        combined.get("combined_score"), errors="coerce"
+    )
+    combined["_combined"] = combined["_combined_score"] * (
+        1 + combined["_shrunk"].fillna(0)
+    )
 
     # Two-sleeve gate: qualify only stocks ranking well in BOTH quality and value.
     combined["_quality"] = pd.to_numeric(combined.get("quality_pct"), errors="coerce")
@@ -353,7 +364,9 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
 
     combined = pd.concat([f.dropna(axis=1, how="all") for f in frames])
     combined["_pts"]      = pd.to_numeric(combined["points"], errors="coerce")
-    combined["_spearman"] = combined.index.map(lambda c: reliability.get(c, {}).get("spearman", float("nan")))
+    # Use the shrunk reliability figure (small-sample-adjusted) for the
+    # established-relationship comparisons below.
+    combined["_spearman"] = combined.index.map(lambda c: reliability.get(c, {}).get("spearman_shrunk", float("nan")))
     combined["_combined"] = combined["_pts"] * combined["_spearman"].clip(lower=0)
 
     scored_ids = {_extract_orderbook_id(i) for i in combined.index}
