@@ -38,7 +38,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 
 # ======================================================================
-# Module-level constants (shared across all three optimizers)
+# Module-level constants (shared across both optimizers)
 # ======================================================================
 
 # Metrics whose correlation with returns is partly circular (price-derived,
@@ -55,6 +55,13 @@ WEIGHT_FLOORS = {
     "piotroski f-score status": 0.5,
     "dividend yield status": 0.25,
 }
+
+# Minimum separation enforced between a metric's nok/ok thresholds whenever
+# a search (grid or Nelder-Mead) proposes a pair that violates direction
+# ordering (nok < ok for direction=+1, nok > ok for direction=-1). Kept as
+# one named constant rather than a hardcoded literal repeated at each
+# enforcement site, so the value only needs to be reasoned about once.
+THRESHOLD_ORDER_EPS = 1e-4
 
 
 # ======================================================================
@@ -725,6 +732,77 @@ def _get_default_thresholds():
     return thresholds
 
 
+def _refine_threshold_2d(metric, weights_dict, full_thresholds, df_total,
+                          target_timespans, metrics):
+    """Locally optimize one metric's (nok, ok) via bounded 2D Nelder-Mead,
+    holding weights and every other metric's threshold fixed.
+
+    A well-scoped 2-parameter subproblem, called once per metric per
+    coordinate-descent round in optimize_combo. Unlike the abandoned
+    60-dimensional joint approach (see removed optimize_stepwise),
+    Nelder-Mead is well-suited at this size -- and it replaces the old
+    fixed-step grid (_threshold_grid_for_metric) with a real local search,
+    so it can land on precise values instead of only fixed multiples of
+    0.3*span.
+
+    Bounded to the metric's own observed value range (2nd-98th percentile,
+    +50% margin) so the search can't wander to a degenerate threshold that
+    trivially passes/fails every company regardless of merit -- the exact
+    failure mode behind the threshold-drift bug fixed in
+    optimize_weights_and_thresholds (an unbounded search will find these
+    looking spuriously better on a small, noisy sample).
+
+    Returns (best_threshold_dict, best_cv) if refinement ran, or
+    (current_threshold, None) if there wasn't enough data to bound the
+    search (caller should treat None as "no candidate, keep current").
+    """
+    direction = DIRECTION_OVERRIDES.get(metric, +1)
+    if metric in RATIO_SPECS:
+        direction = RATIO_SPECS[metric]["dir"]
+
+    cur = full_thresholds[metric]
+    vals = pd.to_numeric(df_total.get(metric, pd.Series(dtype=float)), errors="coerce").dropna()
+    if vals.empty:
+        return cur, None
+    lo, hi = float(vals.quantile(0.02)), float(vals.quantile(0.98))
+    margin = max((hi - lo) * 0.5, 1e-6)
+    bound = (lo - margin, hi + margin)
+
+    def objective(x):
+        nok, ok = float(x[0]), float(x[1])
+        if direction == +1 and nok >= ok:
+            ok = nok + THRESHOLD_ORDER_EPS
+        elif direction == -1 and nok <= ok:
+            nok = ok + THRESHOLD_ORDER_EPS
+        trial = dict(full_thresholds)
+        trial[metric] = {"nok": round(nok, 4), "ok": round(ok, 4)}
+        return -_cv_score(weights_dict, df_total, target_timespans, metrics, trial)
+
+    result = sp_optimize.minimize(
+        objective,
+        x0=np.array([cur["nok"], cur["ok"]], dtype=float),
+        method="Nelder-Mead",
+        bounds=[bound, bound],
+        options={"maxiter": 25, "maxfev": 25, "xatol": 0.01, "fatol": 1e-4},
+    )
+
+    # Clip to bounds first, then fix ordering with an epsilon capped to the
+    # available room -- doing this in the other order can itself push a
+    # value back outside the bound (e.g. nok pinned at the upper edge, then
+    # "ok = nok + THRESHOLD_ORDER_EPS" tips ok just past it). Caught by
+    # test_refine_threshold_2d_respects_bounds_even_with_pathological_objective.
+    lo_b, hi_b = bound
+    nok = min(max(float(result.x[0]), lo_b), hi_b)
+    ok = min(max(float(result.x[1]), lo_b), hi_b)
+    if (direction == +1 and nok >= ok) or (direction == -1 and nok <= ok):
+        mid = (nok + ok) / 2
+        eps = min(THRESHOLD_ORDER_EPS, (hi_b - lo_b) / 2)
+        nok, ok = (mid - eps, mid + eps) if direction == +1 else (mid + eps, mid - eps)
+        nok = min(max(nok, lo_b), hi_b)
+        ok = min(max(ok, lo_b), hi_b)
+    return {"nok": round(nok, 4), "ok": round(ok, 4)}, -float(result.fun)
+
+
 def _threshold_grid_for_metric(metric, current_nok, current_ok, n_steps=3):
     """Generate candidate (nok, ok) pairs around current thresholds.
 
@@ -1037,24 +1115,18 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
                     best_weights = trial_w
                     improved = True
 
-            # --- Threshold sweep (only for metrics with weight > 0) ---
+            # --- Threshold refinement (only for metrics with weight > 0) ---
+            # Bounded 2D local search per metric, not a fixed grid -- see
+            # _refine_threshold_2d.
             if best_weights.get(m, 0) > 0 and m in best_thresholds:
-                cur_thr = best_thresholds[m]
-                thr_candidates = _threshold_grid_for_metric(
-                    m, cur_thr["nok"], cur_thr["ok"], n_steps=2
+                refined_thr, refined_cv = _refine_threshold_2d(
+                    m, best_weights, best_thresholds, df_total, target_timespans, metrics
                 )
-
-                for cand_thr in thr_candidates:
-                    if cand_thr["nok"] == cur_thr["nok"] and cand_thr["ok"] == cur_thr["ok"]:
-                        continue
-                    trial_thr = dict(best_thresholds)
-                    trial_thr[m] = cand_thr
-
-                    cv = _cv_score(best_weights, df_total, target_timespans, metrics, trial_thr)
-                    if cv > best_cv + 1e-6:
-                        best_cv = cv
-                        best_thresholds = trial_thr
-                        improved = True
+                if refined_cv is not None and refined_cv > best_cv + 1e-6:
+                    best_cv = refined_cv
+                    best_thresholds = dict(best_thresholds)
+                    best_thresholds[m] = refined_thr
+                    improved = True
 
         print(f"  Round {round_num}: CV quintile spread = {best_cv:+.4f}")
         if not improved:
