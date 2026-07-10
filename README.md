@@ -42,7 +42,7 @@ Cloning the repo alone isn't enough to run it — the following are gitignored a
 |---|---|---|
 | `.env` | Yes | Avanza credentials (see above); nothing runs without it |
 | `analyzer/metrics.py` | Yes | Scoring weights/thresholds — load-bearing, every module imports from it. Doesn't exist in a fresh clone. Either `cp analyzer/metrics.example.py analyzer/metrics.py` to bootstrap with placeholder values, or scp a tuned copy from an existing machine |
-| `optimization_results_individual.json` (or `_combo.json`/`_stepwise.json`) | Optional | Optimized weights/thresholds loaded at runtime; without it, `main.py` falls back to `metrics.py`'s hardcoded defaults |
+| `optimization_results_individual.json` (or `_combo.json`) | Optional | Optimized weights/thresholds loaded at runtime; without it, `main.py` falls back to `metrics.py`'s hardcoded defaults |
 | `company_reliability.csv` | Optional | Per-company reliability scores; without it, the watchlist push/sell-signal logic treats every company as reliability=unknown |
 
 None of the four are ever committed (`*.json`/`*.csv` are blanket-ignored, and `metrics.py` is explicitly excluded).
@@ -239,10 +239,9 @@ Sends a plain-text email with the watchlist update and any sell signals. Require
 uv run python3 main.py --no-opt          # Use hardcoded default weights (ignore optimizer output)
 uv run python3 main.py --use-individual  # Use individual-correlation weights (default when file exists)
 uv run python3 main.py --use-combo       # Use grid-sweep + cross-validation weights
-uv run python3 main.py --use-stepwise    # Use scipy Nelder-Mead weights
 ```
 
-`--use-individual` is the most trustworthy with a small universe. `--use-combo` and `--use-stepwise` are more likely to overfit until you have 50+ companies × 2+ years of data.
+`--use-individual` is the most trustworthy with a small universe. `--use-combo` is more likely to overfit until you have 50+ companies × 2+ years of data.
 
 ---
 
@@ -252,19 +251,17 @@ uv run python3 main.py --use-stepwise    # Use scipy Nelder-Mead weights
 |---|---|
 | `--watchlists NAME ...` | Personal Avanza watchlists to analyze |
 | `--preset NAME ...` | Built-in presets: `omxs30`, `omxs-mid` |
-
-If neither `--watchlists` nor `--preset` is given, both default to the same universe `cron_pi.sh` uses: `--preset omxs30 omxs-mid --watchlists Test Utdelare Äger Berkshire`. Giving either flag explicitly uses exactly what you passed, with no default mixed in.
 | `--save` | Save today's metric snapshot to `data/` |
 | `--correlate` | Run baseline correlation report against historical snapshots |
 | `--optimize` | Re-optimize metric weights from historical data |
 | `--optimize-combo` | Optimize with grid sweep + cross-validation |
-| `--optimize-stepwise` | Optimize with scipy Nelder-Mead |
 | `--no-opt` | Ignore saved weights, use hardcoded defaults |
 | `--use-individual` | Use individual-correlation weights |
 | `--use-combo` | Use combo-optimized weights |
-| `--use-stepwise` | Use stepwise-optimized weights |
 | `--push` | Push top-scoring reliable stocks to an Avanza watchlist |
 | `--push-to NAME` | Which watchlist to push to (default: `Bör köpa`) |
 | `--push-top N` | How many stocks to push (default: 10) |
 | `--sell-from NAME` | Check this watchlist for sell signals |
 | `--email` | Send email summary (requires `EMAIL_*` in `.env`) |
+
+If neither `--watchlists` nor `--preset` is given, both default to the same universe `cron_pi.sh` uses: `--preset omxs30 omxs-mid --watchlists Test Utdelare Äger Berkshire`. Giving either flag explicitly uses exactly what you passed, with no default mixed in.

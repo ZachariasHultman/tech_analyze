@@ -44,7 +44,7 @@ from analyzer.data_processing import *
 from importlib.metadata import version
 
 from analyzer.historical_calc import calculate_metrics_given_hist
-from analyzer.correlation import baseline_correlation, optimize_weights_and_thresholds, optimize_combo, optimize_stepwise
+from analyzer.correlation import baseline_correlation, optimize_weights_and_thresholds, optimize_combo
 from analyzer.config import (
     RELIABILITY_DEFAULT_CUTOFF,
     RELIABILITY_ESTABLISHED,
@@ -83,7 +83,7 @@ def setup_env():
 def _load_optimized_params(variant=None):
     """Load optimized weights and thresholds from the appropriate results file.
 
-    variant: None (default/legacy), "individual", "combo", or "stepwise"
+    variant: None (default/legacy), "individual", or "combo"
     Returns (weights_dict, thresholds_dict) — either may be None.
     """
     import json
@@ -91,8 +91,6 @@ def _load_optimized_params(variant=None):
         filename = "optimization_results_individual.json"
     elif variant == "combo":
         filename = "optimization_results_combo.json"
-    elif variant == "stepwise":
-        filename = "optimization_results_stepwise.json"
     else:
         # Legacy fallback: try individual first, then old name
         filename = "optimization_results_individual.json"
@@ -600,7 +598,6 @@ def main():
 --- Weight variants ---
   python main.py --no-opt                      Ignore saved weights, use hardcoded defaults
   python main.py --use-combo                   Use combo-optimized weights
-  python main.py --use-stepwise                Use stepwise-optimized weights
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -631,11 +628,6 @@ def main():
         help="Optimize with grid sweep + cross-validation (saves optimization_results_combo.json)",
     )
     ap.add_argument(
-        "--optimize-stepwise",
-        action="store_true",
-        help="Optimize with scipy numerical + cross-validation (saves optimization_results_stepwise.json)",
-    )
-    ap.add_argument(
         "--no-opt",
         action="store_true",
         help="Ignore optimized weights, use hardcoded defaults",
@@ -649,11 +641,6 @@ def main():
         "--use-combo",
         action="store_true",
         help="Use combo optimization results for live analysis",
-    )
-    ap.add_argument(
-        "--use-stepwise",
-        action="store_true",
-        help="Use stepwise optimization results for live analysis",
     )
     ap.add_argument(
         "--watchlists", "--watchlist",
@@ -710,7 +697,6 @@ def main():
     save_data = args.save or args.get_hist
     want_correlate = (
         args.correlate or args.optimize_individual or args.optimize_combo
-        or args.optimize_stepwise
     )
 
     def _run_correlate_optimize():
@@ -720,8 +706,6 @@ def main():
             optimize_weights_and_thresholds("metrics_by_timespan.csv")
         if args.optimize_combo:
             optimize_combo("metrics_by_timespan.csv")
-        if args.optimize_stepwise:
-            optimize_stepwise("metrics_by_timespan.csv")
 
     # --correlate/--optimize* without --save: just use already-saved
     # historical data, no live Avanza fetch needed.
@@ -738,8 +722,6 @@ def main():
             opt_weights, opt_thresholds = _load_optimized_params("individual")
         elif args.use_combo:
             opt_weights, opt_thresholds = _load_optimized_params("combo")
-        elif args.use_stepwise:
-            opt_weights, opt_thresholds = _load_optimized_params("stepwise")
         else:
             opt_weights, opt_thresholds = _load_optimized_params()
         if opt_weights:

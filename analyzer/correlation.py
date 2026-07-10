@@ -430,7 +430,7 @@ def optimize_weights_and_thresholds(
         return {}
 
     # MOMENTUM_METRICS / MOMENTUM_WEIGHT_CAP / WEIGHT_FLOORS are module-level
-    # constants (shared with combo/stepwise), defined near the top of this file.
+    # constants (shared with combo), defined near the top of this file.
 
     # Scale to [0, 2] range proportional to correlation strength
     # Exclude momentum from max_corr so fundamental metrics set the scale
@@ -699,7 +699,7 @@ def _compute_reliability(df, target_timespans):
 
 
 # ======================================================================
-# Shared helpers for combo / stepwise optimization
+# Shared helpers for combo optimization
 # ======================================================================
 
 
@@ -846,13 +846,12 @@ def _avg_quintile_spread_across_windows(weights_dict, df_total, target_timespans
 def _load_previous_results(variant):
     """Load previous optimization results if they exist.
 
-    variant: "individual", "combo", or "stepwise"
+    variant: "individual" or "combo"
     Returns (weights_dict, thresholds_dict) or (None, None) if not found.
     """
     filenames = {
         "individual": "optimization_results_individual.json",
         "combo": "optimization_results_combo.json",
-        "stepwise": "optimization_results_stepwise.json",
     }
     filename = filenames.get(variant)
     if not filename:
@@ -883,7 +882,7 @@ def _get_starting_weights_and_thresholds(csv_path, variant):
 
     Priority:
     1. Previous results for this variant (warm-start / iterative refinement)
-    2. Previous individual results (as base for combo/stepwise)
+    2. Previous individual results (as base for combo)
     3. Run individual optimization fresh (fallback)
     """
     # 1. Check for previous results of the same method
@@ -893,8 +892,8 @@ def _get_starting_weights_and_thresholds(csv_path, variant):
         thresholds = prev_t if prev_t else _get_default_thresholds()
         return prev_w, thresholds
 
-    # 2. For combo/stepwise, check for existing individual results
-    if variant in ("combo", "stepwise"):
+    # 2. For combo, check for existing individual results
+    if variant == "combo":
         ind_w, ind_t = _load_previous_results("individual")
         if ind_w:
             print(f"  → Starting from previous individual results")
@@ -1121,175 +1120,6 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
     return result
 
 
-# ======================================================================
-# Phase D: Scipy numerical optimization (stepwise)
-# ======================================================================
-
-def optimize_stepwise(csv_path="metrics_by_timespan.csv"):
-    """Numerical optimization of all weights AND thresholds simultaneously.
-
-    Uses Nelder-Mead (derivative-free) to maximize average Spearman
-    correlation across time windows with cross-validation.
-
-    The parameter vector is: [weight_0, ..., weight_N, nok_0, ok_0, ..., nok_N, ok_N]
-    for all metrics that have thresholds.
-    """
-    print("\n" + "=" * 70)
-    print("  STEPWISE OPTIMIZATION (Scipy Nelder-Mead + Cross-Validation)")
-    print("=" * 70)
-
-    print("\n[Step 1] Getting starting point...")
-    start_weights, start_thresholds = _get_starting_weights_and_thresholds(csv_path, "stepwise")
-
-    df, df_total, target_timespans, metrics = _prepare_data(csv_path)
-    if df is None:
-        print("[WARN] No data.")
-        return {}
-
-    # Order metrics consistently for vector operations
-    metric_list = sorted(metrics)
-    # Metrics that have thresholds to optimize
-    thr_metrics = [m for m in metric_list if m in start_thresholds]
-
-    # Build x0: [weights..., nok_0, ok_0, nok_1, ok_1, ...]
-    n_weights = len(metric_list)
-    n_thr = len(thr_metrics)
-    x0_weights = [start_weights.get(m, 0.0) for m in metric_list]
-    x0_thresholds = []
-    for m in thr_metrics:
-        t = start_thresholds[m]
-        x0_thresholds.extend([t["nok"], t["ok"]])
-    x0 = np.array(x0_weights + x0_thresholds)
-
-    print(f"\n[Step 2] Optimizing {n_weights} weights + {n_thr * 2} threshold params over "
-          f"{len(target_timespans)} time windows...")
-
-    eval_count = [0]
-
-    def objective(x):
-        """Negative CV quintile spread (we minimize)."""
-        # Decode weights
-        w_dict = {}
-        for i, m in enumerate(metric_list):
-            w_dict[m] = float(np.clip(x[i], 0.0, 2.0))
-        w_dict = _apply_weight_constraints(w_dict)
-
-        # Decode thresholds
-        thr_dict = dict(start_thresholds)  # start with defaults for non-optimized
-        for j, m in enumerate(thr_metrics):
-            nok = float(x[n_weights + j * 2])
-            ok = float(x[n_weights + j * 2 + 1])
-
-            # Enforce ordering based on direction
-            direction = DIRECTION_OVERRIDES.get(m, +1)
-            if m in RATIO_SPECS:
-                direction = RATIO_SPECS[m]["dir"]
-            if direction == +1 and nok >= ok:
-                ok = nok + 0.01
-            elif direction == -1 and nok <= ok:
-                nok = ok + 0.01
-
-            thr_dict[m] = {"nok": round(nok, 4), "ok": round(ok, 4)}
-
-        cv = _cv_score(w_dict, df_total, target_timespans, metrics, thr_dict)
-        eval_count[0] += 1
-        if eval_count[0] % 50 == 0:
-            print(f"    eval {eval_count[0]}: CV quintile spread = {cv:+.4f}")
-        return -cv
-
-    result_opt = sp_optimize.minimize(
-        objective,
-        x0,
-        method="Nelder-Mead",
-        options={
-            "maxiter": 1000,
-            "maxfev": 5000,
-            "xatol": 0.02,
-            "fatol": 1e-4,
-            "adaptive": True,
-        },
-    )
-
-    # Extract final weights
-    best_weights = {}
-    for i, m in enumerate(metric_list):
-        best_weights[m] = float(np.clip(result_opt.x[i], 0.0, 2.0))
-    best_weights = _apply_weight_constraints(best_weights)
-
-    # Extract final thresholds
-    best_thresholds = dict(start_thresholds)
-    for j, m in enumerate(thr_metrics):
-        nok = float(result_opt.x[n_weights + j * 2])
-        ok = float(result_opt.x[n_weights + j * 2 + 1])
-        direction = DIRECTION_OVERRIDES.get(m, +1)
-        if m in RATIO_SPECS:
-            direction = RATIO_SPECS[m]["dir"]
-        if direction == +1 and nok >= ok:
-            ok = nok + 0.01
-        elif direction == -1 and nok <= ok:
-            nok = ok + 0.01
-        best_thresholds[m] = {"nok": round(nok, 4), "ok": round(ok, 4)}
-
-    best_cv = -result_opt.fun
-    baseline_cv = _cv_score(
-        {m: 1.0 for m in metrics}, df_total, target_timespans, metrics
-    )
-
-    # Report
-    print(f"\n  Converged after {result_opt.nfev} evaluations")
-    print("\n" + "-" * 70)
-    print("  STEPWISE OPTIMIZATION RESULTS")
-    print("-" * 70)
-    print(f"\n  Equal-weight CV quintile spread:       {baseline_cv:+.4f}")
-    print(f"  Stepwise-optimized CV quintile spread: {best_cv:+.4f}")
-    print(f"\nOptimized weights:")
-    for m in sorted(best_weights, key=lambda x: best_weights[x], reverse=True):
-        w = best_weights[m]
-        sw = start_weights.get(m, 0.0)
-        delta = w - sw
-        print(f"  {m:40s}  w={w:.2f}  (indep={sw:.2f}, Δ={delta:+.2f})")
-
-    default_thr = _get_default_thresholds()
-    print(f"\nThreshold changes:")
-    for m in sorted(best_thresholds):
-        old = default_thr.get(m)
-        new = best_thresholds[m]
-        if old and (old["nok"] != new["nok"] or old["ok"] != new["ok"]):
-            print(f"  {m:40s}  ({old['nok']}, {old['ok']}) → ({new['nok']}, {new['ok']})")
-
-    # Reliability
-    # Reliability uses only the non-overlapping 5Y_YoY-* windows (3Y_YoY-k and
-    # 5Y_YoY-k are the same calendar window; TOTAL windows overlap each other),
-    # so each company's sample is genuinely independent (n capped at 5).
-    yoy_timespans = [t for t in df["timespan"].unique() if str(t).startswith("5Y_YoY-")]
-    reliability = _compute_reliability(df, yoy_timespans)
-
-    # Save
-    thr_serializable = {m: {"nok": t["nok"], "ok": t["ok"]}
-                        for m, t in best_thresholds.items()}
-    result = {
-        "method": "stepwise_nelder_mead_cv",
-        "optimized_weights": best_weights,
-        "optimized_thresholds": thr_serializable,
-        "cv_quintile_spread": round(best_cv, 4),
-        "baseline_cv_quintile_spread": round(baseline_cv, 4),
-        "independent_weights": start_weights,
-        "scipy_converged": bool(result_opt.success),
-        "scipy_message": result_opt.message,
-        "n_evaluations": int(result_opt.nfev),
-    }
-
-    out_path = "optimization_results_stepwise.json"
-    with open(out_path, "w") as f:
-        json.dump(result, f, indent=2, default=str)
-    print(f"\nSaved to {out_path}")
-
-    if reliability is not None and not reliability.empty:
-        reliability.to_csv("company_reliability_stepwise.csv", index=False)
-
-    print("=" * 70)
-    return result
-
 
 # ======================================================================
 # CLI entry point
@@ -1305,21 +1135,17 @@ if __name__ == "__main__":
                     help="Run correlation-based weight optimization")
     ap.add_argument("--optimize-combo", action="store_true",
                     help="Grid sweep + cross-validation optimization")
-    ap.add_argument("--optimize-stepwise", action="store_true",
-                    help="Scipy numerical optimization + cross-validation")
     ap.add_argument("--csv", default="metrics_by_timespan.csv",
                     help="Path to metrics_by_timespan.csv")
     args = ap.parse_args()
 
     if args.optimize_combo:
         optimize_combo(args.csv)
-    elif args.optimize_stepwise:
-        optimize_stepwise(args.csv)
     elif args.baseline:
         baseline_correlation(args.csv)
     elif args.optimize:
         optimize_weights_and_thresholds(csv_path=args.csv)
     else:
         print("Running baseline correlation analysis...")
-        print("(Use --optimize, --optimize-combo, or --optimize-stepwise)")
+        print("(Use --optimize or --optimize-combo)")
         baseline_correlation(args.csv)
