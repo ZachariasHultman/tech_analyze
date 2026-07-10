@@ -349,7 +349,11 @@ class SummaryManager:
             try:
                 rel_df = pd.read_csv(rel_path)
                 for _, r in rel_df.iterrows():
-                    reliability_map[r["company"]] = r["spearman"]
+                    reliability_map[r["company"]] = {
+                        "spearman": r.get("spearman"),
+                        "spearman_shrunk": r.get("spearman_shrunk", r.get("spearman")),
+                        "n_windows": r.get("n_windows"),
+                    }
             except Exception:
                 pass
 
@@ -435,13 +439,18 @@ class SummaryManager:
             flags = df2.apply(_flags_row, axis=1)
             export = pd.concat([df2, flags], axis=1)
 
-            # Drop helper/base columns
+            # Drop helper/base columns. combined_score is kept explicitly —
+            # it ends in "_score" but is a headline sleeve output, not a
+            # per-metric score column.
             drop_cols = [
                 c
                 for c in export.columns
-                if str(c).endswith("_score")
-                or c == "sector"
-                or str(c).strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
+                if c != "combined_score"
+                and (
+                    str(c).endswith("_score")
+                    or c == "sector"
+                    or str(c).strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
+                )
             ]
             export = export.drop(columns=drop_cols, errors="ignore")
 
@@ -472,9 +481,12 @@ class SummaryManager:
             drop_cols = [
                 c
                 for c in df2.columns
-                if str(c).endswith("_score")
-                or c == "sector"
-                or str(c).strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
+                if c != "combined_score"
+                and (
+                    str(c).endswith("_score")
+                    or c == "sector"
+                    or str(c).strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
+                )
             ]
             df2 = df2.drop(columns=drop_cols, errors="ignore")
 
@@ -498,11 +510,16 @@ class SummaryManager:
             # Sort metric columns by weight descending, then alphabetical
             metric_cols.sort(key=lambda m: (-self._assign_weight(m), m))
 
-            # Build final order: points first, then reliability, then metrics, then rest
+            # Build final order: points, then the sleeve columns, then
+            # reliability, then metrics, then rest.
             ordered = []
             if "points" in other_cols:
                 ordered.append("points")
                 other_cols.remove("points")
+            for sleeve in ("quality_pct", "value_pct", "combined_score"):
+                if sleeve in other_cols:
+                    ordered.append(sleeve)
+                    other_cols.remove(sleeve)
             if "reliability" in other_cols:
                 ordered.append("reliability")
                 other_cols.remove("reliability")
@@ -514,59 +531,84 @@ class SummaryManager:
             return df[ordered]
 
         def _add_reliability(df, colorize=False):
-            """Add reliability column from company_reliability.csv."""
-            if reliability_map:
-                df["reliability"] = df.index.map(
-                    lambda c: reliability_map.get(c, None)
-                )
+            """Add a formatted 'shrunk (n=windows)' reliability column.
+
+            Reads the shrunk spearman + window count from company_reliability.csv.
+            Sleeve columns (quality_pct/value_pct/combined_score) are already on
+            df since item 2 and flow through untouched.
+            """
+            if not reliability_map:
+                return df
+
+            def _fmt_rel(c):
+                info = reliability_map.get(c)
+                if not info:
+                    return "N/A"
+                sh = info.get("spearman_shrunk")
+                try:
+                    sh = float(sh)
+                except (TypeError, ValueError):
+                    return "N/A"
+                if _is_nan(sh):
+                    return "N/A"
+                n = info.get("n_windows")
+                n_str = ""
+                try:
+                    if n is not None and not _is_nan(float(n)):
+                        n_str = f" (n={int(float(n))})"
+                except (TypeError, ValueError):
+                    n_str = ""
+                base = f"{sh:.2f}{n_str}"
                 if colorize:
-                    def _color_rel(v):
-                        if v is None or (isinstance(v, float) and _is_nan(v)):
-                            return "N/A"
-                        try:
-                            fv = float(v)
-                            if fv > 0.1:
-                                return f"\033[92m{fv:.2f}\033[0m"
-                            elif fv < -0.1:
-                                return f"\033[91m{fv:.2f}\033[0m"
-                            return f"{fv:.2f}"
-                        except Exception:
-                            return v
-                    df["reliability"] = df["reliability"].apply(_color_rel)
+                    if sh > 0.1:
+                        return f"\033[92m{base}\033[0m"
+                    if sh < -0.1:
+                        return f"\033[91m{base}\033[0m"
+                return base
+
+            df["reliability"] = df.index.map(_fmt_rel)
             return df
+
+        def _rank_key(df):
+            """Sort key: combined_score * (1 + spearman_shrunk), matching the
+            watchlist / sell-signal ranking. Falls back to points when the
+            sleeve columns aren't present. Indexed by company."""
+            import numpy as np
+
+            if "combined_score" in df.columns:
+                base = pd.to_numeric(df["combined_score"], errors="coerce")
+            elif "points" in df.columns:
+                base = pd.to_numeric(df["points"], errors="coerce")
+            else:
+                base = pd.Series(0.0, index=df.index)
+            base = base.fillna(float("-inf"))
+            shrunk = pd.Series(
+                [
+                    (reliability_map.get(c) or {}).get("spearman_shrunk")
+                    for c in df.index
+                ],
+                index=df.index,
+            )
+            shrunk = pd.to_numeric(shrunk, errors="coerce").fillna(0.0)
+            return base * (1 + shrunk)
 
         def _sort_and_print(df, csv_name):
             if df.empty:
                 return
+
+            order = _rank_key(df).sort_values(ascending=False).index
 
             # CSV export first (clean + flags)
             if save_df:
                 export_df = _build_export(df)
                 export_df = _add_reliability(export_df)
                 export_df = _reorder_columns(export_df)
-                # Sort by points (numeric) for the CSV as well
-                if "points" in export_df.columns:
-                    import pandas as pd
-
-                    pts = pd.to_numeric(export_df["points"], errors="coerce")
-                    export_df = (
-                        export_df.assign(_pts=pts.fillna(float("-inf")))
-                        .sort_values("_pts", ascending=False)
-                        .drop(columns="_pts")
-                    )
+                export_df = export_df.reindex(order)
                 export_df.to_csv(csv_name)
 
             # Terminal view (colored)
             proc = _process_dataframe(df)
-            if "points" in proc.columns:
-                import pandas as pd
-
-                pts = pd.to_numeric(proc["points"], errors="coerce")
-                proc = (
-                    proc.assign(_pts=pts.fillna(float("-inf")))
-                    .sort_values("_pts", ascending=False)
-                    .drop(columns="_pts")
-                )
+            proc = proc.reindex(order)
 
             # Add reliability and reorder columns by weight
             proc = _add_reliability(proc, colorize=True)

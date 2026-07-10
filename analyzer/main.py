@@ -295,29 +295,45 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
             except Exception as e:
                 failed.append((name, f"remove failed: {e}"))
 
+    def _num(name, col):
+        try:
+            v = qualified.loc[name, col]
+            return float(v) if pd.notna(v) else float("nan")
+        except Exception:
+            return float("nan")
+
     def _row(name):
+        # (name, pts, spearman, rank_key, quality_pct, value_pct, combined_score)
         return (
             name,
-            float(qualified.loc[name, "_pts"]),
-            float(qualified.loc[name, "_spearman"]),
-            float(qualified.loc[name, "_combined"]),
+            _num(name, "_pts"),
+            _num(name, "_spearman"),
+            _num(name, "_combined"),
+            _num(name, "_quality"),
+            _num(name, "_value"),
+            _num(name, "_combined_score"),
         )
 
     added_rows   = [_row(n) for n in added]
     already_rows = [_row(n) for n in already]
 
+    def _fmt_row(marker, r):
+        name, pts, sp, comb, qual, val, cscore = r
+        return (f"    {marker} {name}  (q={qual:.2f}, v={val:.2f}, "
+                f"combined={cscore:.2f}, r={sp:.2f})")
+
     # Report
     print(f"\n{'=' * 70}")
-    print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by score × reliability)")
+    print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by combined × reliability)")
     print(f"{'=' * 70}")
     if added_rows:
         print(f"\n  Added {len(added_rows)} stock(s):")
-        for name, pts, sp, comb in added_rows:
-            print(f"    + {name}  ({pts:+.2f} pts, r={sp:.2f}, combined={comb:.2f})")
+        for r in added_rows:
+            print(_fmt_row("+", r))
     if already_rows:
         print(f"\n  Already on list ({len(already_rows)}):")
-        for name, pts, sp, comb in already_rows:
-            print(f"    = {name}  ({pts:+.2f} pts, r={sp:.2f}, combined={comb:.2f})")
+        for r in already_rows:
+            print(_fmt_row("=", r))
     if removed:
         print(f"\n  Removed {len(removed)} stock(s) (no longer in top {top_n}):")
         for name in removed:
@@ -428,10 +444,15 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
         lines.append("=" * 50)
 
         top10 = push_results["added"] + push_results["already"]
-        top10.sort(key=lambda x: x[3], reverse=True)  # sort by combined score
-        for nm, pts, sp, comb in top10:
-            tag = "NEW" if (nm, pts, sp, comb) in push_results["added"] else "   "
-            lines.append(f"  {tag} {nm}  ({pts:+.2f} pts, r={sp:.2f})")
+        top10.sort(key=lambda x: x[3], reverse=True)  # sort by rank key (combined × reliability)
+        added_set = {r[0] for r in push_results["added"]}
+        for r in top10:
+            nm, pts, sp, comb, qual, val, cscore = r
+            tag = "NEW" if nm in added_set else "   "
+            lines.append(
+                f"  {tag} {nm}  (q={qual:.2f}, v={val:.2f}, "
+                f"combined={cscore:.2f}, r={sp:.2f})"
+            )
 
         if push_results["removed"]:
             lines.append(f"\nRemoved from list ({len(push_results['removed'])}):")
