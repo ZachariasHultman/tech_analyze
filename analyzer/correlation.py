@@ -924,16 +924,54 @@ def _prepare_data(csv_path):
     return df, df_total, target_timespans, metrics
 
 
+_CV_FOLDS = 5
+
+
+def _company_folds(companies, k=_CV_FOLDS):
+    """Deterministic leave-companies-out partition.
+
+    Sort company names and stride them into k folds (company i -> fold i % k).
+    Sorting makes the assignment reproducible across runs; striding keeps the
+    folds balanced. A company's full set of (self-overlapping) window rows
+    always lands in exactly one fold.
+    """
+    ordered = sorted(set(companies))
+    folds = [[] for _ in range(k)]
+    for i, c in enumerate(ordered):
+        folds[i % k].append(c)
+    return [set(f) for f in folds if f]
+
+
 def _cv_score(weights_dict, df_total, target_timespans, metrics,
               thresholds_dict=None):
-    """Objective for combo/stepwise: average quintile long-short spread.
+    """Leave-companies-out cross-validation of the quintile-spread objective.
 
-    Item 1 swapped the underlying metric from Spearman to quintile spread.
-    Item 5 replaces this window-averaged form with genuine company-fold CV.
+    Partition companies into K=5 deterministic folds and evaluate the
+    quintile-spread objective separately on each fold's own rows (across the
+    3Y/5Y TOTAL objective windows), then average the fold scores. This keeps
+    every company's overlapping windows together in a single fold, so the
+    search never sees fragments of one company's overlapping windows as if
+    they were independent evidence. Weight/threshold selection remains the
+    outer search loop's job -- this only changes which rows are scored.
     """
-    return _avg_quintile_spread_across_windows(
-        weights_dict, df_total, target_timespans, metrics, thresholds_dict
-    )
+    companies = df_total["company"].unique()
+    folds = _company_folds(companies)
+    if len(folds) < 2:
+        return _avg_quintile_spread_across_windows(
+            weights_dict, df_total, target_timespans, metrics, thresholds_dict
+        )
+
+    fold_scores = []
+    for fold in folds:
+        df_fold = df_total[df_total["company"].isin(fold)]
+        if df_fold.empty:
+            continue
+        fold_scores.append(
+            _avg_quintile_spread_across_windows(
+                weights_dict, df_fold, target_timespans, metrics, thresholds_dict
+            )
+        )
+    return float(np.mean(fold_scores)) if fold_scores else 0.0
 
 
 # ======================================================================
