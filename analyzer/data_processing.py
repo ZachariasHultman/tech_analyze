@@ -347,7 +347,15 @@ def calculate_score(manager, metrics_to_score=None, use_cross_sectional_ranks=Tr
                 direction = DIRECTION_OVERRIDES.get(col, +1)
                 if col in RATIO_SPECS:
                     direction = RATIO_SPECS[col]["dir"]
-                vals = pd.to_numeric(summary[col], errors="coerce")
+                # Historical re-scoring (process_historical) stores values as
+                # single-element lists/tuples, e.g. [0.82] — pd.to_numeric
+                # can't parse those and would read every row as missing.
+                # _assign_points already unwraps this shape; mirror it here
+                # so the coverage check sees the real values.
+                unwrapped = summary[col].map(
+                    lambda v: v[0] if isinstance(v, (list, tuple)) and len(v) >= 1 else v
+                )
+                vals = pd.to_numeric(unwrapped, errors="coerce")
                 # Winsorize cross-sectionally at the 2nd/98th percentile so a
                 # single extreme outlier can't dominate the percentile ranks.
                 lo, hi = vals.quantile(0.02), vals.quantile(0.98)
