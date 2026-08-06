@@ -176,6 +176,28 @@ def _load_reliability_map():
     return reliability
 
 
+def _fmt_reliability(sp, n):
+    """Format a shrunk reliability figure with its sample size, e.g. '+0.60 (n=5)'."""
+    if pd.isna(sp):
+        return "N/A"
+    n_str = f"{int(n)}" if pd.notna(n) else "?"
+    return f"{sp:+.2f} (n={n_str})"
+
+
+# Shared explainer for q/v/combined/r, printed in both the terminal watchlist
+# report and the email summary.
+LEGEND_LINES = [
+    "q = quality percentile (0-1, peer-ranked business health)",
+    "v = value percentile (0-1, peer-ranked cheapness)",
+    "combined = q x v -- the actual ranking key",
+    "r = shrunk reliability -- does this company's own past score history",
+    "    actually track its own returns? (n = independent windows behind",
+    "    it; positive = trustworthy signal for this stock, negative =",
+    "    fundamentals have historically moved opposite to its returns,",
+    "    near zero = no track record either way)",
+]
+
+
 def _wl_attr(wl, key):
     """Get attribute from a watchlist (supports both dict and pydantic model)."""
     if isinstance(wl, dict):
@@ -221,12 +243,14 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
     combined = pd.concat(frames)
     combined["_pts"] = pd.to_numeric(combined["points"], errors="coerce")
 
-    # Add reliability info
-    combined["_spearman"] = combined.index.map(
-        lambda c: reliability.get(c, {}).get("spearman", float("nan"))
-    )
+    # Add reliability info. Display the shrunk figure (matches what actually
+    # drives _combined below), not the raw spearman -- a raw correlation
+    # from only 5 non-overlapping windows is too noisy to show unshrunk.
     combined["_shrunk"] = combined.index.map(
         lambda c: reliability.get(c, {}).get("spearman_shrunk", float("nan"))
+    )
+    combined["_n_windows"] = combined.index.map(
+        lambda c: reliability.get(c, {}).get("n_windows", float("nan"))
     )
 
     # Combined rank: combined_score scaled up by shrunk reliability. Reliability
@@ -301,29 +325,32 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
             return float("nan")
 
     def _row(name):
-        # (name, pts, spearman, rank_key, quality_pct, value_pct, combined_score)
+        # (name, pts, shrunk_spearman, rank_key, quality_pct, value_pct, combined_score, n_windows)
         return (
             name,
             _num(name, "_pts"),
-            _num(name, "_spearman"),
+            _num(name, "_shrunk"),
             _num(name, "_combined"),
             _num(name, "_quality"),
             _num(name, "_value"),
             _num(name, "_combined_score"),
+            _num(name, "_n_windows"),
         )
 
     added_rows   = [_row(n) for n in added]
     already_rows = [_row(n) for n in already]
 
     def _fmt_row(marker, r):
-        name, pts, sp, comb, qual, val, cscore = r
+        name, pts, sp, comb, qual, val, cscore, n = r
         return (f"    {marker} {name}  (q={qual:.2f}, v={val:.2f}, "
-                f"combined={cscore:.2f}, r={sp:.2f})")
+                f"combined={cscore:.2f}, r={_fmt_reliability(sp, n)})")
 
     # Report
     print(f"\n{'=' * 70}")
     print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by combined × reliability)")
     print(f"{'=' * 70}")
+    for line in LEGEND_LINES:
+        print(f"  {line}")
     if added_rows:
         print(f"\n  Added {len(added_rows)} stock(s):")
         for r in added_rows:
@@ -381,6 +408,7 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
     # Use the shrunk reliability figure (small-sample-adjusted) for the
     # established-relationship comparisons below.
     combined["_spearman"] = combined.index.map(lambda c: reliability.get(c, {}).get("spearman_shrunk", float("nan")))
+    combined["_n_windows"] = combined.index.map(lambda c: reliability.get(c, {}).get("n_windows", float("nan")))
     combined["_combined"] = combined["_pts"] * combined["_spearman"].clip(lower=0)
 
     scored_ids = {_extract_orderbook_id(i) for i in combined.index}
@@ -398,6 +426,7 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
             continue
         pts  = float(combined.loc[idx, "_pts"])   if pd.notna(combined.loc[idx, "_pts"])      else None
         sp   = float(combined.loc[idx, "_spearman"]) if pd.notna(combined.loc[idx, "_spearman"]) else None
+        n_w  = float(combined.loc[idx, "_n_windows"]) if pd.notna(combined.loc[idx, "_n_windows"]) else None
         comb = float(combined.loc[idx, "_combined"]) if pd.notna(combined.loc[idx, "_combined"]) else None
 
         reasons = []
@@ -409,7 +438,7 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
             reasons.append("score moves opposite to returns for this stock")
 
         if reasons:
-            signals.append({"name": idx, "pts": pts, "spearman": sp, "combined": comb, "reasons": ", ".join(reasons)})
+            signals.append({"name": idx, "pts": pts, "spearman": sp, "n_windows": n_w, "combined": comb, "reasons": ", ".join(reasons)})
 
     return sorted(signals, key=lambda x: (x["combined"] or 0))
 
@@ -439,6 +468,10 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
 
     lines = [f"Stock Screener — {date.today()}", ""]
 
+    if push_results or sell_signals:
+        lines.extend(LEGEND_LINES)
+        lines.append("")
+
     if push_results:
         n = push_results["top_n"]
         lines.append("=" * 50)
@@ -449,11 +482,11 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
         top10.sort(key=lambda x: x[3], reverse=True)  # sort by rank key (combined × reliability)
         added_set = {r[0] for r in push_results["added"]}
         for r in top10:
-            nm, pts, sp, comb, qual, val, cscore = r
+            nm, pts, sp, comb, qual, val, cscore, n_w = r
             tag = "NEW" if nm in added_set else "   "
             lines.append(
                 f"  {tag} {nm}  (q={qual:.2f}, v={val:.2f}, "
-                f"combined={cscore:.2f}, r={sp:.2f})"
+                f"combined={cscore:.2f}, r={_fmt_reliability(sp, n_w)})"
             )
 
         if push_results["removed"]:
@@ -467,7 +500,7 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
         lines.append("=" * 50)
         for sig in sell_signals:
             pts_str = f"{sig['pts']:+.2f}" if sig["pts"] is not None else "N/A"
-            sp_str  = f"{sig['spearman']:.2f}" if sig["spearman"] is not None else "N/A"
+            sp_str  = _fmt_reliability(sig["spearman"], sig.get("n_windows"))
             lines.append(f"  ! {sig['name']}  ({pts_str} pts, r={sp_str}) — {sig['reasons']}")
     else:
         lines.append("\n✓ No sell signals in portfolio.")
@@ -834,9 +867,14 @@ def main():
             print(f"\n{'=' * 70}")
             print(f"  SELL SIGNALS IN '{args.sell_from}'")
             print(f"{'=' * 70}")
+            if not push_results:
+                # _update_watchlist already printed this legend when --push
+                # ran in the same invocation -- avoid repeating it.
+                for line in LEGEND_LINES:
+                    print(f"  {line}")
             for sig in sell_signals:
                 pts_str = f"{sig['pts']:+.2f}" if sig["pts"] is not None else "N/A"
-                sp_str  = f"{sig['spearman']:.2f}" if sig["spearman"] is not None else "N/A"
+                sp_str  = _fmt_reliability(sig["spearman"], sig.get("n_windows"))
                 print(f"  ! {sig['name']}  ({pts_str} pts, r={sp_str}) — {sig['reasons']}")
             print(f"{'=' * 70}\n")
         else:
