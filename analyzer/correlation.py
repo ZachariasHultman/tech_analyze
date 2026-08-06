@@ -48,12 +48,17 @@ MOMENTUM_WEIGHT_CAP = 1.0
 
 # Minimum weight floors for academically proven metrics. These may show
 # weak/negative correlation due to data-quality issues in the historical
-# adapter, but are well-established in research. "earnings quality status"
-# excluded: OCF is never populated in either the live or historical path, so
-# this metric is permanently 0. Re-add if OCF wiring is done later.
+# adapter, but are well-established in research.
 WEIGHT_FLOORS = {
     "piotroski f-score status": 0.5,
     "dividend yield status": 0.25,
+    # OCF is populated live for Nordic stocks but Avanza exposes no
+    # historical OCF series, so the backtest/optimizer can never compute a
+    # real correlation for this metric -- its weight comes entirely from
+    # this floor. See HIGH_WEIGHT_METRICS in metrics.py for why it's not in
+    # HIGHEST (would permanently block the bonus/malus check for non-Nordic
+    # holdings, where operatingCashFlow is always None).
+    "earnings quality status": 0.5,
 }
 
 # Minimum separation enforced between a metric's nok/ok thresholds whenever
