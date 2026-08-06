@@ -385,7 +385,11 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
 
     scored_ids = {_extract_orderbook_id(i) for i in combined.index}
     for missing_id in sorted(portfolio_ids - scored_ids):
-        print(f"[WARN] {missing_id} not analyzed — no signal possible.")
+        try:
+            name = avanza.get_stock_info(missing_id).get("name", missing_id)
+        except Exception:
+            name = missing_id
+        print(f"[WARN] {name} ({missing_id}) not analyzed — no signal possible.")
 
     signals = []
     for idx in combined.index:
