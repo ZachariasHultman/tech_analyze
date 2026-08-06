@@ -24,7 +24,7 @@ dependencies = [
     "anyio==4.10.0",
     "attrs==24.3.0",
     "autopep8==2.3.2",
-    "avanza-api==15.1.1",
+    "avanza-api==16.1.0",
     "beautifulsoup4==4.12.3",
     "certifi==2024.8.30",
     "charset-normalizer==3.4.0",

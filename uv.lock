@@ -55,17 +55,16 @@ wheels = [
 
 [[package]]
 name = "avanza-api"
-version = "15.1.1"
+version = "16.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyotp" },
     { name = "requests" },
-    { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/56/ca/fbe02ccbc127a74ff485a1703b652673d561fe77b8ad156e8f196b092f15/avanza_api-15.1.1.tar.gz", hash = "sha256:e65ddeeaf984ce73e019408e64424f7901c41904cc17d8c74fa6e01f6d5288f6", size = 30841, upload-time = "2025-03-13T20:10:11.093Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c0/0d/c9a3b84ce00a00eb1e6462983b928827da6b24b8374939b45cdbe13d7987/avanza_api-16.1.0.tar.gz", hash = "sha256:df99509acea9dcc5cec679b66bf79008d676dd2cba6fdd752c1c02cb76d7a47b", size = 29029, upload-time = "2026-02-07T10:17:07.995Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2b/b1/8c9601a5195d0f88e26581e8d205deefc538372f6fd94ab02339bd4c939e/avanza_api-15.1.1-py3-none-any.whl", hash = "sha256:07d6b3b7ca190e663f5a2768603b0a984e1fbc44e318d3c4e0b7e4807dfc4b3a", size = 35144, upload-time = "2025-03-13T20:10:09.921Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/39/e14f9c69f682658ef000b89126c234e97ebe4377829a29b8a7474636eddf/avanza_api-16.1.0-py3-none-any.whl", hash = "sha256:2059db8434697666a2f4aa7f71682efa12bf0e62793e8034d4ddc7ae8757b059", size = 34237, upload-time = "2026-02-07T10:17:06.811Z" },
 ]
 
 [[package]]
@@ -918,7 +917,7 @@ requires-dist = [
     { name = "anyio", specifier = "==4.10.0" },
     { name = "attrs", specifier = "==24.3.0" },
     { name = "autopep8", specifier = "==2.3.2" },
-    { name = "avanza-api", specifier = "==15.1.1" },
+    { name = "avanza-api", specifier = "==16.1.0" },
     { name = "beautifulsoup4", specifier = "==4.12.3" },
     { name = "certifi", specifier = "==2024.8.30" },
     { name = "charset-normalizer", specifier = "==3.4.0" },
