@@ -95,3 +95,58 @@ def test_update_watchlist_prints_legend(monkeypatch, capsys, tmp_path):
     out = capsys.readouterr().out
     for line in main.LEGEND_LINES:
         assert line in out
+
+
+def test_removed_stock_shows_full_metrics_not_just_name(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(main, "project_root", str(tmp_path))
+
+    manager = SummaryManager()
+    manager.summary = pd.DataFrame(
+        {
+            "points": [3.0, -1.0],
+            # Beta is scored but ranks below the sleeve gate -> removed,
+            # while still being present in `combined` with real metrics.
+            "quality_pct": [0.8, 0.2],
+            "value_pct": [0.7, 0.1],
+            "combined_score": [0.56, 0.02],
+        },
+        index=["Alpha AB 111", "Beta AB 222"],
+    )
+    manager.summary_investment = pd.DataFrame()
+
+    # Beta is already on the watchlist (existing_ids) but its low sleeve
+    # scores mean it won't qualify this run -> should be removed with its
+    # real q/v/combined shown, not just its bare name.
+    avanza = _FakeAvanza(watchlist_orderbook_ids=["222"])
+    main._update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa")
+
+    out = capsys.readouterr().out
+    assert "Removed 1 stock(s)" in out
+    assert "Beta AB 222" in out
+    assert "q=0.20, v=0.10, combined=0.02" in out
+    assert "not scored this run" not in out
+
+
+def test_removed_stock_not_in_this_runs_universe_falls_back_gracefully(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(main, "project_root", str(tmp_path))
+
+    manager = SummaryManager()
+    # Only Alpha is scored this run -- Gamma is on the watchlist (e.g. from
+    # a broader --preset/--watchlists scope on a prior run) but wasn't part
+    # of this run's universe at all, so it has no row anywhere in `combined`.
+    manager.summary = pd.DataFrame(
+        {
+            "points": [3.0],
+            "quality_pct": [0.8],
+            "value_pct": [0.7],
+            "combined_score": [0.56],
+        },
+        index=["Alpha AB 111"],
+    )
+    manager.summary_investment = pd.DataFrame()
+
+    avanza = _FakeAvanza(watchlist_orderbook_ids=["999"])
+    main._update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa")
+
+    out = capsys.readouterr().out
+    assert "Unknown (999)  (not scored this run)" in out

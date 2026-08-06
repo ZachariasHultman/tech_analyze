@@ -184,6 +184,19 @@ def _fmt_reliability(sp, n):
     return f"{sp:+.2f} (n={n_str})"
 
 
+def _fmt_scored_row(prefix, r):
+    """Format a (name, pts, shrunk_spearman, rank_key, quality_pct, value_pct,
+    combined_score, n_windows) row -- shared by the terminal watchlist report
+    and the email summary so both stay consistent. Falls back to a plain
+    name when the stock wasn't part of this run's scored universe (e.g. a
+    watchlist holding outside the current --preset/--watchlists scope)."""
+    name, pts, sp, comb, qual, val, cscore, n = r
+    if pd.isna(qual) and pd.isna(val) and pd.isna(cscore):
+        return f"{prefix} {name}  (not scored this run)"
+    return (f"{prefix} {name}  (q={qual:.2f}, v={val:.2f}, "
+            f"combined={cscore:.2f}, r={_fmt_reliability(sp, n)})")
+
+
 # Shared explainer for q/v/combined/r, printed in both the terminal watchlist
 # report and the email summary.
 LEGEND_LINES = [
@@ -317,33 +330,37 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
             except Exception as e:
                 failed.append((name, f"remove failed: {e}"))
 
-    def _num(name, col):
+    def _num(name, col, df=None):
+        df = qualified if df is None else df
         try:
-            v = qualified.loc[name, col]
+            v = df.loc[name, col]
             return float(v) if pd.notna(v) else float("nan")
         except Exception:
             return float("nan")
 
-    def _row(name):
+    def _row(name, df=None):
         # (name, pts, shrunk_spearman, rank_key, quality_pct, value_pct, combined_score, n_windows)
+        df = qualified if df is None else df
         return (
             name,
-            _num(name, "_pts"),
-            _num(name, "_shrunk"),
-            _num(name, "_combined"),
-            _num(name, "_quality"),
-            _num(name, "_value"),
-            _num(name, "_combined_score"),
-            _num(name, "_n_windows"),
+            _num(name, "_pts", df),
+            _num(name, "_shrunk", df),
+            _num(name, "_combined", df),
+            _num(name, "_quality", df),
+            _num(name, "_value", df),
+            _num(name, "_combined_score", df),
+            _num(name, "_n_windows", df),
         )
 
     added_rows   = [_row(n) for n in added]
     already_rows = [_row(n) for n in already]
+    # removed stocks are excluded from `qualified` by definition (that's why
+    # they were removed) -- look their metrics up in `combined` instead,
+    # which still has every scored company's row.
+    removed_rows = [_row(n, df=combined) for n in removed]
 
     def _fmt_row(marker, r):
-        name, pts, sp, comb, qual, val, cscore, n = r
-        return (f"    {marker} {name}  (q={qual:.2f}, v={val:.2f}, "
-                f"combined={cscore:.2f}, r={_fmt_reliability(sp, n)})")
+        return f"    {_fmt_scored_row(marker, r)}"
 
     # Report
     print(f"\n{'=' * 70}")
@@ -359,10 +376,10 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
         print(f"\n  Already on list ({len(already_rows)}):")
         for r in already_rows:
             print(_fmt_row("=", r))
-    if removed:
-        print(f"\n  Removed {len(removed)} stock(s) (no longer in top {top_n}):")
-        for name in removed:
-            print(f"    - {name}")
+    if removed_rows:
+        print(f"\n  Removed {len(removed_rows)} stock(s) (no longer in top {top_n}):")
+        for r in removed_rows:
+            print(_fmt_row("-", r))
     if failed:
         print(f"\n  Failed ({len(failed)}):")
         for name, err in failed:
@@ -374,7 +391,7 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
         "top_n": top_n,
         "added": added_rows,
         "already": already_rows,
-        "removed": removed,
+        "removed": removed_rows,
         "failed": failed,
     }
 
@@ -482,17 +499,13 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
         top10.sort(key=lambda x: x[3], reverse=True)  # sort by rank key (combined × reliability)
         added_set = {r[0] for r in push_results["added"]}
         for r in top10:
-            nm, pts, sp, comb, qual, val, cscore, n_w = r
-            tag = "NEW" if nm in added_set else "   "
-            lines.append(
-                f"  {tag} {nm}  (q={qual:.2f}, v={val:.2f}, "
-                f"combined={cscore:.2f}, r={_fmt_reliability(sp, n_w)})"
-            )
+            tag = "NEW" if r[0] in added_set else "   "
+            lines.append(f"  {_fmt_scored_row(tag, r)}")
 
         if push_results["removed"]:
             lines.append(f"\nRemoved from list ({len(push_results['removed'])}):")
-            for nm in push_results["removed"]:
-                lines.append(f"  - {nm}")
+            for r in push_results["removed"]:
+                lines.append(f"  {_fmt_scored_row('-', r)}")
 
     if sell_signals:
         lines.append("\n" + "=" * 50)
