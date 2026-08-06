@@ -626,6 +626,18 @@ def _compute_reliability(df, target_timespans):
     translate into good returns. An "unreliable" company (like PayPal)
     has good fundamentals but disconnected price performance.
 
+    n_windows is permanently capped at 5 (the 5 non-overlapping 5Y_YoY-*
+    windows) -- this does NOT grow with more --save runs or with calendar
+    time under the current pipeline. get_hist_data() keeps only the single
+    most recent snapshot per company (older snapshots for the same company
+    are discarded, not combined), and every window here is carved out of
+    that one snapshot's own ~5-year embedded price history. Re-saving
+    replaces the snapshot; it doesn't accumulate independent years across
+    saves. Growing n beyond 5 would require retaining and combining
+    multiple dated snapshots per company -- not implemented. Don't assume
+    this improves over time; the shrinkage below is the permanent, not
+    temporary, fix for the small-n problem.
+
     Returns DataFrame with columns:
         company, spearman, spearman_shrunk, n_windows, reliable
     """
