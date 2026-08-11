@@ -841,13 +841,13 @@ def calculate_piotroski_f_score(
     roe: Optional[float] = None,
 ) -> Optional[int]:
     """
-    Piotroski F-Score (0-9).
+    Piotroski F-Score (0-8).
 
-    Profitability (4 points):
+    Profitability (3 points):
       1. Net income > 0
       2. Operating cash flow > 0
       3. ROA improving year-over-year
-      4. Operating cash flow > net income (accruals quality)
+      4. (DISABLED) Operating cash flow > net income (accruals quality) — see below
 
     Leverage (3 points):
       5. D/E ratio decreased year-over-year
@@ -904,10 +904,17 @@ def calculate_piotroski_f_score(
         if roa_now is not None and roa_prev is not None and roa_now > roa_prev:
             score += 1
 
-    # 4. Operating cash flow > net income (accruals quality)
-    if op_cf is not None and np_clean:
-        if op_cf > np_clean[-1]:
-            score += 1
+    # 4. Operating cash flow > net income (accruals quality) — DISABLED 2026-08.
+    # operatingCashFlow is Nordic-only live (avanza.get_stock_info() ->
+    # keyIndicators.operatingCashFlow) and is never available historically
+    # (_build_ticker_dicts in historical_calc.py never sets this key — the CSV
+    # snapshot schema never captured it). Dropping criterion 4 everywhere keeps
+    # live and backfilled Piotroski on an identical 0-8 definition, which the
+    # panel-validation pipeline depends on to be a fair test of live scoring.
+    # Criteria stay numbered 1,2,3,5,6,7,8,9 (skip 4) for traceability.
+    # if op_cf is not None and np_clean:
+    #     if op_cf > np_clean[-1]:
+    #         score += 1
 
     # --- Leverage ---
     # 5. D/E ratio decreased

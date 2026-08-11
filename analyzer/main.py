@@ -83,20 +83,34 @@ def setup_env():
 def _load_optimized_params(variant=None):
     """Load optimized weights and thresholds from the appropriate results file.
 
-    variant: None (default/legacy), "individual", or "combo"
+    variant: None (default), "individual", "combo", or "panel"
     Returns (weights_dict, thresholds_dict) — either may be None.
+
+    variant=None prefers the panel challenger's verdict
+    (optimization_results_panel.json) when it exists -- it's the out-of-
+    sample-gated, statistically stricter result, so it wins automatically
+    once --backfill-panel + --optimize have been run at least once (no flag
+    needed at call time, e.g. cron_pi.sh benefits without editing it). Falls
+    back to exactly the old chain (individual, then legacy) on any machine
+    that hasn't run the new pipeline yet -- zero behavior change there.
     """
     import json
     if variant == "individual":
         filename = "optimization_results_individual.json"
     elif variant == "combo":
         filename = "optimization_results_combo.json"
+    elif variant == "panel":
+        filename = "optimization_results_panel.json"
     else:
-        # Legacy fallback: try individual first, then old name
-        filename = "optimization_results_individual.json"
+        # Default: prefer the panel challenger's verdict when present.
+        filename = "optimization_results_panel.json"
         path = os.path.join(project_root, filename)
         if not os.path.exists(path):
-            filename = "optimization_results.json"
+            # Legacy fallback: try individual first, then old name
+            filename = "optimization_results_individual.json"
+            path = os.path.join(project_root, filename)
+            if not os.path.exists(path):
+                filename = "optimization_results.json"
 
     weights_path = os.path.join(project_root, filename)
     if not os.path.exists(weights_path):
@@ -646,8 +660,13 @@ def main():
   python main.py --push --push-top 5           Push top 5 instead of 10
 
 --- Weight variants ---
+  (default: prefers optimization_results_panel.json when it exists -- run
+  --backfill-panel + --optimize once to create it -- else falls back to the
+  individual-optimizer result, unchanged from before)
   python main.py --no-opt                      Ignore saved weights, use hardcoded defaults
-  python main.py --use-combo                   Use combo-optimized weights
+  python main.py --use-individual               Force the plain individual-optimizer result
+  python main.py --use-combo                   Force the combo-optimized weights
+  python main.py --use-panel                   Force the panel challenger's result
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -691,6 +710,15 @@ def main():
         "--use-combo",
         action="store_true",
         help="Use combo optimization results for live analysis",
+    )
+    ap.add_argument(
+        "--use-panel",
+        action="store_true",
+        help="Force panel challenger results for live analysis. Not usually "
+             "needed -- panel results are already preferred by default when "
+             "optimization_results_panel.json exists (run --backfill-panel + "
+             "--optimize once to create it). Use this to force it even if a "
+             "future default-priority order changes.",
     )
     ap.add_argument(
         "--watchlists", "--watchlist",
@@ -741,6 +769,42 @@ def main():
         metavar="N",
         help="How many top stocks to push (default: 10)",
     )
+    ap.add_argument(
+        "--backfill-panel",
+        action="store_true",
+        help="Build the fiscal-year cross-sectional panel from data/*.csv "
+             "(writes data/panel_fundamentals.csv + data/panel_scores.csv). "
+             "No live Avanza call.",
+    )
+    ap.add_argument(
+        "--validate",
+        action="store_true",
+        help="Run the cross-sectional validation battery against "
+             "data/panel_scores.csv (run --backfill-panel first). No live call.",
+    )
+    ap.add_argument(
+        "--panel-reliability",
+        action="store_true",
+        help="(not yet implemented) placeholder for the future per-company "
+             "panel reliability report.",
+    )
+    ap.add_argument(
+        "--reliability-threshold",
+        type=float,
+        default=None,
+        metavar="X",
+        help="(inert until --panel-reliability exists) accepted but unused.",
+    )
+    ap.add_argument(
+        "--challenger-confidence",
+        type=float,
+        default=0.925,
+        metavar="X",
+        help="Deflated Sharpe Ratio bar the --optimize panel challenger gate "
+             "must clear to accept optimized weights over equal weight "
+             "(default 0.925). Only matters once data/panel_scores.csv "
+             "exists (run --backfill-panel first).",
+    )
     args = ap.parse_args()
     os.makedirs("data", exist_ok=True)
 
@@ -756,6 +820,70 @@ def main():
             optimize_weights_and_thresholds("metrics_by_timespan.csv")
         if args.optimize_combo:
             optimize_combo("metrics_by_timespan.csv")
+        # New pipeline's "challenger" verdict — only when the panel has already
+        # been built at least once. A user who never touched --backfill-panel
+        # sees zero change in --optimize's existing behavior or output.
+        if (args.optimize_individual or args.optimize_combo) and \
+                os.path.exists("data/panel_scores.csv") and \
+                os.path.exists("data/panel_fundamentals.csv"):
+            try:
+                from analyzer.panel import load_gate_panel
+                from analyzer.correlation import (
+                    gate_optimized_weights,
+                    save_panel_optimization_results,
+                    optimize_panel_combo,
+                    optimize_panel_weights_and_thresholds,
+                    _all_scored_metrics,
+                )
+                panel_df = load_gate_panel()
+                optimizer_fn = (
+                    optimize_panel_weights_and_thresholds
+                    if args.optimize_individual and not args.optimize_combo
+                    else optimize_panel_combo
+                )
+                gate_result = gate_optimized_weights(
+                    panel_df, _all_scored_metrics(),
+                    optimizer_fn=optimizer_fn,
+                    confidence=args.challenger_confidence,
+                )
+                # Persisted so live scoring can pick it up automatically (see
+                # _load_optimized_params's default-preference chain below) --
+                # written on both accept and reject, since a reject's
+                # chosen_weights is already the gate's own equal-weight
+                # fallback, not a broken state.
+                save_panel_optimization_results(gate_result)
+            except Exception as e:
+                print(f"[challenger] skipped (panel gate error: {e})")
+
+    # --backfill-panel: build the fiscal-year panel from already-saved
+    # data/*.csv snapshots, no live Avanza session needed.
+    # --panel-reliability: stub — the mechanism (per-company reliability) is
+    # deferred until the universe-wide validation battery proves the signal is
+    # real. Keep the CLI surface stable without building it now.
+    if args.panel_reliability:
+        print("[panel-reliability] not yet implemented — run --validate first.")
+        return 0
+
+    # --backfill-panel / --validate: both operate on already-saved data/*.csv
+    # snapshots, no live Avanza session needed. Combinable in one invocation
+    # (backfill first, then validate).
+    if args.backfill_panel or args.validate:
+        if args.backfill_panel:
+            from analyzer.panel import build_fundamentals_panel, build_scores_panel
+            fundamentals = build_fundamentals_panel("data")
+            fundamentals.to_csv("data/panel_fundamentals.csv", index=False)
+            print(f"Wrote data/panel_fundamentals.csv ({len(fundamentals)} rows)")
+            scores = build_scores_panel(fundamentals, "data")
+            scores.to_csv("data/panel_scores.csv", index=False)
+            print(f"Wrote data/panel_scores.csv ({len(scores)} rows)")
+        if args.validate:
+            from analyzer.validation import run_validation_battery
+            if not os.path.exists("data/panel_scores.csv"):
+                print("[validate] data/panel_scores.csv not found — "
+                      "run --backfill-panel first.")
+                return 1
+            run_validation_battery("data/panel_scores.csv")
+        return 0
 
     # --correlate/--optimize* without --save: just use already-saved
     # historical data, no live Avanza fetch needed.
@@ -772,7 +900,11 @@ def main():
             opt_weights, opt_thresholds = _load_optimized_params("individual")
         elif args.use_combo:
             opt_weights, opt_thresholds = _load_optimized_params("combo")
+        elif args.use_panel:
+            opt_weights, opt_thresholds = _load_optimized_params("panel")
         else:
+            # Prefers optimization_results_panel.json when present -- see
+            # _load_optimized_params's docstring.
             opt_weights, opt_thresholds = _load_optimized_params()
         if opt_weights:
             manager._weight_overrides = opt_weights

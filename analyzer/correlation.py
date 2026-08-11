@@ -23,6 +23,7 @@ if project_root not in sys.path:
 
 from analyzer.summary_manager import SummaryManager
 from analyzer.data_processing import calculate_score
+from analyzer.stats_utils import deflated_sharpe_ratio
 from analyzer.config import QUALITY_METRICS
 from analyzer.metrics import (
     RATIO_SPECS,
@@ -118,12 +119,20 @@ def _load_timespan_csv(path="metrics_by_timespan.csv"):
     return df
 
 
-def _score_snapshot(df_slice, metrics_to_score=None, thresholds=None):
+def _score_snapshot(df_slice, metrics_to_score=None, thresholds=None,
+                    weight_overrides=None):
     """Score a slice of historical data using SummaryManager.
 
     Returns a DataFrame with company index and 'points' + per-metric scores.
+
+    weight_overrides: optional {metric: weight}. When None (default) the
+    production HIGHEST/HIGH/LOW weight tiers apply exactly as before — every
+    existing caller passes nothing, so behavior is unchanged. The new panel
+    pipeline passes an equal-weight dict here to score without those tiers.
     """
     sm = SummaryManager()
+    if weight_overrides is not None:
+        sm._weight_overrides = weight_overrides
     sm.process_historical(df_slice, metrics_to_score or _all_scored_metrics(),
                           thresholds=thresholds)
     calculate_score(sm, metrics_to_score=metrics_to_score)
@@ -867,10 +876,14 @@ def _threshold_grid_for_metric(metric, current_nok, current_ok, n_steps=3):
     return unique
 
 
-def _score_with_weights(df_ts, metrics, weights_dict, thresholds_dict=None):
+def _score_with_weights(df_ts, metrics, weights_dict, thresholds_dict=None,
+                        return_col="total_return"):
     """Score a timespan slice with custom weights and thresholds.
 
     thresholds_dict: optional {metric: {"nok": x, "ok": y}}
+    return_col: which column holds the target return. Defaults to
+        "total_return" (the rolling-window pipeline's target) so every existing
+        caller is unchanged; the panel pipeline passes "fwd_excess_return_1y".
     Returns (scores, returns) aligned Series, or (None, None).
     """
     sm = SummaryManager()
@@ -887,7 +900,7 @@ def _score_with_weights(df_ts, metrics, weights_dict, thresholds_dict=None):
         scored = pd.DataFrame(scored).T
 
     s = pd.to_numeric(scored.get("points", pd.Series(dtype=float)), errors="coerce")
-    returns = df_ts.set_index("company")["total_return"]
+    returns = df_ts.set_index("company")[return_col]
     common = s.index.intersection(returns.index)
     if len(common) < 5:
         return None, None
@@ -1208,6 +1221,343 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
     print("=" * 70)
     return result
 
+
+
+# ======================================================================
+# Phase D: Panel-based gating (challenger to the old optimizer)
+# ======================================================================
+#
+# Purely additive. Everything above this line is byte-for-byte the old
+# pipeline. These functions mirror the individual/combo optimizers but operate
+# on the fiscal-year panel (grouped by "fiscal_year", target
+# "fwd_excess_return_1y", company key "company") instead of the rolling-window
+# CSV. They never call _compute_reliability (that mechanism is being replaced,
+# not reused).
+
+PANEL_RETURN_COL = "fwd_excess_return_1y"
+
+
+def _panel_avg_quintile_spread(weights_dict, panel_df, metrics,
+                               thresholds_dict=None, return_col=PANEL_RETURN_COL):
+    """Mean quintile long-short spread across fiscal years (panel objective)."""
+    spreads = []
+    for _, g in panel_df.groupby("fiscal_year"):
+        if len(g) < 5:
+            continue
+        sv, rv = _score_with_weights(
+            g.copy(), metrics, weights_dict, thresholds_dict, return_col=return_col
+        )
+        if sv is None:
+            continue
+        spread = _quintile_spread(sv, rv)
+        if spread is not None and not np.isnan(spread):
+            spreads.append(spread)
+    return float(np.mean(spreads)) if spreads else 0.0
+
+
+def _panel_avg_spearman(weights_dict, panel_df, metrics,
+                        thresholds_dict=None, return_col=PANEL_RETURN_COL):
+    """Mean Spearman IC across fiscal years (panel diagnostic)."""
+    corrs = []
+    for _, g in panel_df.groupby("fiscal_year"):
+        if len(g) < 5:
+            continue
+        sv, rv = _score_with_weights(
+            g.copy(), metrics, weights_dict, thresholds_dict, return_col=return_col
+        )
+        if sv is None:
+            continue
+        rho, _ = sp_stats.spearmanr(sv, rv)
+        if not np.isnan(rho):
+            corrs.append(rho)
+    return float(np.mean(corrs)) if corrs else 0.0
+
+
+def _scale_weights_from_corrs(avg_corrs, metrics):
+    """Correlation -> weight scaling, identical rules to
+    optimize_weights_and_thresholds (strongest fundamental = 2.0, momentum
+    capped, weight floors applied, snapped to 0.25)."""
+    positive = {m: r for m, r in avg_corrs.items() if r > 0.02}
+    if not positive:
+        return {m: WEIGHT_FLOORS.get(m, 0.0) for m in metrics}
+    fundamental = {m: r for m, r in positive.items() if m not in MOMENTUM_METRICS}
+    max_corr = max(fundamental.values()) if fundamental else max(positive.values())
+    weights = {}
+    for m in metrics:
+        if m in positive:
+            w = round((positive[m] / max_corr * 2.0) * 4) / 4
+            if m in MOMENTUM_METRICS:
+                w = min(w, MOMENTUM_WEIGHT_CAP)
+            weights[m] = max(w, WEIGHT_FLOORS.get(m, 0.0))
+        else:
+            weights[m] = WEIGHT_FLOORS.get(m, 0.0)
+    return weights
+
+
+def _panel_per_metric_corrs(panel_df, metrics, return_col=PANEL_RETURN_COL):
+    """Per-metric avg Spearman with the target, grouped by fiscal year."""
+    metric_corrs = {}
+    for _, g in panel_df.groupby("fiscal_year"):
+        if len(g) < 5:
+            continue
+        scored = _score_snapshot(g)
+        if scored.empty:
+            continue
+        returns = g.set_index("company")[return_col]
+        for sc in [c for c in scored.columns if c.endswith("_score")]:
+            m = sc.replace("_score", "")
+            if m not in metrics:
+                continue
+            ms = pd.to_numeric(scored[sc], errors="coerce")
+            common = ms.index.intersection(returns.index)
+            if len(common) < 5:
+                continue
+            mv = ms.loc[common].astype(float)
+            rv = returns.loc[common].astype(float)
+            valid = mv.notna() & rv.notna()
+            if valid.sum() < 5:
+                continue
+            rho, _ = sp_stats.spearmanr(mv[valid], rv[valid])
+            if not np.isnan(rho):
+                metric_corrs.setdefault(m, []).append(rho)
+    return {m: float(np.mean(v)) for m, v in metric_corrs.items()}
+
+
+def optimize_panel_weights_and_thresholds(panel_df, metrics):
+    """Panel analogue of optimize_weights_and_thresholds (the "individual"
+    method): per-metric Spearman -> weight scaling, then a per-metric threshold
+    grid search maximizing the panel quintile spread. Logs every
+    (candidate -> objective) evaluation into trial_objectives (the real N-trials
+    count for the Deflated Sharpe Ratio)."""
+    trial_objectives = []
+    avg_corrs = _panel_per_metric_corrs(panel_df, metrics)
+    weights = _scale_weights_from_corrs(avg_corrs, metrics)
+
+    default_thresholds = _get_default_thresholds()
+    thresholds = dict(default_thresholds)
+    for m in metrics:
+        if weights.get(m, 0) == 0 or m not in thresholds:
+            continue
+        cur = thresholds[m]
+        best_thr, best_spread = cur, -np.inf
+        for cand in _threshold_grid_for_metric(m, cur["nok"], cur["ok"], n_steps=2):
+            trial = dict(thresholds)
+            trial[m] = cand
+            spread = _panel_avg_quintile_spread(weights, panel_df, metrics, trial)
+            trial_objectives.append(spread)
+            if spread > best_spread:
+                best_spread, best_thr = spread, cand
+        thresholds[m] = best_thr
+
+    return {
+        "optimized_weights": weights,
+        "optimized_thresholds": thresholds,
+        "per_metric_correlations": avg_corrs,
+        "trial_objectives": trial_objectives,
+    }
+
+
+def optimize_panel_combo(panel_df, metrics):
+    """Panel analogue of optimize_combo: coordinate descent over weight and
+    threshold per metric, objective = panel quintile spread. Mirrors the
+    combo structure and trial-logging; uses the bounded threshold grid rather
+    than the window-coupled _refine_threshold_2d (which is tied to the old
+    _cv_score's timespan slicing)."""
+    trial_objectives = []
+    start = optimize_panel_weights_and_thresholds(panel_df, metrics)
+    trial_objectives.extend(start["trial_objectives"])
+    best_weights = dict(start["optimized_weights"])
+    best_thresholds = dict(start["optimized_thresholds"])
+    best = _panel_avg_quintile_spread(best_weights, panel_df, metrics, best_thresholds)
+    trial_objectives.append(best)
+
+    for _ in range(10):
+        improved = False
+        for m in metrics:
+            current_w = best_weights.get(m, 0.0)
+            for cand_w in sorted(set(
+                max(0.0, min(2.0, round((current_w + d) * 4) / 4))
+                for d in np.arange(-0.5, 0.5, 0.1)
+            )):
+                if cand_w == best_weights.get(m, 0.0):
+                    continue
+                trial_w = _apply_weight_constraints(dict(best_weights, **{m: cand_w}))
+                spread = _panel_avg_quintile_spread(
+                    trial_w, panel_df, metrics, best_thresholds
+                )
+                trial_objectives.append(spread)
+                if spread > best + 1e-6:
+                    best, best_weights, improved = spread, trial_w, True
+
+            if best_weights.get(m, 0) > 0 and m in best_thresholds:
+                cur = best_thresholds[m]
+                for cand in _threshold_grid_for_metric(m, cur["nok"], cur["ok"], n_steps=2):
+                    trial_t = dict(best_thresholds)
+                    trial_t[m] = cand
+                    spread = _panel_avg_quintile_spread(
+                        best_weights, panel_df, metrics, trial_t
+                    )
+                    trial_objectives.append(spread)
+                    if spread > best + 1e-6:
+                        best, best_thresholds, improved = spread, trial_t, True
+        if not improved:
+            break
+
+    return {
+        "optimized_weights": _apply_weight_constraints(best_weights),
+        "optimized_thresholds": best_thresholds,
+        "trial_objectives": trial_objectives,
+    }
+
+
+def _panel_fold_eval(weights, thresholds, panel_year, metrics):
+    """Out-of-sample (quintile spread, IC) on one held-out fiscal year."""
+    sv, rv = _score_with_weights(
+        panel_year.copy(), metrics, weights, thresholds, return_col=PANEL_RETURN_COL
+    )
+    if sv is None:
+        return None, None
+    spread = _quintile_spread(sv, rv)
+    rho, _ = sp_stats.spearmanr(sv, rv)
+    return (
+        spread if spread is not None and not np.isnan(spread) else None,
+        rho if not np.isnan(rho) else None,
+    )
+
+
+def leave_one_fiscal_year_out(panel_df, metrics, optimizer_fn=optimize_panel_combo):
+    """Genuine walk-forward: for each fiscal year Y, refit on every *other*
+    year and evaluate both the optimized weights and the equal-weight baseline
+    on year Y's own cross-section. Cheap enough to refit per fold at this scale
+    (~127 companies, 5-8 folds)."""
+    default_thresholds = _get_default_thresholds()
+    equal_weights = {m: 1.0 for m in metrics}
+    folds = []
+    for Y in sorted(panel_df["fiscal_year"].unique()):
+        train = panel_df[panel_df["fiscal_year"] != Y]
+        test = panel_df[panel_df["fiscal_year"] == Y]
+        if train.empty or len(test) < 5:
+            continue
+        fit = optimizer_fn(train, metrics)
+        opt_spread, opt_ic = _panel_fold_eval(
+            fit["optimized_weights"], fit["optimized_thresholds"], test, metrics
+        )
+        eq_spread, eq_ic = _panel_fold_eval(
+            equal_weights, default_thresholds, test, metrics
+        )
+        folds.append({
+            "fiscal_year": int(Y),
+            "optimized_spread": opt_spread, "optimized_ic": opt_ic,
+            "equal_spread": eq_spread, "equal_ic": eq_ic,
+        })
+    return folds
+
+
+def gate_optimized_weights(panel_df, metrics, optimizer_fn=optimize_panel_combo,
+                           confidence=0.95):
+    """Accept/reject the optimized weights as a challenger to equal weight.
+
+    Accepts iff BOTH (a) mean optimized quintile spread beats mean equal-weight
+    spread out-of-sample (walk-forward) AND (b) the Deflated Sharpe Ratio
+    exceeds `confidence` (default 0.95 — correcting for the size of the grid
+    sweep). Otherwise rejects and falls back to equal weight + default
+    thresholds, stating which condition failed.
+
+    `confidence` is compared directly against the raw DSR probability
+    (`deflated_sharpe_ratio`'s own `significant_at_95` field is fixed at 0.95
+    and intentionally left untouched as the primitive's default reporting —
+    this function makes its own accept/reject call against whatever bar the
+    caller actually wants).
+    """
+    print("\n" + "=" * 72)
+    print("  PANEL CHALLENGER VERDICT (new pipeline)")
+    print("  Optimized weights vs equal weight, out-of-sample walk-forward")
+    print("=" * 72)
+
+    folds = leave_one_fiscal_year_out(panel_df, metrics, optimizer_fn)
+    opt_spreads = [f["optimized_spread"] for f in folds if f["optimized_spread"] is not None]
+    eq_spreads = [f["equal_spread"] for f in folds if f["equal_spread"] is not None]
+    for f in folds:
+        print(f"  {f['fiscal_year']}: optimized spread={_fmt(f['optimized_spread'])} "
+              f"(IC={_fmt(f['optimized_ic'])})  "
+              f"equal spread={_fmt(f['equal_spread'])} (IC={_fmt(f['equal_ic'])})")
+
+    mean_opt = float(np.mean(opt_spreads)) if opt_spreads else float("nan")
+    mean_eq = float(np.mean(eq_spreads)) if eq_spreads else float("nan")
+
+    # trial_objectives from a full-data fit = the real N-trials count for DSR.
+    full_fit = optimizer_fn(panel_df, metrics)
+    trial_objectives = full_fit.get("trial_objectives", [])
+    dsr = deflated_sharpe_ratio(trial_objectives, opt_spreads)
+
+    beats = (not np.isnan(mean_opt) and not np.isnan(mean_eq) and mean_opt > mean_eq)
+    dsr_value = dsr.get("dsr", float("nan"))
+    significant = bool(dsr_value > confidence) if not np.isnan(dsr_value) else False
+    accept = beats and significant
+
+    print("-" * 72)
+    print(f"  mean optimized spread (OOS): {_fmt(mean_opt)}")
+    print(f"  mean equal-weight spread (OOS): {_fmt(mean_eq)}")
+    print(f"  DSR: {_fmt(dsr.get('dsr'))}  (n_trials={dsr.get('n_trials')}, "
+          f"benchmark={_fmt(dsr.get('sr_benchmark'))}, "
+          f"confidence_bar={confidence:.3f}, significant={significant})")
+
+    if accept:
+        print("  DECISION: ACCEPT optimized weights (beats equal weight AND DSR-significant).")
+        chosen_weights = full_fit["optimized_weights"]
+        chosen_thresholds = full_fit["optimized_thresholds"]
+    else:
+        reasons = []
+        if not beats:
+            reasons.append("did not beat equal weight out-of-sample")
+        if not significant:
+            reasons.append(f"Deflated Sharpe Ratio not significant at {confidence:.1%}")
+        print(f"  DECISION: REJECT — {', '.join(reasons)}. "
+              f"Falling back to equal weight + default thresholds.")
+        chosen_weights = {m: 1.0 for m in metrics}
+        chosen_thresholds = _get_default_thresholds()
+    print("=" * 72)
+
+    return {
+        "accept": accept,
+        "beats_equal_weight": beats,
+        "dsr_significant": significant,
+        "confidence": confidence,
+        "mean_optimized_spread": mean_opt,
+        "mean_equal_spread": mean_eq,
+        "dsr": dsr,
+        "folds": folds,
+        "chosen_weights": chosen_weights,
+        "chosen_thresholds": chosen_thresholds,
+    }
+
+
+def save_panel_optimization_results(gate_result, out_path="optimization_results_panel.json"):
+    """Persist gate_optimized_weights' verdict so live scoring can load it via
+    _load_optimized_params("panel") (analyzer/main.py). Always writes, on
+    accept AND reject -- on reject, chosen_weights/chosen_thresholds are
+    already the gate's own equal-weight/default-threshold fallback, so this
+    file always reflects a defensible recommendation, never a broken one.
+    """
+    result = {
+        "optimized_weights": gate_result["chosen_weights"],
+        "optimized_thresholds": gate_result["chosen_thresholds"],
+        "accepted": gate_result["accept"],
+        "confidence": gate_result["confidence"],
+        "dsr": gate_result["dsr"].get("dsr"),
+        "mean_optimized_spread": gate_result["mean_optimized_spread"],
+        "mean_equal_spread": gate_result["mean_equal_spread"],
+    }
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2, default=str)
+    print(f"Saved panel optimization results to {out_path}")
+    return out_path
+
+
+def _fmt(x):
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "N/A"
+    return f"{x:+.4f}"
 
 
 # ======================================================================

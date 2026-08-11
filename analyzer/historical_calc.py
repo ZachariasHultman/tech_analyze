@@ -184,6 +184,15 @@ def convert_cell(cell, col):
 def get_hist_data(data_dir="data"):
     frames = []
     for csv in Path(data_dir).glob("*.csv"):
+        # Skip the fiscal-year panel outputs (panel_fundamentals.csv /
+        # panel_scores.csv). They are written into data/ by the new panel
+        # pipeline but are NOT per-company snapshots — they already carry a
+        # "company" column and no snapshot-date suffix, so treating them as
+        # snapshots would crash this reader (and thus the old --correlate
+        # pipeline). No real snapshot is ever named panel_*, so this preserves
+        # behavior exactly for every legitimate input.
+        if csv.name.startswith("panel_"):
+            continue
         key = csv.stem.split("_")[0]
         # filename is "<key>_<YYYY-MM-DD>.csv" — last underscore-separated
         # token is the snapshot date, used below to keep the most recent
