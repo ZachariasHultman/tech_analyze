@@ -4,8 +4,13 @@ This module builds a panel with one row per ``(company_id, fiscal_year)`` from
 the same ``data/*.csv`` snapshots the rolling-window backtest reads. It is
 purely additive: it reuses ``historical_calc.py``'s helpers directly and does
 not modify the existing rolling-window pipeline in any way. The old pipeline
-(``calculate_metrics_given_hist`` / ``metrics_by_timespan.csv`` /
-``company_reliability.csv``) stays a working fallback until this one is trusted.
+(``calculate_metrics_given_hist`` / ``metrics_by_timespan.csv``) stays a
+working fallback for weight optimization until this one is trusted. Per-company
+reliability (an earlier use of this panel) was tried at both company and
+sector granularity and dropped entirely -- the ~5yr live OHLC ceiling leaves
+too little forward-return depth for either to detect real signal, old
+mechanism or new (see git history for `_compute_panel_reliability`/
+`_compute_reliability`, both removed).
 
 Known limitations (documented, not fixed here):
 

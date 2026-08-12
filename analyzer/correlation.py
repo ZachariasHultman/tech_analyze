@@ -9,7 +9,6 @@ import os
 import warnings
 import json
 from pathlib import Path
-from collections import defaultdict
 from itertools import product
 
 import numpy as np
@@ -368,9 +367,8 @@ def optimize_weights_and_thresholds(
     2. Drop metrics with negative or near-zero correlation (weight=0)
     3. Scale positive correlations to weights in [0, 2]
     4. Re-score with optimized weights and report improvement
-    5. Compute per-company fundamental reliability score
 
-    Returns dict with optimal weights and reliability scores.
+    Returns dict with optimal weights.
     """
     df = _load_timespan_csv(csv_path)
     if df.empty:
@@ -379,9 +377,8 @@ def optimize_weights_and_thresholds(
 
     metrics = _all_scored_metrics()
 
-    # Objective windows: 3Y/5Y TOTAL only. These are the cumulative multi-year
-    # windows the scoring system is meant to predict; the YoY sub-windows are
-    # reserved for the per-company reliability calc (item 3).
+    # Objective windows: 3Y/5Y TOTAL only -- the cumulative multi-year
+    # windows the scoring system is meant to predict.
     if target_timespans is None:
         all_ts = df["timespan"].unique()
         target_timespans = [
@@ -540,15 +537,6 @@ def optimize_weights_and_thresholds(
         optimized_weights, df_total, target_timespans, metrics, optimized_thresholds
     )
 
-    # ---- Step 5: Per-company fundamental reliability ----
-    print("\n[Step 5] Computing per-company fundamental reliability...")
-
-    # Reliability uses only the non-overlapping 5Y_YoY-* windows (3Y_YoY-k and
-    # 5Y_YoY-k are the same calendar window; TOTAL windows overlap each other),
-    # so each company's sample is genuinely independent (n capped at 5).
-    yoy_timespans = [t for t in df["timespan"].unique() if str(t).startswith("5Y_YoY-")]
-    reliability = _compute_reliability(df, yoy_timespans)
-
     # ---- Report ----
     print("\n" + "=" * 70)
     print("  OPTIMIZATION RESULTS")
@@ -572,21 +560,6 @@ def optimize_weights_and_thresholds(
     print(f"\n  [diagnostic] Baseline avg Spearman:   {avg_baseline:+.4f}")
     print(f"  [diagnostic] Optimized avg Spearman:  {avg_optimized:+.4f}")
     print(f"  [diagnostic] Improvement:             {avg_optimized - avg_baseline:+.4f}")
-
-    if reliability is not None and not reliability.empty:
-        print("\n" + "-" * 70)
-        print("  PER-COMPANY FUNDAMENTAL RELIABILITY")
-        print("  (How well does this company's score predict its returns?)")
-        print("-" * 70)
-        for _, row in reliability.head(20).iterrows():
-            label = "RELIABLE" if row["reliable"] else "UNRELIABLE"
-            print(f"  {row['company']:40s}  ρ={row['spearman']:+.4f}  "
-                  f"n={row['n_windows']:2d}  [{label}]")
-        print(f"  ... ({len(reliability)} companies total)")
-
-        n_reliable = reliability["reliable"].sum()
-        print(f"\n  Reliable companies: {n_reliable}/{len(reliability)}")
-
     print("=" * 70)
 
     # Report threshold changes
@@ -616,118 +589,6 @@ def optimize_weights_and_thresholds(
         json.dump(result, f, indent=2, default=str)
     print(f"\nSaved optimization results to {out_path}")
 
-    if reliability is not None and not reliability.empty:
-        reliability.to_csv("company_reliability.csv", index=False)
-        print(f"Saved company reliability to company_reliability.csv")
-
-    return result
-
-
-# ======================================================================
-# Per-company fundamental reliability
-# ======================================================================
-
-def _compute_reliability(df, target_timespans):
-    """For each company, compute how well its fundamental score
-    correlates with its returns across different time windows.
-
-    A "reliable" company is one where good fundamentals actually
-    translate into good returns. An "unreliable" company (like PayPal)
-    has good fundamentals but disconnected price performance.
-
-    n_windows is permanently capped at 5 (the 5 non-overlapping 5Y_YoY-*
-    windows) -- this does NOT grow with more --save runs or with calendar
-    time under the current pipeline. get_hist_data() keeps only the single
-    most recent snapshot per company (older snapshots for the same company
-    are discarded, not combined), and every window here is carved out of
-    that one snapshot's own ~5-year embedded price history. Re-saving
-    replaces the snapshot; it doesn't accumulate independent years across
-    saves. Growing n beyond 5 would require retaining and combining
-    multiple dated snapshots per company -- not implemented. Don't assume
-    this improves over time; the shrinkage below is the permanent, not
-    temporary, fix for the small-n problem.
-
-    Returns DataFrame with columns:
-        company, spearman, spearman_shrunk, n_windows, reliable
-    """
-    # Collect (score, return) pairs per company across the restricted windows.
-    # target_timespans is now honored (previously a dead parameter — the
-    # function recomputed its own list). Callers pass only the non-overlapping
-    # 5Y_YoY-* windows so each per-company sample is genuinely independent.
-    company_pairs = defaultdict(lambda: {"scores": [], "returns": []})
-
-    if target_timespans is not None:
-        all_timespans = sorted(target_timespans)
-    else:
-        all_timespans = sorted(df["timespan"].unique())
-
-    for timespan in all_timespans:
-        df_ts = df[df["timespan"] == timespan].copy()
-        if len(df_ts) < 5:
-            continue
-
-        scored = _score_snapshot(df_ts)
-        if scored.empty or "points" not in scored.columns:
-            continue
-
-        returns = df_ts.set_index("company")["total_return"]
-        scores = pd.to_numeric(scored["points"], errors="coerce")
-        common = scores.index.intersection(returns.index)
-
-        for company in common:
-            s_val = scores.get(company)
-            r_val = returns.get(company)
-            if s_val is not None and r_val is not None:
-                try:
-                    s_f = float(s_val)
-                    r_f = float(r_val)
-                    if not (np.isnan(s_f) or np.isnan(r_f)):
-                        company_pairs[company]["scores"].append(s_f)
-                        company_pairs[company]["returns"].append(r_f)
-                except (TypeError, ValueError):
-                    pass
-
-    # Compute per-company correlation
-    rows = []
-    for company, data in company_pairs.items():
-        n = len(data["scores"])
-        if n < 3:
-            # 1-2 points can't produce a meaningful correlation at all.
-            rows.append({
-                "company": company,
-                "spearman": np.nan,
-                "spearman_shrunk": np.nan,
-                "n_windows": n,
-                "reliable": False,
-            })
-            continue
-
-        rho, pval = sp_stats.spearmanr(data["scores"], data["returns"])
-        # Smooth shrinkage toward 0 instead of a hard n-cutoff: with the
-        # window restriction n is capped at 5, so any hard gate above n=5
-        # would null every company. spearman_shrunk = rho * n/(n+10) keeps
-        # small-sample estimates conservative (n=5 → factor ~0.33) without
-        # discarding them. `reliable` stays as an informational rho>0.4
-        # label but no longer gates anything downstream.
-        if np.isnan(rho):
-            shrunk = np.nan
-        else:
-            shrunk = rho * n / (n + 10)
-        reliable = (not np.isnan(rho)) and rho > 0.4
-        rows.append({
-            "company": company,
-            "spearman": round(rho, 4) if not np.isnan(rho) else np.nan,
-            "spearman_shrunk": round(shrunk, 4) if not np.isnan(shrunk) else np.nan,
-            "n_windows": n,
-            "reliable": reliable,
-        })
-
-    if not rows:
-        return pd.DataFrame()
-
-    result = pd.DataFrame(rows).sort_values(
-        "spearman_shrunk", ascending=False, na_position="last"
-    )
     return result
 
 
@@ -1191,13 +1052,6 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
         if old and (old["nok"] != new["nok"] or old["ok"] != new["ok"]):
             print(f"  {m:40s}  ({old['nok']}, {old['ok']}) → ({new['nok']}, {new['ok']})")
 
-    # Reliability
-    # Reliability uses only the non-overlapping 5Y_YoY-* windows (3Y_YoY-k and
-    # 5Y_YoY-k are the same calendar window; TOTAL windows overlap each other),
-    # so each company's sample is genuinely independent (n capped at 5).
-    yoy_timespans = [t for t in df["timespan"].unique() if str(t).startswith("5Y_YoY-")]
-    reliability = _compute_reliability(df, yoy_timespans)
-
     # Save
     thr_serializable = {m: {"nok": t["nok"], "ok": t["ok"]}
                         for m, t in best_thresholds.items()}
@@ -1215,9 +1069,6 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
         json.dump(result, f, indent=2, default=str)
     print(f"\nSaved to {out_path}")
 
-    if reliability is not None and not reliability.empty:
-        reliability.to_csv("company_reliability_combo.csv", index=False)
-
     print("=" * 70)
     return result
 
@@ -1231,8 +1082,7 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
 # pipeline. These functions mirror the individual/combo optimizers but operate
 # on the fiscal-year panel (grouped by "fiscal_year", target
 # "fwd_excess_return_1y", company key "company") instead of the rolling-window
-# CSV. They never call _compute_reliability (that mechanism is being replaced,
-# not reused).
+# CSV.
 
 PANEL_RETURN_COL = "fwd_excess_return_1y"
 

@@ -339,24 +339,6 @@ class SummaryManager:
     def _display(self, save_df=False):
         """Displays DataFrame with tabulate formatting for a cleaner output."""
 
-        # --- load company reliability scores ---
-        import os
-        reliability_map = {}
-        rel_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "company_reliability.csv"
-        )
-        if os.path.exists(rel_path):
-            try:
-                rel_df = pd.read_csv(rel_path)
-                for _, r in rel_df.iterrows():
-                    reliability_map[r["company"]] = {
-                        "spearman": r.get("spearman"),
-                        "spearman_shrunk": r.get("spearman_shrunk", r.get("spearman")),
-                        "n_windows": r.get("n_windows"),
-                    }
-            except Exception:
-                pass
-
         # --- helpers ---
         def _unwrap_deep(v):
             while isinstance(v, (list, tuple)) and len(v) == 1:
@@ -499,7 +481,7 @@ class SummaryManager:
             return df2
 
         def _reorder_columns(df):
-            """Reorder metric columns by weight (highest first), then add reliability."""
+            """Reorder metric columns by weight (highest first)."""
             # Separate special cols from metric cols
             metric_cols = [
                 c for c in df.columns
@@ -510,8 +492,8 @@ class SummaryManager:
             # Sort metric columns by weight descending, then alphabetical
             metric_cols.sort(key=lambda m: (-self._assign_weight(m), m))
 
-            # Build final order: points, then the sleeve columns, then
-            # reliability, then metrics, then rest.
+            # Build final order: points, then the sleeve columns, then metrics,
+            # then rest.
             ordered = []
             if "points" in other_cols:
                 ordered.append("points")
@@ -520,9 +502,6 @@ class SummaryManager:
                 if sleeve in other_cols:
                     ordered.append(sleeve)
                     other_cols.remove(sleeve)
-            if "reliability" in other_cols:
-                ordered.append("reliability")
-                other_cols.remove("reliability")
             ordered.extend(metric_cols)
             ordered.extend(other_cols)
 
@@ -530,67 +509,16 @@ class SummaryManager:
             ordered = [c for c in ordered if c in df.columns]
             return df[ordered]
 
-        def _add_reliability(df, colorize=False):
-            """Add a formatted 'shrunk (n=windows)' reliability column.
-
-            Reads the shrunk spearman + window count from company_reliability.csv.
-            Sleeve columns (quality_pct/value_pct/combined_score) are already on
-            df since item 2 and flow through untouched.
-            """
-            if not reliability_map:
-                return df
-
-            def _fmt_rel(c):
-                info = reliability_map.get(c)
-                if not info:
-                    return "N/A"
-                sh = info.get("spearman_shrunk")
-                try:
-                    sh = float(sh)
-                except (TypeError, ValueError):
-                    return "N/A"
-                if _is_nan(sh):
-                    return "N/A"
-                n = info.get("n_windows")
-                n_str = ""
-                try:
-                    if n is not None and not _is_nan(float(n)):
-                        n_str = f" (n={int(float(n))})"
-                except (TypeError, ValueError):
-                    n_str = ""
-                base = f"{sh:.2f}{n_str}"
-                if colorize:
-                    if sh > 0.1:
-                        return f"\033[92m{base}\033[0m"
-                    if sh < -0.1:
-                        return f"\033[91m{base}\033[0m"
-                return base
-
-            df["reliability"] = df.index.map(_fmt_rel)
-            return df
-
         def _rank_key(df):
-            """Sort key: combined_score * (1 + spearman_shrunk), matching the
-            watchlist / sell-signal ranking. Falls back to points when the
+            """Sort key: combined_score, falling back to points when the
             sleeve columns aren't present. Indexed by company."""
-            import numpy as np
-
             if "combined_score" in df.columns:
                 base = pd.to_numeric(df["combined_score"], errors="coerce")
             elif "points" in df.columns:
                 base = pd.to_numeric(df["points"], errors="coerce")
             else:
                 base = pd.Series(0.0, index=df.index)
-            base = base.fillna(float("-inf"))
-            shrunk = pd.Series(
-                [
-                    (reliability_map.get(c) or {}).get("spearman_shrunk")
-                    for c in df.index
-                ],
-                index=df.index,
-            )
-            shrunk = pd.to_numeric(shrunk, errors="coerce").fillna(0.0)
-            return base * (1 + shrunk)
+            return base.fillna(float("-inf"))
 
         def _sort_and_print(df, csv_name):
             if df.empty:
@@ -601,7 +529,6 @@ class SummaryManager:
             # CSV export first (clean + flags)
             if save_df:
                 export_df = _build_export(df)
-                export_df = _add_reliability(export_df)
                 export_df = _reorder_columns(export_df)
                 export_df = export_df.reindex(order)
                 export_df.to_csv(csv_name)
@@ -609,9 +536,6 @@ class SummaryManager:
             # Terminal view (colored)
             proc = _process_dataframe(df)
             proc = proc.reindex(order)
-
-            # Add reliability and reorder columns by weight
-            proc = _add_reliability(proc, colorize=True)
             proc = _reorder_columns(proc)
 
             from tabulate import tabulate

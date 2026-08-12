@@ -34,9 +34,6 @@ def _manager_with_no_scored_stocks():
 
 
 def test_missing_stock_warning_includes_name(monkeypatch, capsys):
-    monkeypatch.setattr(
-        main, "_load_reliability_map", lambda: {}
-    )
     avanza = _FakeAvanza(
         watchlist_orderbook_ids=["1041067"],
         names_by_id={"1041067": "Some Company AB"},
@@ -52,7 +49,6 @@ def test_missing_stock_warning_includes_name(monkeypatch, capsys):
 
 
 def test_missing_stock_warning_falls_back_to_id_on_lookup_failure(monkeypatch, capsys):
-    monkeypatch.setattr(main, "_load_reliability_map", lambda: {})
     avanza = _FakeAvanza(
         watchlist_orderbook_ids=["693833"],
         names_by_id={},

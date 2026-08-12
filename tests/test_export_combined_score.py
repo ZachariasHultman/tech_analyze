@@ -31,7 +31,6 @@ def test_combined_score_survives_csv_export(tmp_path, monkeypatch):
     assert "combined_score" in out.columns
     # Per-metric *_score column was dropped; combined_score kept.
     assert "piotroski f-score status_score" not in out.columns
-    # Sorted by combined_score * (1 + shrunk); no reliability CSV -> shrunk 0,
-    # so order is by combined_score descending.
+    # Sorted by combined_score descending.
     assert list(out.index) == ["Alpha AB 111", "Beta AB 222"]
     assert float(out.loc["Alpha AB 111", "combined_score"]) == 0.72

@@ -46,9 +46,6 @@ from importlib.metadata import version
 from analyzer.historical_calc import calculate_metrics_given_hist
 from analyzer.correlation import baseline_correlation, optimize_weights_and_thresholds, optimize_combo
 from analyzer.config import (
-    RELIABILITY_DEFAULT_CUTOFF,
-    RELIABILITY_ESTABLISHED,
-    RELIABILITY_INVERSE,
     SLEEVE_GATE_MIN,
     EXCLUDED_TICKER_IDS,
 )
@@ -171,57 +168,26 @@ def _extract_orderbook_id(index_name):
     return None
 
 
-def _load_reliability_map():
-    """Load company reliability scores from company_reliability.csv."""
-    rel_path = os.path.join(project_root, "company_reliability.csv")
-    reliability = {}
-    if os.path.exists(rel_path):
-        try:
-            rel_df = pd.read_csv(rel_path)
-            for _, r in rel_df.iterrows():
-                reliability[r["company"]] = {
-                    "spearman": r["spearman"],
-                    "spearman_shrunk": r.get("spearman_shrunk", r["spearman"]),
-                    "n_windows": r.get("n_windows", float("nan")),
-                    "reliable": r.get("reliable", r["spearman"] > RELIABILITY_DEFAULT_CUTOFF),
-                }
-        except Exception:
-            pass
-    return reliability
-
-
-def _fmt_reliability(sp, n):
-    """Format a shrunk reliability figure with its sample size, e.g. '+0.60 (n=5)'."""
-    if pd.isna(sp):
-        return "N/A"
-    n_str = f"{int(n)}" if pd.notna(n) else "?"
-    return f"{sp:+.2f} (n={n_str})"
-
-
 def _fmt_scored_row(prefix, r):
-    """Format a (name, pts, shrunk_spearman, rank_key, quality_pct, value_pct,
-    combined_score, n_windows) row -- shared by the terminal watchlist report
-    and the email summary so both stay consistent. Falls back to a plain
-    name when the stock wasn't part of this run's scored universe (e.g. a
-    watchlist holding outside the current --preset/--watchlists scope)."""
-    name, pts, sp, comb, qual, val, cscore, n = r
+    """Format a (name, pts, quality_pct, value_pct, combined_score) row --
+    shared by the terminal watchlist report and the email summary so both
+    stay consistent. Falls back to a plain name when the stock wasn't part
+    of this run's scored universe (e.g. a watchlist holding outside the
+    current --preset/--watchlists scope)."""
+    name, pts, qual, val, cscore = r
     if pd.isna(qual) and pd.isna(val) and pd.isna(cscore):
         return f"{prefix} {name}  (not scored this run)"
-    return (f"{prefix} {name}  (q={qual:.2f}, v={val:.2f}, "
-            f"combined={cscore:.2f}, r={_fmt_reliability(sp, n)})")
+    pts_str = f"{pts:+.2f}" if pd.notna(pts) else "N/A"
+    return (f"{prefix} {name}  (pts={pts_str}, q={qual:.2f}, v={val:.2f}, "
+            f"combined={cscore:.2f})")
 
 
-# Shared explainer for q/v/combined/r, printed in both the terminal watchlist
+# Shared explainer for q/v/combined, printed in both the terminal watchlist
 # report and the email summary.
 LEGEND_LINES = [
     "q = quality percentile (0-1, peer-ranked business health)",
     "v = value percentile (0-1, peer-ranked cheapness)",
     "combined = q x v -- the actual ranking key",
-    "r = shrunk reliability -- does this company's own past score history",
-    "    actually track its own returns? (n = independent windows behind",
-    "    it; positive = trustworthy signal for this stock, negative =",
-    "    fundamentals have historically moved opposite to its returns,",
-    "    near zero = no track record either way)",
 ]
 
 
@@ -233,9 +199,10 @@ def _wl_attr(wl, key):
 
 
 def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
-    """Add top-scoring stocks with good reliability to the target watchlist.
+    """Add top-scoring stocks to the target watchlist.
 
-    - Filters by both score (points) and reliability (spearman > 0.4)
+    - Filters by the two-sleeve gate (quality_pct and value_pct both above
+      SLEEVE_GATE_MIN), ranks the rest by combined_score
     - Adds qualified stocks that aren't already on the list
     - Removes stocks from the list that no longer qualify
     """
@@ -253,9 +220,6 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
     watchlist_id = _wl_attr(target, "watchListId") or _wl_attr(target, "id")
     existing_ids = set(str(oid) for oid in (_wl_attr(target, "orderbookIds") or []))
 
-    # Load reliability data
-    reliability = _load_reliability_map()
-
     # Collect all scored stocks from both summaries
     frames = []
     for summary in [manager.summary, manager.summary_investment]:
@@ -269,25 +233,8 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
 
     combined = pd.concat(frames)
     combined["_pts"] = pd.to_numeric(combined["points"], errors="coerce")
-
-    # Add reliability info. Display the shrunk figure (matches what actually
-    # drives _combined below), not the raw spearman -- a raw correlation
-    # from only 5 non-overlapping windows is too noisy to show unshrunk.
-    combined["_shrunk"] = combined.index.map(
-        lambda c: reliability.get(c, {}).get("spearman_shrunk", float("nan"))
-    )
-    combined["_n_windows"] = combined.index.map(
-        lambda c: reliability.get(c, {}).get("n_windows", float("nan"))
-    )
-
-    # Combined rank: combined_score scaled up by shrunk reliability. Reliability
-    # tilts the ranking but never zeroes a stock out (factor >= 1 when shrunk
-    # is missing or negative-but-clipped is not applied here — fillna(0) only).
     combined["_combined_score"] = pd.to_numeric(
         combined.get("combined_score"), errors="coerce"
-    )
-    combined["_combined"] = combined["_combined_score"] * (
-        1 + combined["_shrunk"].fillna(0)
     )
 
     # Two-sleeve gate: qualify only stocks ranking well in BOTH quality and value.
@@ -297,7 +244,7 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
         (combined["_quality"] >= SLEEVE_GATE_MIN)
         & (combined["_value"] >= SLEEVE_GATE_MIN)
     ].copy()
-    qualified = qualified.sort_values("_combined", ascending=False).head(top_n)
+    qualified = qualified.sort_values("_combined_score", ascending=False).head(top_n)
 
     # Build set of orderbook IDs that should be on the list
     qualified_ids = set()
@@ -353,17 +300,14 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
             return float("nan")
 
     def _row(name, df=None):
-        # (name, pts, shrunk_spearman, rank_key, quality_pct, value_pct, combined_score, n_windows)
+        # (name, pts, quality_pct, value_pct, combined_score)
         df = qualified if df is None else df
         return (
             name,
             _num(name, "_pts", df),
-            _num(name, "_shrunk", df),
-            _num(name, "_combined", df),
             _num(name, "_quality", df),
             _num(name, "_value", df),
             _num(name, "_combined_score", df),
-            _num(name, "_n_windows", df),
         )
 
     added_rows   = [_row(n) for n in added]
@@ -378,7 +322,7 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
 
     # Report
     print(f"\n{'=' * 70}")
-    print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by combined × reliability)")
+    print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by combined_score)")
     print(f"{'=' * 70}")
     for line in LEGEND_LINES:
         print(f"  {line}")
@@ -411,14 +355,11 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
 
 
 def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dict]:
-    """Flag stocks in portfolio_watchlist that have deteriorating fundamentals.
+    """Flag stocks in portfolio_watchlist whose fundamentals have deteriorated.
 
-    A stock is flagged when its combined score (pts × reliability) is below 1.5,
-    or when its fundamental score is negative and reliability is established.
-    Returns a list of dicts sorted worst-first.
+    A stock is flagged when its points score (pts) is negative. Returns a
+    list of dicts sorted worst-first (most negative pts first).
     """
-    reliability = _load_reliability_map()
-
     all_wls = avanza.get_watchlists()
     wl = next((w for w in all_wls if _wl_attr(w, "name") == portfolio_watchlist), None)
     if wl is None:
@@ -435,12 +376,7 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
         return []
 
     combined = pd.concat([f.dropna(axis=1, how="all") for f in frames])
-    combined["_pts"]      = pd.to_numeric(combined["points"], errors="coerce")
-    # Use the shrunk reliability figure (small-sample-adjusted) for the
-    # established-relationship comparisons below.
-    combined["_spearman"] = combined.index.map(lambda c: reliability.get(c, {}).get("spearman_shrunk", float("nan")))
-    combined["_n_windows"] = combined.index.map(lambda c: reliability.get(c, {}).get("n_windows", float("nan")))
-    combined["_combined"] = combined["_pts"] * combined["_spearman"].clip(lower=0)
+    combined["_pts"] = pd.to_numeric(combined["points"], errors="coerce")
 
     scored_ids = {_extract_orderbook_id(i) for i in combined.index}
     for missing_id in sorted(portfolio_ids - scored_ids):
@@ -455,23 +391,12 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
         oid = _extract_orderbook_id(idx)
         if oid not in portfolio_ids:
             continue
-        pts  = float(combined.loc[idx, "_pts"])   if pd.notna(combined.loc[idx, "_pts"])      else None
-        sp   = float(combined.loc[idx, "_spearman"]) if pd.notna(combined.loc[idx, "_spearman"]) else None
-        n_w  = float(combined.loc[idx, "_n_windows"]) if pd.notna(combined.loc[idx, "_n_windows"]) else None
-        comb = float(combined.loc[idx, "_combined"]) if pd.notna(combined.loc[idx, "_combined"]) else None
+        pts = float(combined.loc[idx, "_pts"]) if pd.notna(combined.loc[idx, "_pts"]) else None
 
-        reasons = []
-        # Only flag genuine deterioration: negative score where the relationship is known
-        if pts is not None and pts < 0 and sp is not None and sp > RELIABILITY_ESTABLISHED:
-            reasons.append("fundamentals have deteriorated")
-        # Flag stocks where the score actively predicts the wrong direction
-        if sp is not None and sp < RELIABILITY_INVERSE:
-            reasons.append("score moves opposite to returns for this stock")
+        if pts is not None and pts < 0:
+            signals.append({"name": idx, "pts": pts, "reasons": "fundamentals have deteriorated"})
 
-        if reasons:
-            signals.append({"name": idx, "pts": pts, "spearman": sp, "n_windows": n_w, "combined": comb, "reasons": ", ".join(reasons)})
-
-    return sorted(signals, key=lambda x: (x["combined"] or 0))
+    return sorted(signals, key=lambda x: x["pts"])
 
 
 def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
@@ -510,7 +435,7 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
         lines.append("=" * 50)
 
         top10 = push_results["added"] + push_results["already"]
-        top10.sort(key=lambda x: x[3], reverse=True)  # sort by rank key (combined × reliability)
+        top10.sort(key=lambda x: x[4], reverse=True)  # sort by combined_score
         added_set = {r[0] for r in push_results["added"]}
         for r in top10:
             tag = "NEW" if r[0] in added_set else "   "
@@ -527,8 +452,7 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
         lines.append("=" * 50)
         for sig in sell_signals:
             pts_str = f"{sig['pts']:+.2f}" if sig["pts"] is not None else "N/A"
-            sp_str  = _fmt_reliability(sig["spearman"], sig.get("n_windows"))
-            lines.append(f"  ! {sig['name']}  ({pts_str} pts, r={sp_str}) — {sig['reasons']}")
+            lines.append(f"  ! {sig['name']}  ({pts_str} pts) — {sig['reasons']}")
     else:
         lines.append("\n✓ No sell signals in portfolio.")
 
@@ -783,19 +707,6 @@ def main():
              "data/panel_scores.csv (run --backfill-panel first). No live call.",
     )
     ap.add_argument(
-        "--panel-reliability",
-        action="store_true",
-        help="(not yet implemented) placeholder for the future per-company "
-             "panel reliability report.",
-    )
-    ap.add_argument(
-        "--reliability-threshold",
-        type=float,
-        default=None,
-        metavar="X",
-        help="(inert until --panel-reliability exists) accepted but unused.",
-    )
-    ap.add_argument(
         "--challenger-confidence",
         type=float,
         default=0.925,
@@ -854,15 +765,6 @@ def main():
                 save_panel_optimization_results(gate_result)
             except Exception as e:
                 print(f"[challenger] skipped (panel gate error: {e})")
-
-    # --backfill-panel: build the fiscal-year panel from already-saved
-    # data/*.csv snapshots, no live Avanza session needed.
-    # --panel-reliability: stub — the mechanism (per-company reliability) is
-    # deferred until the universe-wide validation battery proves the signal is
-    # real. Keep the CLI surface stable without building it now.
-    if args.panel_reliability:
-        print("[panel-reliability] not yet implemented — run --validate first.")
-        return 0
 
     # --backfill-panel / --validate: both operate on already-saved data/*.csv
     # snapshots, no live Avanza session needed. Combinable in one invocation
@@ -1019,8 +921,7 @@ def main():
                     print(f"  {line}")
             for sig in sell_signals:
                 pts_str = f"{sig['pts']:+.2f}" if sig["pts"] is not None else "N/A"
-                sp_str  = _fmt_reliability(sig["spearman"], sig.get("n_windows"))
-                print(f"  ! {sig['name']}  ({pts_str} pts, r={sp_str}) — {sig['reasons']}")
+                print(f"  ! {sig['name']}  ({pts_str} pts) — {sig['reasons']}")
             print(f"{'=' * 70}\n")
         else:
             print(f"\n✓ No sell signals in '{args.sell_from}'.\n")

@@ -42,10 +42,9 @@ Cloning the repo alone isn't enough to run it — the following are gitignored a
 |---|---|---|
 | `.env` | Yes | Avanza credentials (see above); nothing runs without it |
 | `analyzer/metrics.py` | Yes | Scoring weights/thresholds — load-bearing, every module imports from it. Doesn't exist in a fresh clone. Either `cp analyzer/metrics.example.py analyzer/metrics.py` to bootstrap with placeholder values, or scp a tuned copy from an existing machine |
-| `optimization_results_individual.json` (or `_combo.json`) | Optional | Optimized weights/thresholds loaded at runtime; without it, `main.py` falls back to `metrics.py`'s hardcoded defaults |
-| `company_reliability.csv` | Optional | Per-company reliability scores; without it, the watchlist push/sell-signal logic treats every company as reliability=unknown |
+| `optimization_results_panel.json` / `_individual.json` / `_combo.json` | Optional | Optimized weights/thresholds loaded at runtime. Default prefers `_panel.json` (out-of-sample validated) if present, else `_individual.json`, else `metrics.py`'s hardcoded defaults — see "Weight variants" below |
 
-None of the four are ever committed (`*.json`/`*.csv` are blanket-ignored, and `metrics.py` is explicitly excluded).
+None of these are ever committed (`*.json`/`*.csv` are blanket-ignored, and `metrics.py` is explicitly excluded).
 
 ---
 
@@ -55,7 +54,9 @@ Each stock is scored on metrics like Piotroski F-Score, earnings quality (OCF/ne
 
 Scoring is **cross-sectional** — each metric is ranked relative to all other stocks in the current run (percentile 0–1), so a utility with solid-for-utilities ROE ranks in the top half just like a tech company with high ROE. No sector-specific thresholds needed.
 
-A **reliability score** tracks whether each company's fundamental score has historically predicted its own price returns. Unreliable companies (good numbers, bad price response) are filtered out of the watchlist.
+Each metric feeds into two "sleeves" — **quality** (business health: Piotroski F-Score, margin stability, ROE, leverage, momentum, etc.) and **value** (cheapness: P/E, FCF yield, dividend yield). `combined_score = quality_pct × value_pct` is the actual ranking key, favoring stocks that are both good *and* cheap, not just one or the other.
+
+The strongest weight variant (`optimization_results_panel.json`, the default once it exists) is validated out-of-sample: ranking companies by `combined_score` within each historical fiscal year and checking whether the top quintile actually outperformed the bottom quintile the following year, gated by a Deflated Sharpe Ratio bar that corrects for how many weight combinations were tried. It's a cross-sectional tool — good for ranking a basket of stocks against each other, not for predicting any single stock's outcome. (An earlier per-company/per-sector "reliability" score, tracking whether an individual company's own score history predicted its own returns, was tried and dropped — the data doesn't have enough depth per company to support it, see git history if curious.)
 
 ---
 
@@ -80,7 +81,7 @@ uv run python3 main.py --preset omxs30 omxs-mid
 # Combine a personal watchlist with a preset
 uv run python3 main.py --watchlists Test --preset omxs30
 
-# Push top 10 scoring + reliable stocks to "Bör köpa" (default)
+# Push top 10 scoring stocks to "Bör köpa" (default)
 uv run python3 main.py --push
 
 # Push top 5 to a different watchlist
@@ -121,24 +122,27 @@ Aim for 30+ companies. Each save pulls multi-year financial history and 5 years 
 uv run python3 main.py --save --preset omxs30 omxs-mid --watchlists Test Utdelare Äger
 ```
 
-**Step 2 — Optimize metric weights and compute reliability**
+**Step 2 — Build the panel and optimize metric weights**
 
 ```bash
-uv run python3 main.py --correlate --optimize
+uv run python3 main.py --backfill-panel --validate
+uv run python3 main.py --optimize --optimize-combo --challenger-confidence 0.925
 ```
 
-This calculates which metrics historically predicted returns, saves optimized weights to `optimization_results_individual.json`, and saves per-company reliability scores to `company_reliability.csv`. Both files are picked up automatically on every future run.
+`--backfill-panel` builds a fiscal-year cross-sectional panel from your saved `data/*.csv` snapshots (`data/panel_fundamentals.csv` + `data/panel_scores.csv`); `--validate` runs a diagnostic battery against it (quintile sorts, Information Coefficient, Fama-MacBeth) — useful for sanity-checking before optimizing, not required for daily use.
 
-> **Note:** the backtest previously had a look-ahead bug (predictors were measured across the same window as the return they were correlated against). This is now fixed, but it means any `optimization_results_*.json` / `company_reliability.csv` saved before the fix are invalid — re-run Step 2 (`--correlate --optimize`) at least once after upgrading.
+`--optimize`/`--optimize-combo` compute per-metric correlations against historical returns and save weights to `optimization_results_individual.json` / `_combo.json`. If `data/panel_scores.csv` already exists (i.e. you ran `--backfill-panel` first), this also automatically runs an out-of-sample challenger test: rank companies by the optimized weights within each historical fiscal year, compare the top-vs-bottom quintile spread against equal-weighting via leave-one-fiscal-year-out cross-validation, and gate acceptance on a Deflated Sharpe Ratio bar (`--challenger-confidence`, default 0.925, correcting for how many weight combinations were tried). If it clears the bar, the result is saved to `optimization_results_panel.json` — the new default weight source for every future run, no flag needed.
+
+> **Note:** the backtest previously had a look-ahead bug (predictors were measured across the same window as the return they were correlated against). This is now fixed, but it means any `optimization_results_*.json` saved before the fix are invalid — re-run this step at least once after upgrading.
 
 ---
 
 ### Daily use
 
-Optimized weights and reliability are loaded automatically — no extra flags needed.
+Optimized weights are loaded automatically — no extra flags needed.
 
 ```bash
-# Score a watchlist and push top 10 reliable stocks to "Bör köpa"
+# Score a watchlist and push top 10 to "Bör köpa"
 uv run python3 main.py --watchlists Äger --push
 
 # Just score, no push
@@ -152,8 +156,8 @@ uv run python3 main.py --watchlists Äger
 | When | Command |
 |---|---|
 | **After new quarterly earnings** | `uv run python3 main.py --save --preset omxs30 omxs-mid ...` |
-| **After re-saving** | `uv run python3 main.py --correlate --optimize` |
-| **If you only changed a threshold in code** | `uv run python3 main.py --correlate` (skips optimize, just refreshes reliability) |
+| **After re-saving** | `--backfill-panel --validate`, then `--optimize --optimize-combo` |
+| **If you only changed a threshold in code** | `uv run python3 main.py --correlate` (skips optimize, just shows the correlation report) |
 | **If you add new stocks to universe** | Re-save then re-optimize |
 
 Re-saving quarterly is enough. Re-optimizing is only needed after a re-save or when you've significantly expanded the universe.
@@ -162,7 +166,7 @@ Re-saving quarterly is enough. Re-optimizing is only needed after a re-save or w
 
 ## Raspberry Pi deployment
 
-The Pi only runs the monthly scoring job — no `--save`, no `--optimize`. Those stay on your Mac. The optimized weights (`optimization_results_individual.json`) and reliability scores (`company_reliability.csv`) are gitignored (`*.json`/`*.csv` are blanket-ignored) — they're never committed, so they must be copied to the Pi manually via `scp` (see below) after each re-optimize.
+The Pi only runs the weekly scoring job — no `--save`, no `--optimize`. Those stay on your Mac. The optimized weights (`optimization_results_panel.json` and/or `_individual.json`) are gitignored (`*.json`/`*.csv` are blanket-ignored) — they're never committed, so they must be copied to the Pi manually via `scp` (see below) after each re-optimize.
 
 ### First-time Pi setup
 
@@ -175,27 +179,27 @@ uv sync
 
 # Copy credentials and output files from Mac
 scp .env pi@raspberrypi:~/tech_analyze/.env
-scp optimization_results_individual.json company_reliability.csv pi@raspberrypi:~/tech_analyze/
+scp optimization_results_panel.json optimization_results_individual.json pi@raspberrypi:~/tech_analyze/
 ```
 
-### Set up the monthly cron job
+### Set up the cron job
 
 ```bash
 # On Pi
 crontab -e
 ```
 
-Add this line (runs at 08:00 on the 1st of each month):
+Add this line (runs at 08:00 every Monday; matches the schedule documented at the top of `cron_pi.sh`):
 ```
-0 8 1 * * /home/pi/tech_analyze/cron_pi.sh >> /home/pi/tech_analyze/cron.log 2>&1
+0 8 * * 1 /home/pi/tech_analyze/cron_pi.sh >> /home/pi/tech_analyze/logs/cron.log 2>&1
 ```
 
 ### Workflow between Mac and Pi
 
 | Where | When | Action |
 |---|---|---|
-| Mac | Quarterly | `--save --preset omxs30 ... --correlate --optimize` |
-| Mac | After optimize | `scp optimization_results_individual.json company_reliability.csv pi@raspberrypi:~/tech_analyze/` |
+| Mac | After a re-save | `--backfill-panel --validate`, then `--optimize --optimize-combo` |
+| Mac | After optimize | `scp optimization_results_panel.json optimization_results_individual.json pi@raspberrypi:~/tech_analyze/` |
 | Pi | Automatic (cron) | `cron_pi.sh` — pulls code via git, scores, pushes to Avanza, sends email |
 
 ### Manual Pi run (test it first)
@@ -210,10 +214,7 @@ cd ~/tech_analyze
 
 ## Sell signals
 
-Add `--sell-from Äger` to flag stocks in your portfolio that have deteriorating fundamentals. A stock is flagged when:
-- Its fundamental score is negative, or
-- Its score doesn't reliably predict its returns (unreliable company), or
-- Its combined score (pts × reliability) falls below 1.5
+Add `--sell-from Äger` to flag stocks in your portfolio whose fundamentals have deteriorated. A stock is flagged when its points score (`pts`) is negative.
 
 ```bash
 uv run python3 main.py --watchlists Äger --sell-from Äger
@@ -237,11 +238,12 @@ Sends a plain-text email with the watchlist update and any sell signals. Require
 
 ```bash
 uv run python3 main.py --no-opt          # Use hardcoded default weights (ignore optimizer output)
-uv run python3 main.py --use-individual  # Use individual-correlation weights (default when file exists)
-uv run python3 main.py --use-combo       # Use grid-sweep + cross-validation weights
+uv run python3 main.py --use-individual  # Force the individual-correlation weights
+uv run python3 main.py --use-combo       # Force the grid-sweep + cross-validation weights
+uv run python3 main.py --use-panel       # Force the panel challenger's out-of-sample-validated weights
 ```
 
-`--use-individual` is the most trustworthy with a small universe. `--use-combo` is more likely to overfit until you have 50+ companies × 2+ years of data.
+Default (no flag): prefers `optimization_results_panel.json` when it exists — the out-of-sample, Deflated-Sharpe-Ratio-gated result (run `--optimize` once with `data/panel_scores.csv` present, see Workflow above) — falling back to `optimization_results_individual.json`, then hardcoded `metrics.py` defaults.
 
 ---
 
@@ -255,10 +257,14 @@ uv run python3 main.py --use-combo       # Use grid-sweep + cross-validation wei
 | `--correlate` | Run baseline correlation report against historical snapshots |
 | `--optimize` | Re-optimize metric weights from historical data |
 | `--optimize-combo` | Optimize with grid sweep + cross-validation |
+| `--backfill-panel` | Build the fiscal-year panel from `data/*.csv` (writes `data/panel_fundamentals.csv` + `data/panel_scores.csv`) |
+| `--validate` | Run the cross-sectional validation battery against `data/panel_scores.csv` |
+| `--challenger-confidence X` | Deflated Sharpe Ratio bar the panel challenger must clear to accept optimized weights (default 0.925) |
 | `--no-opt` | Ignore saved weights, use hardcoded defaults |
-| `--use-individual` | Use individual-correlation weights |
-| `--use-combo` | Use combo-optimized weights |
-| `--push` | Push top-scoring reliable stocks to an Avanza watchlist |
+| `--use-individual` | Force individual-correlation weights |
+| `--use-combo` | Force combo-optimized weights |
+| `--use-panel` | Force the panel challenger's out-of-sample-validated weights |
+| `--push` | Push top-scoring stocks to an Avanza watchlist |
 | `--push-to NAME` | Which watchlist to push to (default: `Bör köpa`) |
 | `--push-top N` | How many stocks to push (default: 10) |
 | `--sell-from NAME` | Check this watchlist for sell signals |
