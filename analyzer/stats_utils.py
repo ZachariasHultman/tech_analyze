@@ -152,7 +152,9 @@ def probabilistic_sharpe_ratio(sr_hat, sr_benchmark, t_periods, skew, kurtosis):
     return float(sp_stats.norm.cdf(z))
 
 
-def deflated_sharpe_ratio(trial_objectives, selected_return_series):
+def deflated_sharpe_ratio(trial_objectives, selected_return_series,
+                          sigma_sr_override=None, sr_benchmark_override=None,
+                          n_trials_override=None):
     """Deflated Sharpe Ratio: PSR with a multiple-testing-corrected benchmark.
 
     ``trial_objectives`` is every distinct candidate value the grid sweep
@@ -163,12 +165,30 @@ def deflated_sharpe_ratio(trial_objectives, selected_return_series):
     ``selected_return_series`` is the chosen strategy's realized per-period
     returns, from which SR_hat, skew and kurtosis are measured.
 
+    **The overrides are the honest path.** Derived from ``trial_objectives``,
+    ``sigma_sr`` is the dispersion of the objective across grid *candidates* —
+    not the sampling noise of a Sharpe estimate, which is what the formula
+    wants. It therefore moves with how the search was configured rather than
+    with how much evidence there is: a wider grid inflates it, and duplicate
+    candidates (the panel search produced 90 distinct values out of 1221
+    evaluations) deflate it. ``permutation_benchmark`` measures both
+    quantities directly instead; pass its results through
+    ``sigma_sr_override`` / ``sr_benchmark_override`` / ``n_trials_override``.
+    The approximation is kept for callers with no permutation budget.
+
     Returns a dict including ``significant_at_95``.
     """
     trials = np.asarray(pd.Series(trial_objectives, dtype=float).dropna())
-    n_trials = int(trials.size)
-    sigma_sr = float(np.std(trials, ddof=1)) if n_trials > 1 else 0.0
-    sr_benchmark = expected_max_sharpe_under_trials(sigma_sr, n_trials)
+    n_trials = int(n_trials_override if n_trials_override is not None
+                   else trials.size)
+    if sigma_sr_override is not None:
+        sigma_sr = float(sigma_sr_override)
+    else:
+        sigma_sr = float(np.std(trials, ddof=1)) if trials.size > 1 else 0.0
+    if sr_benchmark_override is not None:
+        sr_benchmark = float(sr_benchmark_override)
+    else:
+        sr_benchmark = expected_max_sharpe_under_trials(sigma_sr, n_trials)
 
     ret = np.asarray(pd.Series(selected_return_series, dtype=float).dropna())
     t_periods = int(ret.size)

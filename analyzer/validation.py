@@ -259,8 +259,14 @@ def run_validation_battery(panel_scores_path="data/panel_scores.csv",
     checks, quintile sorts (4a), IC time series (4b), and Fama-MacBeth (4c) in
     order; notes that the factor-attribution step (4d) was cut. Returns every
     sub-result in a dict so tests can assert on structured output."""
+    from analyzer.panel import drop_thin_years
+
     panel = pd.read_csv(panel_scores_path)
     panel.columns = panel.columns.str.strip()
+    # A year too small to rank is not evidence -- see analyzer/config.py's
+    # MIN_CROSS_SECTION. Applied before anything reads the panel so the
+    # header's period count, the IC series and the quintile sorts all agree.
+    panel = drop_thin_years(panel, RETURN_COL, label="validate")
     try:
         fundamentals = pd.read_csv(panel_fundamentals_path)
         fundamentals.columns = fundamentals.columns.str.strip()

@@ -22,6 +22,7 @@ if project_root not in sys.path:
 
 from analyzer.summary_manager import SummaryManager
 from analyzer.data_processing import calculate_score
+from analyzer.fast_score import cached_score_matrix, points_from_matrix
 from analyzer.stats_utils import deflated_sharpe_ratio
 from analyzer.config import QUALITY_METRICS
 from analyzer.metrics import (
@@ -103,8 +104,15 @@ def _quintile_spread(scores, returns):
     return float(top - bot)
 
 def _all_scored_metrics():
-    """Return every metric that has a weight > 0."""
-    return list(
+    """Return every metric that has a weight > 0, in a stable order.
+
+    `sorted`, not `list(set(...))`: Python randomizes string hashing per
+    process, so the un-sorted version returned a different order on every run.
+    Coordinate descent iterates this list, so the order picks the greedy path
+    and therefore the final weights -- which live scoring then loads from
+    optimization_results_panel.json. See tests/test_metric_order_stable.py.
+    """
+    return sorted(
         set(HIGHEST_WEIGHT_METRICS)
         | set(HIGH_WEIGHT_METRICS)
         | set(LOW_WEIGHT_METRICS)
@@ -1087,15 +1095,49 @@ def optimize_combo(csv_path="metrics_by_timespan.csv"):
 PANEL_RETURN_COL = "fwd_excess_return_1y"
 
 
+def _panel_year_scores(g, fiscal_year, metrics, weights_dict, thresholds_dict,
+                       return_col):
+    """(scores, returns) for one fiscal year, via the cached score matrix.
+
+    Exactly equivalent to _score_with_weights on the same slice (asserted in
+    tests/test_fast_score.py), but the expensive part -- the unit-weight
+    scoring pass -- is memoised per (year, metrics, thresholds), so a weight
+    sweep reuses it instead of rebuilding the whole SummaryManager chain for
+    every candidate.
+    """
+    G, hw = cached_score_matrix(g, metrics, thresholds_dict, group_key=fiscal_year)
+    if G is None or G.empty:
+        return None, None
+    s = points_from_matrix(G, hw, weights_dict)
+    returns = g.set_index("company")[return_col]
+    # Duplicate company labels make .loc fan out, so the returns series comes
+    # back longer than the scores and the combined mask matches neither.
+    # dedupe_fiscal_years removes the known cause upstream; this keeps a future
+    # one from silently double-weighting a company instead of erroring.
+    if returns.index.has_duplicates:
+        returns = returns[~returns.index.duplicated(keep="last")]
+    if s.index.has_duplicates:
+        s = s[~s.index.duplicated(keep="last")]
+    common = s.index.intersection(returns.index)
+    if len(common) < 5:
+        return None, None
+    sv = s.loc[common].astype(float)
+    rv = returns.loc[common].astype(float)
+    valid = sv.notna() & rv.notna()
+    if valid.sum() < 5:
+        return None, None
+    return sv[valid], rv[valid]
+
+
 def _panel_avg_quintile_spread(weights_dict, panel_df, metrics,
                                thresholds_dict=None, return_col=PANEL_RETURN_COL):
     """Mean quintile long-short spread across fiscal years (panel objective)."""
     spreads = []
-    for _, g in panel_df.groupby("fiscal_year"):
+    for fy, g in panel_df.groupby("fiscal_year"):
         if len(g) < 5:
             continue
-        sv, rv = _score_with_weights(
-            g.copy(), metrics, weights_dict, thresholds_dict, return_col=return_col
+        sv, rv = _panel_year_scores(
+            g, fy, metrics, weights_dict, thresholds_dict, return_col
         )
         if sv is None:
             continue
@@ -1109,11 +1151,11 @@ def _panel_avg_spearman(weights_dict, panel_df, metrics,
                         thresholds_dict=None, return_col=PANEL_RETURN_COL):
     """Mean Spearman IC across fiscal years (panel diagnostic)."""
     corrs = []
-    for _, g in panel_df.groupby("fiscal_year"):
+    for fy, g in panel_df.groupby("fiscal_year"):
         if len(g) < 5:
             continue
-        sv, rv = _score_with_weights(
-            g.copy(), metrics, weights_dict, thresholds_dict, return_col=return_col
+        sv, rv = _panel_year_scores(
+            g, fy, metrics, weights_dict, thresholds_dict, return_col
         )
         if sv is None:
             continue
@@ -1260,10 +1302,94 @@ def optimize_panel_combo(panel_df, metrics):
     }
 
 
-def _panel_fold_eval(weights, thresholds, panel_year, metrics):
+def permutation_benchmark(panel_df, metrics, optimizer_fn, n_permutations=200,
+                          seed=0, return_col=PANEL_RETURN_COL, progress_every=25):
+    """Null distribution of the best objective this search finds on pure noise.
+
+    Shuffles the target **within each fiscal year** (destroying the
+    score-to-return link while preserving every cross-section's own return
+    distribution and the panel's shape), refits the optimizer, and records the
+    best objective it managed to reach. Repeated ``n_permutations`` times, that
+    is the distribution of "how good a result this exact search produces when
+    there is nothing to find."
+
+    It replaces the Euler-Mascheroni expected-max approximation with a measured
+    one, and unlike that approximation it is immune to how the grid was sized
+    or how many duplicate candidates it evaluated.
+
+    Shuffling only the target leaves the fundamentals untouched, so the cached
+    score matrices stay valid across permutations -- which is what makes this
+    affordable. Do not clear the cache in the loop.
+
+    Returns ``{"null_best": [...], "sigma": float, "mean": float,
+    "p95": float, "n_permutations": int}``.
+    """
+    skipped = {"null_best": [], "sigma": None, "mean": None, "p95": None,
+               "n_permutations": 0}
+    if n_permutations < 1:
+        return skipped
+    if (panel_df is None or panel_df.empty
+            or "fiscal_year" not in panel_df.columns
+            or return_col not in panel_df.columns):
+        # Nothing to shuffle. Callers that stub out the walk-forward (tests,
+        # and any future caller holding a pre-target frame) must not be forced
+        # to supply a full panel just to reach the verdict.
+        return skipped
+
+    rng = np.random.default_rng(seed)
+    groups = list(panel_df.groupby("fiscal_year").indices.values())
+    values = panel_df[return_col].to_numpy(dtype=float)
+    shuffled = panel_df.copy()
+    null_best = []
+
+    print(f"  [permutation] running {n_permutations} refits on shuffled targets...")
+    for i in range(n_permutations):
+        permuted = values.copy()
+        for idx in groups:
+            block = permuted[idx]
+            rng.shuffle(block)
+            permuted[idx] = block
+        shuffled[return_col] = permuted
+
+        fit = optimizer_fn(shuffled, metrics)
+        objectives = [o for o in fit.get("trial_objectives", [])
+                      if o is not None and not np.isnan(o)]
+        if objectives:
+            null_best.append(float(max(objectives)))
+        if progress_every and (i + 1) % progress_every == 0:
+            print(f"  [permutation] {i + 1}/{n_permutations}")
+
+    if not null_best:
+        return {"null_best": [], "sigma": None, "mean": None, "p95": None,
+                "n_permutations": n_permutations}
+    arr = np.asarray(null_best, dtype=float)
+    return {
+        "null_best": null_best,
+        "sigma": float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0,
+        "mean": float(arr.mean()),
+        "p95": float(np.quantile(arr, 0.95)),
+        "n_permutations": int(arr.size),
+    }
+
+
+def permutation_p_value(null_best, observed):
+    """P(search reaches `observed` on noise), with the standard +1 correction.
+
+    The +1 in numerator and denominator keeps the estimate from ever being
+    exactly zero on a finite number of permutations -- claiming p=0 from 200
+    draws would overstate what was actually measured.
+    """
+    arr = np.asarray([v for v in null_best if v is not None and not np.isnan(v)],
+                     dtype=float)
+    if arr.size == 0 or observed is None or np.isnan(observed):
+        return float("nan")
+    return float((np.sum(arr >= observed) + 1) / (arr.size + 1))
+
+
+def _panel_fold_eval(weights, thresholds, panel_year, metrics, fiscal_year=None):
     """Out-of-sample (quintile spread, IC) on one held-out fiscal year."""
-    sv, rv = _score_with_weights(
-        panel_year.copy(), metrics, weights, thresholds, return_col=PANEL_RETURN_COL
+    sv, rv = _panel_year_scores(
+        panel_year, fiscal_year, metrics, weights, thresholds, PANEL_RETURN_COL
     )
     if sv is None:
         return None, None
@@ -1290,10 +1416,11 @@ def leave_one_fiscal_year_out(panel_df, metrics, optimizer_fn=optimize_panel_com
             continue
         fit = optimizer_fn(train, metrics)
         opt_spread, opt_ic = _panel_fold_eval(
-            fit["optimized_weights"], fit["optimized_thresholds"], test, metrics
+            fit["optimized_weights"], fit["optimized_thresholds"], test, metrics,
+            fiscal_year=Y,
         )
         eq_spread, eq_ic = _panel_fold_eval(
-            equal_weights, default_thresholds, test, metrics
+            equal_weights, default_thresholds, test, metrics, fiscal_year=Y
         )
         folds.append({
             "fiscal_year": int(Y),
@@ -1304,7 +1431,8 @@ def leave_one_fiscal_year_out(panel_df, metrics, optimizer_fn=optimize_panel_com
 
 
 def gate_optimized_weights(panel_df, metrics, optimizer_fn=optimize_panel_combo,
-                           confidence=0.95):
+                           confidence=0.95, n_permutations=200,
+                           permutation_seed=0):
     """Accept/reject the optimized weights as a challenger to equal weight.
 
     Accepts iff BOTH (a) mean optimized quintile spread beats mean equal-weight
@@ -1335,10 +1463,35 @@ def gate_optimized_weights(panel_df, metrics, optimizer_fn=optimize_panel_combo,
     mean_opt = float(np.mean(opt_spreads)) if opt_spreads else float("nan")
     mean_eq = float(np.mean(eq_spreads)) if eq_spreads else float("nan")
 
+    # How often the challenger actually won its held-out year. At n=4 periods
+    # no statistic has real power, so this blunt count is printed next to the
+    # DSR: it is the number a human can read and judge.
+    paired = [f for f in folds
+              if f["optimized_spread"] is not None and f["equal_spread"] is not None]
+    n_beat = sum(1 for f in paired if f["optimized_spread"] > f["equal_spread"])
+
     # trial_objectives from a full-data fit = the real N-trials count for DSR.
     full_fit = optimizer_fn(panel_df, metrics)
     trial_objectives = full_fit.get("trial_objectives", [])
-    dsr = deflated_sharpe_ratio(trial_objectives, opt_spreads)
+    finite_trials = [o for o in trial_objectives
+                     if o is not None and not np.isnan(o)]
+    observed_best = max(finite_trials) if finite_trials else float("nan")
+
+    # Measure the null instead of approximating it, when there is budget.
+    perm = permutation_benchmark(
+        panel_df, metrics, optimizer_fn,
+        n_permutations=n_permutations, seed=permutation_seed,
+    )
+    p_value = permutation_p_value(perm["null_best"], observed_best)
+    if perm["n_permutations"] and perm["sigma"] is not None:
+        dsr = deflated_sharpe_ratio(
+            trial_objectives, opt_spreads,
+            sigma_sr_override=perm["sigma"],
+            sr_benchmark_override=perm["p95"],
+            n_trials_override=len(set(np.round(finite_trials, 10))),
+        )
+    else:
+        dsr = deflated_sharpe_ratio(trial_objectives, opt_spreads)
 
     beats = (not np.isnan(mean_opt) and not np.isnan(mean_eq) and mean_opt > mean_eq)
     dsr_value = dsr.get("dsr", float("nan"))
@@ -1348,6 +1501,17 @@ def gate_optimized_weights(panel_df, metrics, optimizer_fn=optimize_panel_combo,
     print("-" * 72)
     print(f"  mean optimized spread (OOS): {_fmt(mean_opt)}")
     print(f"  mean equal-weight spread (OOS): {_fmt(mean_eq)}")
+    print(f"  beat equal weight in {n_beat} of {len(paired)} held-out year(s)")
+    if perm["n_permutations"]:
+        print(f"  permutation null ({perm['n_permutations']} refits on shuffled "
+              f"targets): mean={_fmt(perm['mean'])} p95={_fmt(perm['p95'])} "
+              f"sigma={_fmt(perm['sigma'])}")
+        print(f"  observed best in-sample objective: {_fmt(observed_best)}  "
+              f"-> permutation p={p_value:.3f}")
+    else:
+        print("  permutation null: SKIPPED (--permutations 0) — DSR falls back "
+              "to the Euler-Mascheroni approximation, whose sigma is grid "
+              "dispersion, not sampling noise. Treat it as decorative.")
     print(f"  DSR: {_fmt(dsr.get('dsr'))}  (n_trials={dsr.get('n_trials')}, "
           f"benchmark={_fmt(dsr.get('sr_benchmark'))}, "
           f"confidence_bar={confidence:.3f}, significant={significant})")
@@ -1377,8 +1541,68 @@ def gate_optimized_weights(panel_df, metrics, optimizer_fn=optimize_panel_combo,
         "mean_equal_spread": mean_eq,
         "dsr": dsr,
         "folds": folds,
+        "n_folds_beating_equal": n_beat,
+        "n_folds": len(paired),
+        "n_companies": (
+            int(panel_df["company_id"].nunique())
+            if panel_df is not None and "company_id" in getattr(panel_df, "columns", [])
+            else None
+        ),
+        "permutation": {k: v for k, v in perm.items() if k != "null_best"},
+        "permutation_p_value": p_value,
+        "observed_best_objective": observed_best,
         "chosen_weights": chosen_weights,
         "chosen_thresholds": chosen_thresholds,
+    }
+
+
+def build_validation_summary(gate_result):
+    """Condense the gate's verdict into what a reader needs to judge it.
+
+    Reports the out-of-sample numbers for the weights **actually chosen** --
+    the optimized fold results on accept, the equal-weight ones on reject --
+    rather than always the challenger's, which would describe something the
+    system isn't running.
+    """
+    accepted = bool(gate_result.get("accept"))
+    ic_key = "optimized_ic" if accepted else "equal_ic"
+    spread_key = "optimized_spread" if accepted else "equal_spread"
+
+    def _clean(v):
+        return None if v is None or (isinstance(v, float) and np.isnan(v)) else v
+
+    per_year = [
+        {
+            "fiscal_year": f.get("fiscal_year"),
+            "ic": _clean(f.get(ic_key)),
+            "spread": _clean(f.get(spread_key)),
+        }
+        for f in gate_result.get("folds", [])
+    ]
+    per_year.sort(key=lambda r: (r["fiscal_year"] is None, r["fiscal_year"]))
+
+    ics = [r["ic"] for r in per_year if r["ic"] is not None]
+    spreads = [r["spread"] for r in per_year if r["spread"] is not None]
+    if len(ics) > 1:
+        t_stat, p_value = sp_stats.ttest_1samp(ics, popmean=0.0)
+        t_stat, p_value = float(t_stat), float(p_value)
+    else:
+        t_stat = p_value = None
+
+    return {
+        "fitted_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+        "n_periods": len(per_year),
+        "n_companies": gate_result.get("n_companies"),
+        "per_year": per_year,
+        "mean_ic": float(np.mean(ics)) if ics else None,
+        "mean_spread": float(np.mean(spreads)) if spreads else None,
+        "t_stat": t_stat,
+        "p_value": p_value,
+        "n_folds_beating_equal": gate_result.get("n_folds_beating_equal"),
+        "n_folds": gate_result.get("n_folds"),
+        "permutation_p_value": _clean(gate_result.get("permutation_p_value")),
+        "n_permutations": (gate_result.get("permutation") or {}).get("n_permutations"),
+        "return_basis": "total return (price + dividends), demeaned within year",
     }
 
 
@@ -1388,6 +1612,10 @@ def save_panel_optimization_results(gate_result, out_path="optimization_results_
     accept AND reject -- on reject, chosen_weights/chosen_thresholds are
     already the gate's own equal-weight/default-threshold fallback, so this
     file always reflects a defensible recommendation, never a broken one.
+
+    The `validation` block travels in the same file as the weights, so the one
+    artefact copied to the Pi carries both what to score with and the evidence
+    for trusting it -- the email renders that block verbatim.
     """
     result = {
         "optimized_weights": gate_result["chosen_weights"],
@@ -1397,6 +1625,7 @@ def save_panel_optimization_results(gate_result, out_path="optimization_results_
         "dsr": gate_result["dsr"].get("dsr"),
         "mean_optimized_spread": gate_result["mean_optimized_spread"],
         "mean_equal_spread": gate_result["mean_equal_spread"],
+        "validation": build_validation_summary(gate_result),
     }
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2, default=str)

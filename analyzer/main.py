@@ -182,6 +182,131 @@ def _fmt_scored_row(prefix, r):
             f"combined={cscore:.2f})")
 
 
+# Weights older than this are flagged in the email; the panel only gains a
+# new fiscal year once a year, so this is about noticing neglect, not decay.
+_STALE_AFTER_DAYS = 120
+
+
+def _load_optimizer_status(variant=None):
+    """Read the `validation` block written by the challenger gate, if present.
+
+    Returns None when the weights file is missing or predates this block (an
+    older SCP, or a machine that has never run the optimizer). Callers render
+    a short "unknown" notice instead -- the Pi must never fail its weekly run
+    because the provenance metadata is stale.
+    """
+    import json
+    filename = ("optimization_results_panel.json" if variant in (None, "panel")
+                else f"optimization_results_{variant}.json")
+    path = os.path.join(project_root, filename)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    validation = data.get("validation")
+    if not isinstance(validation, dict):
+        return None
+    return {
+        "accepted": data.get("accepted"),
+        "dsr": data.get("dsr"),
+        "confidence": data.get("confidence"),
+        "source": filename,
+        **validation,
+    }
+
+
+def _format_optimizer_status(status):
+    """Render the system-status block shown above the buy/sell lists.
+
+    The point is that a tidy top-10 list implies more confidence than four
+    fiscal years can support, so the confidence verdict is stated on every
+    run rather than left for the reader to remember.
+    """
+    if not status:
+        return [
+            "SYSTEM STATUS: unknown — no validation metadata found.",
+            "  Run the optimizer on the Mac and copy",
+            "  optimization_results_panel.json across.",
+        ]
+
+    lines = []
+    verdict = ("ACCEPTED" if status.get("accepted") else
+               "REJECTED (running equal weight)")
+    fitted = status.get("fitted_at") or "unknown date"
+    stale = ""
+    try:
+        age = (pd.Timestamp.now() - pd.Timestamp(fitted)).days
+        if age >= _STALE_AFTER_DAYS:
+            stale = f"  [STALE — {age} days old, consider re-running]"
+    except Exception:
+        pass
+    lines.append(f"SYSTEM STATUS  (weights fitted {fitted[:10]}, "
+                 f"panel challenger: {verdict}){stale}")
+
+    n_periods = status.get("n_periods") or 0
+    basis = status.get("return_basis", "forward return")
+    years = [r for r in (status.get("per_year") or []) if r.get("ic") is not None]
+    if years:
+        span = f"{years[0]['fiscal_year']}-{years[-1]['fiscal_year']}"
+        lines.append(f"  Out-of-sample, {len(years)} fiscal years ({span}), {basis}:")
+        lines.append("    IC by year:   " + "   ".join(
+            f"{r['fiscal_year']} {r['ic']:+.3f}" for r in years))
+
+    mean_ic, mean_spread = status.get("mean_ic"), status.get("mean_spread")
+    if mean_ic is not None:
+        bits = [f"mean IC {mean_ic:+.3f}"]
+        if mean_spread is not None:
+            bits.append(f"top-bottom spread {mean_spread:+.1%}/yr")
+        lines.append("    " + "  |  ".join(bits))
+
+    n_beat, n_folds = status.get("n_folds_beating_equal"), status.get("n_folds")
+    if n_beat is not None and n_folds:
+        # On a reject the rows above describe equal weight (what is running),
+        # while this count describes the challenger that was turned down --
+        # say which, or the two read as contradicting each other.
+        who = "beat" if status.get("accepted") else "challenger beat"
+        tail = "" if status.get("accepted") else " but missed the significance bar"
+        lines.append(f"    {who} equal weight in {n_beat} of {n_folds} "
+                     f"held-out years{tail}")
+
+    p_perm, n_perm = status.get("permutation_p_value"), status.get("n_permutations")
+    if p_perm is not None and n_perm:
+        lines.append(f"    permutation test ({n_perm} refits on shuffled "
+                     f"targets): p={p_perm:.3f}")
+
+    # The verdict is derived, not asserted. It used to be hardcoded "LOW",
+    # which became self-contradictory the moment the IC test started clearing
+    # 5% ("CONFIDENCE: LOW ... p=0.02").
+    t_stat, p_value = status.get("t_stat"), status.get("p_value")
+    detail = ""
+    if t_stat is not None and p_value is not None:
+        detail = f" (t={t_stat:+.2f}, p={p_value:.2f})"
+    if p_value is not None and p_value < 0.05:
+        lines.append(f"  CONFIDENCE: MODERATE — ranking beats chance across "
+                     f"{n_periods} periods{detail}.")
+    else:
+        lines.append(f"  CONFIDENCE: LOW — {n_periods} periods only{detail}. "
+                     "Directional, not proof.")
+
+    # A significant IC and a flat quintile spread are different claims, and
+    # the spread is the one a top-N watchlist actually depends on. Say so
+    # rather than letting a good IC imply the picks are validated.
+    if mean_spread is not None and abs(mean_spread) < 0.02:
+        lines.append(f"    CAVEAT: top-bottom spread is only {mean_spread:+.1%}/yr "
+                     "— the ranking works on average, the extremes do not "
+                     "separate, and the watchlist is an extreme.")
+    lines.append("    Survivorship bias is not corrected for and inflates all "
+                 "of the above.")
+    n_companies = status.get("n_companies")
+    if n_companies:
+        lines.append(f"  Universe: {n_companies} stocks "
+                     "(today's list applied backwards).")
+    return lines
+
+
 # Shared explainer for q/v/combined, printed in both the terminal watchlist
 # report and the email summary.
 LEGEND_LINES = [
@@ -198,7 +323,7 @@ def _wl_attr(wl, key):
     return getattr(wl, key, None)
 
 
-def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
+def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
     """Add top-scoring stocks to the target watchlist.
 
     - Filters by the two-sleeve gate (quality_pct and value_pct both above
@@ -324,6 +449,9 @@ def _update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa"):
     print(f"\n{'=' * 70}")
     print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by combined_score)")
     print(f"{'=' * 70}")
+    for line in _format_optimizer_status(_load_optimizer_status()):
+        print(f"  {line}")
+    print()
     for line in LEGEND_LINES:
         print(f"  {line}")
     if added_rows:
@@ -423,6 +551,11 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
         return
 
     lines = [f"Stock Screener — {date.today()}", ""]
+
+    # Provenance first: a tidy top-10 list reads as more confident than four
+    # fiscal years justify, so the evidence for the weights leads the email.
+    lines.extend(_format_optimizer_status(_load_optimizer_status()))
+    lines.append("")
 
     if push_results or sell_signals:
         lines.extend(LEGEND_LINES)
@@ -689,9 +822,16 @@ def main():
     ap.add_argument(
         "--push-top",
         type=int,
-        default=10,
+        default=25,
         metavar="N",
-        help="How many top stocks to push (default: 10)",
+        help="How many top stocks to push (default: 25). Breadth, not "
+             "conviction, is what harvests a weak ranking signal: information "
+             "ratio scales as IC x sqrt(breadth), so at IC +0.041 a 10-stock "
+             "pick throws away most of the measured edge. 25 is roughly the "
+             "top quintile of the universe, matching the bucket the backtest "
+             "actually validates. Measured across 7 fiscal years, the "
+             "year-to-year standard deviation of the pick's excess return "
+             "falls from 9.98% at N=10 to 4.48% at N=25.",
     )
     ap.add_argument(
         "--backfill-panel",
@@ -705,6 +845,51 @@ def main():
         action="store_true",
         help="Run the cross-sectional validation battery against "
              "data/panel_scores.csv (run --backfill-panel first). No live call.",
+    )
+    ap.add_argument(
+        "--backfill-prices",
+        action="store_true",
+        help="One-time Mac-only step: fetch dividend-adjusted daily closes from "
+             "Yahoo for every company in data/, verify each against the Avanza "
+             "prices already in the snapshots, and cache them for the panel. "
+             "Avanza's OHLC is a rolling ~5y unadjusted window, which is what "
+             "caps the panel at 4 usable fiscal years; this lifts it toward the "
+             "~7 the power calculation asks for. Resumable -- re-run after a "
+             "rate limit. Needs Avanza credentials only to resolve symbols the "
+             "first time (cached in data/yahoo_symbols.json).",
+    )
+    ap.add_argument(
+        "--prices-from",
+        default="2015-01-01",
+        metavar="YYYY-MM-DD",
+        help="Earliest date for --backfill-prices (default 2015-01-01).",
+    )
+    ap.add_argument(
+        "--prices-batch-size",
+        type=int, default=8, metavar="N",
+        help="Symbols per Yahoo request (default 8). Lower it if you keep "
+             "hitting the rate limit.",
+    )
+    ap.add_argument(
+        "--prices-cooldown",
+        type=float, default=600.0, metavar="SECONDS",
+        help="Wait after a batch exhausts its retries before moving to the "
+             "next one (default 600). Within a batch the backoff is already "
+             "30s doubling to a 900s cap; this is the longer between-batch "
+             "pause. Raise it for a slow overnight run.",
+    )
+    ap.add_argument(
+        "--permutations",
+        type=int,
+        default=200,
+        metavar="N",
+        help="Permutation refits used to measure the challenger gate's null "
+             "distribution (default 200). The target is shuffled within each "
+             "fiscal year and the optimizer refitted, so the DSR's benchmark "
+             "is measured rather than approximated. 0 skips it and falls back "
+             "to the Euler-Mascheroni approximation, whose sigma is grid "
+             "dispersion rather than sampling noise -- faster, but the "
+             "resulting DSR is not meaningful.",
     )
     ap.add_argument(
         "--challenger-confidence",
@@ -756,6 +941,7 @@ def main():
                     panel_df, _all_scored_metrics(),
                     optimizer_fn=optimizer_fn,
                     confidence=args.challenger_confidence,
+                    n_permutations=args.permutations,
                 )
                 # Persisted so live scoring can pick it up automatically (see
                 # _load_optimized_params's default-preference chain below) --
@@ -765,6 +951,58 @@ def main():
                 save_panel_optimization_results(gate_result)
             except Exception as e:
                 print(f"[challenger] skipped (panel gate error: {e})")
+
+    # --backfill-prices: offline apart from a one-time symbol resolution, and
+    # deliberately its own terminal branch -- it is a slow manual step whose
+    # output is then consumed by --backfill-panel.
+    if args.backfill_prices:
+        from analyzer.yahoo_prices import (
+            SYMBOLS_PATH, backfill_prices, company_keys, load_symbol_map,
+            resolve_symbols_via_avanza, save_symbol_map, verify_all,
+        )
+        keys = company_keys("data")
+        if not keys:
+            print("[yahoo] no snapshots in data/ — run --save first.")
+            return 1
+        symbol_map = load_symbol_map()
+        missing = [k for k in keys if not symbol_map.get(k)]
+        if missing:
+            print(f"[yahoo] resolving {len(missing)} symbol(s) via Avanza...")
+            try:
+                symbol_map, unresolved = resolve_symbols_via_avanza(
+                    setup_env(), keys, existing=symbol_map
+                )
+                save_symbol_map(symbol_map)
+                print(f"[yahoo] wrote {SYMBOLS_PATH} ({len(symbol_map)} symbols)")
+                for key, why in unresolved:
+                    print(f"  [unresolved] {key}: {why} — add it by hand to "
+                          f"{SYMBOLS_PATH} if you know the Yahoo ticker")
+            except Exception as exc:
+                print(f"[yahoo] symbol resolution failed ({exc}).")
+                if not symbol_map:
+                    print(f"[yahoo] nothing cached yet — populate {SYMBOLS_PATH} "
+                          "by hand or retry with working Avanza credentials.")
+                    return 1
+                print("[yahoo] continuing with the symbols already cached.")
+        else:
+            print(f"[yahoo] {len(symbol_map)} symbol(s) already resolved")
+
+        result = backfill_prices(
+            symbol_map.values(), start=args.prices_from,
+            batch_size=args.prices_batch_size, cooldown=args.prices_cooldown,
+        )
+        verified = verify_all(symbol_map)
+        missing = len(result["rate_limited"]) + len(result["failed"])
+        if missing:
+            print(f"\n[yahoo] {missing} symbol(s) not downloaded — re-run this "
+                  "command to pick them up before rebuilding the panel.")
+        print("\n[yahoo] done. Re-run --backfill-panel to rebuild the panel "
+              "on the deeper, dividend-adjusted history.")
+        if len(verified["verified"]) < 0.9 * len(symbol_map):
+            print("[yahoo] NOTE: the panel refuses fiscal years covering under "
+                  "60% of the universe, so a partial backfill will not add "
+                  "years until it is complete.")
+        return 0
 
     # --backfill-panel / --validate: both operate on already-saved data/*.csv
     # snapshots, no live Avanza session needed. Combinable in one invocation
@@ -848,6 +1086,18 @@ def main():
     ticker_ids = list(ticker_id_set)
     print(f"Analyzing {len(ticker_ids)} unique tickers from: {', '.join(sources)}")
 
+    # One browser-impersonating session, reused for every ticker. Yahoo blocks
+    # plain yfinance on TLS fingerprint: `yf.Ticker("ABB.ST").cashflow` comes
+    # back EMPTY, which is why `fcfy_pe ratio status` was 0% populated in the
+    # last live run while every other metric was 100%. Through this session the
+    # same call returns a full statement. Falls back to None (previous
+    # behaviour) if curl_cffi is unavailable.
+    from analyzer.yahoo_prices import _impersonating_session
+    yf_session = _impersonating_session()
+    if yf_session is None:
+        print("[WARN] curl_cffi unavailable — Yahoo may block FCFY lookups. "
+              "Run `uv sync` to install it.")
+
     skipped = []
     for ticker_id in tqdm(ticker_ids, desc="Processing tickers"):
         try:
@@ -867,7 +1117,8 @@ def main():
             )
             yahoo = None
         else:
-            yahoo = yf.Ticker(yahoo_symbol)
+            yahoo = (yf.Ticker(yahoo_symbol, session=yf_session)
+                     if yf_session is not None else yf.Ticker(yahoo_symbol))
 
         ticker_name, hist = get_data(
             ticker_id,

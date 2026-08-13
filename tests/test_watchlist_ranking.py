@@ -70,3 +70,21 @@ def test_removed_stock_still_shows_full_metrics(capsys):
     out = capsys.readouterr().out
     assert "Removed 1 stock(s)" in out
     assert "q=0.20, v=0.10, combined=0.02" in out
+
+
+def test_push_top_defaults_to_a_quintile_not_a_handful():
+    """Breadth is what harvests a weak ranking signal: IR ~ IC x sqrt(breadth).
+
+    At IC +0.041 a 10-stock pick discards most of the measured edge, and the
+    top-10's year-to-year excess-return sd was 9.98% against 4.48% at N=25 --
+    noise large enough that no edge of a plausible size is ever observable
+    there. 25 is also ~the top quintile of the ~127-stock universe, which is
+    the bucket the backtest actually validates.
+    """
+    import analyzer.main as main_mod
+
+    # The argparse parser is built inside main(); assert on the function
+    # signature that consumes the value instead.
+    import inspect
+    sig = inspect.signature(main_mod._update_watchlist)
+    assert sig.parameters["top_n"].default == 25

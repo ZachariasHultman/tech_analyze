@@ -83,3 +83,47 @@ def test_one_row_per_company_fiscal_year(monkeypatch):
     # fiscal_year == report_date.year.
     for _, r in out.iterrows():
         assert pd.Timestamp(r["report_date"]).year == r["fiscal_year"]
+
+
+def test_two_reports_in_one_calendar_year_collapse_to_one_row():
+    """fiscal_year = report_date.year, so a company reporting twice in one
+    calendar year produced two rows with the same key.
+
+    Real cases: Munchener Ruck filed 2019-02-06 and 2019-09-26; Siemens filed
+    2019-11-07 and 2019-11-08. Latent until the Yahoo backfill brought 2019
+    into the panel, where it crashed the challenger gate outright (duplicate
+    index labels making the return series longer than the score series) and,
+    short of crashing, would have double-weighted those companies in that
+    year's cross-section. The later report is kept: it is the most recent
+    information available as of that fiscal year.
+    """
+    import pandas as pd
+    from analyzer.panel import dedupe_fiscal_years
+
+    panel = pd.DataFrame([
+        {"company_id": "A", "fiscal_year": 2019, "report_date": "2019-02-06",
+         "roe": 0.1},
+        {"company_id": "A", "fiscal_year": 2019, "report_date": "2019-09-26",
+         "roe": 0.2},
+        {"company_id": "A", "fiscal_year": 2020, "report_date": "2020-02-05",
+         "roe": 0.3},
+        {"company_id": "B", "fiscal_year": 2019, "report_date": "2019-03-01",
+         "roe": 0.4},
+    ])
+    out = dedupe_fiscal_years(panel)
+    assert len(out) == 3
+    assert not out.duplicated(["company_id", "fiscal_year"]).any()
+    kept = out[(out.company_id == "A") & (out.fiscal_year == 2019)]
+    assert kept["report_date"].iloc[0] == "2019-09-26"
+    assert kept["roe"].iloc[0] == 0.2
+
+
+def test_dedupe_is_a_no_op_when_there_are_no_duplicates():
+    import pandas as pd
+    from analyzer.panel import dedupe_fiscal_years
+
+    panel = pd.DataFrame([
+        {"company_id": "A", "fiscal_year": y, "report_date": f"{y}-02-01"}
+        for y in (2019, 2020, 2021)
+    ])
+    assert len(dedupe_fiscal_years(panel)) == 3

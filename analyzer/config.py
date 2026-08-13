@@ -26,6 +26,25 @@ VALUE_METRICS = [
     "nav discount trend status",
 ]
 
+# Minimum companies a fiscal year must have (with a usable forward return)
+# before its cross-section counts as evidence. Deliberately the same number
+# _quintile_spread uses to switch from terciles to quintiles: below it, a
+# "quintile spread" is really a 3-vs-3 comparison.
+#
+# Concretely: FY2021 in the real panel has 9 companies, because the live OHLC
+# window starts mid-2021 and only off-cycle reporters got a price anchor. That
+# year scored IC=+0.867 / spread=+41.6% off three US mega-caps beating two
+# Nordic small-caps, and dragged the reported mean IC from +0.038 to +0.203.
+MIN_CROSS_SECTION = 25
+
+# A fiscal year must also cover this fraction of the companies that *have*
+# fundamentals that year. Size alone is not enough: a partial Yahoo price
+# backfill gives the earliest years a forward return for only the backfilled
+# subset, which clears MIN_CROSS_SECTION while being a biased sample rather
+# than the universe (observed: FY2019 had 27 companies, all of them large-cap
+# names from a 30-symbol partial backfill, against 87 with fundamentals).
+MIN_YEAR_COVERAGE = 0.60
+
 # Tickers excluded from the main analysis loop.
 # 1640718 — unidentified; original reason for exclusion unknown (not
 # recoverable from the repo or git history), kept from prior behavior.

@@ -1,6 +1,6 @@
 """Tests for item 6: panel challenger gate (correlation.py Phase D).
 
-Anything touching real scoring (_score_with_weights) or the gitignored
+Anything touching real scoring (_panel_year_scores) or the gitignored
 metrics.py (_get_default_thresholds) is monkeypatched, so these exercise only
 the gate/walk-forward/objective logic — never secret weight/threshold values.
 """
@@ -27,9 +27,16 @@ def test_scale_weights_from_corrs_floors_and_momentum_cap():
 
 
 # ---- panel objective groups by year and honors return_col ----
-def _fake_score_with_weights(df_ts, metrics, weights, thresholds=None,
-                             return_col="fwd_excess_return_1y"):
-    return df_ts["s"], df_ts[return_col]
+def _fake_panel_year_scores(g, fiscal_year, metrics, weights, thresholds,
+                            return_col):
+    """Stand-in for the vectorised per-year scorer.
+
+    The panel objective now scores through _panel_year_scores (cached score
+    matrix) rather than _score_with_weights. These tests exercise the
+    gate/walk-forward/averaging logic, so they patch that seam and keep using
+    a precomputed "s" column as the score.
+    """
+    return g["s"], g[return_col]
 
 
 def _panel(two_years=True):
@@ -45,7 +52,7 @@ def _panel(two_years=True):
 
 
 def test_panel_avg_quintile_spread_means_over_years(monkeypatch):
-    monkeypatch.setattr(correlation, "_score_with_weights", _fake_score_with_weights)
+    monkeypatch.setattr(correlation, "_panel_year_scores", _fake_panel_year_scores)
     assert math.isclose(
         correlation._panel_avg_quintile_spread({}, _panel(True), ["m"]), 0.0, abs_tol=1e-9
     )
@@ -56,7 +63,7 @@ def test_panel_avg_quintile_spread_means_over_years(monkeypatch):
 
 # ---- walk-forward holds out the target year ----
 def test_leave_one_fiscal_year_out_excludes_held_out(monkeypatch):
-    monkeypatch.setattr(correlation, "_score_with_weights", _fake_score_with_weights)
+    monkeypatch.setattr(correlation, "_panel_year_scores", _fake_panel_year_scores)
     monkeypatch.setattr(correlation, "_get_default_thresholds", lambda: {})
     seen_train_years = []
 
@@ -155,3 +162,26 @@ def test_gate_confidence_is_configurable(monkeypatch):
     assert lowered_res["accept"] is True
     assert lowered_res["confidence"] == 0.85
     assert lowered_res["chosen_weights"] == {"m1": 2.0}
+
+
+def test_duplicate_company_in_a_year_does_not_crash_scoring(monkeypatch):
+    """Regression: duplicate labels made the returns series longer than the
+    scores, so the combined validity mask matched neither and .loc raised
+    IndexError. Real trigger was two 2019 report dates for the same company."""
+    import analyzer.fast_score as fast_score
+
+    idx = ["a", "b", "c", "d", "e", "f"]
+    G = pd.DataFrame({"m": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]}, index=idx)
+    monkeypatch.setattr(correlation, "cached_score_matrix",
+                        lambda *a, **k: (G, []))
+
+    year = pd.DataFrame({
+        "company": idx + ["a"],                       # 'a' appears twice
+        "fwd_excess_return_1y": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.9],
+        "fiscal_year": 2019,
+    })
+    sv, rv = correlation._panel_year_scores(
+        year, 2019, ["m"], {"m": 1.0}, None, "fwd_excess_return_1y")
+    assert sv is not None
+    assert len(sv) == len(rv) == 6
+    assert not sv.index.has_duplicates

@@ -34,6 +34,15 @@ Known limitations (documented, not fixed here):
   and cross-sectional comparison only needs "roughly the same point in time,"
   not exact fiscal-period alignment.
 
+* **Dividend timing is prorated, not exact.** The forward target is a total
+  return (Avanza's close is not dividend-adjusted -- see
+  ``forward_dividend_yield``), but ``dividend_per_share`` carries calendar-year
+  *payment*-year labels rather than ex-dividend dates, so a 12-month window
+  straddling two label years is split by elapsed fraction. Exact when the
+  payout is flat year over year, approximate when it steps. The most recent
+  label year can also be a partial/forecast figure (e.g. Coca-Cola's 2026 entry
+  shows 1.06 against a 2.04 full year), which understates rather than inflates.
+
 * **``earnings quality status``** is permanently all-NaN historically
   (operatingCashFlow is Nordic-only live, never in the CSV snapshot schema).
   The column is kept (not dropped) so the schema matches production 1:1 and the
@@ -44,6 +53,7 @@ Known limitations (documented, not fixed here):
 import numpy as np
 import pandas as pd
 
+from analyzer.config import MIN_CROSS_SECTION, MIN_YEAR_COVERAGE
 from analyzer.metrics import RATIO_SPECS
 from analyzer.historical_calc import (
     get_hist_data,
@@ -314,9 +324,93 @@ def build_fundamentals_panel(data_dir="data") -> pd.DataFrame:
 
             results.append(entry)
 
-    panel = pd.DataFrame(results)
+    panel = dedupe_fiscal_years(pd.DataFrame(results))
     _print_coverage_summary(panel)
     return panel
+
+
+def dedupe_fiscal_years(panel):
+    """One row per (company_id, fiscal_year), keeping the latest report.
+
+    ``fiscal_year`` is ``report_date.year``, so a company that files twice in
+    one calendar year yields two rows sharing a key. Observed in real data:
+    Munchener Ruck filed 2019-02-06 and 2019-09-26; Siemens filed 2019-11-07
+    and 2019-11-08.
+
+    Latent until the Yahoo backfill pulled 2019 into the panel, at which point
+    it crashed the challenger gate -- duplicate index labels make the return
+    series longer than the score series, and the resulting boolean mask no
+    longer matches. Short of crashing it would have quietly double-weighted
+    those companies in that year's cross-section.
+
+    The later report wins: it is the most recent information available as of
+    that fiscal year, consistent with the as-of cut everywhere else.
+    """
+    if panel is None or panel.empty:
+        return panel
+    if not {"company_id", "fiscal_year", "report_date"} <= set(panel.columns):
+        return panel
+    before = len(panel)
+    out = (panel.sort_values(["company_id", "fiscal_year", "report_date"])
+                .drop_duplicates(["company_id", "fiscal_year"], keep="last")
+                .reset_index(drop=True))
+    if len(out) < before:
+        print(f"[panel] collapsed {before - len(out)} duplicate "
+              f"(company, fiscal_year) row(s) — multiple reports in one "
+              f"calendar year; kept the latest")
+    return out
+
+
+def drop_thin_years(df, return_col, min_n=MIN_CROSS_SECTION,
+                    min_coverage=MIN_YEAR_COVERAGE, label="panel"):
+    """Drop fiscal years that cannot serve as evidence.
+
+    Two independent tests, because each catches a failure the other misses:
+
+    * **Size** (``min_n``) -- a year needs enough companies for a top-vs-bottom
+      sort to mean anything. FY2021 had 9, scored as 3-vs-3, and reported
+      IC +0.867.
+    * **Coverage** (``min_coverage``) -- a year also needs to be *the universe*,
+      not a subsample of it. A partial Yahoo backfill gives the earliest years
+      a forward return only for the backfilled companies: FY2019 arrived with
+      27 companies, comfortably over the size floor, every one of them a large
+      cap from a 30-symbol partial run, against 87 with fundamentals that year.
+      Size alone would have admitted it.
+
+    Both are judged on rows with a *usable target*, not raw row count -- FY2026
+    rows exist as the current cross-section but have no forward return yet and
+    must not prop a year up. ``df`` should therefore still contain its
+    target-less rows, which form the coverage denominator.
+
+    Passes the frame through untouched when it is empty or has no
+    ``return_col``, so callers holding pre-target frames aren't silently
+    emptied. Prints what it dropped and why.
+    """
+    if df is None or df.empty or return_col not in df.columns:
+        return df
+    usable = df[df[return_col].notna()]
+    if usable.empty:
+        return df.iloc[0:0]
+
+    sizes = usable.groupby("fiscal_year").size()
+    totals = df.groupby("fiscal_year").size()
+
+    keep, dropped = set(), []
+    for fy, n in sizes.items():
+        total = int(totals.get(fy, n))
+        coverage = n / total if total else 0.0
+        if n < min_n:
+            dropped.append(f"{int(fy)} (n={int(n)} < {min_n})")
+        elif coverage < min_coverage:
+            dropped.append(
+                f"{int(fy)} (only {coverage:.0%} of {total} companies have a "
+                f"return — biased subsample)"
+            )
+        else:
+            keep.add(fy)
+    if dropped:
+        print(f"[{label}] dropped fiscal year(s): {', '.join(dropped)}")
+    return df[df["fiscal_year"].isin(keep)].copy()
 
 
 def load_gate_panel(scores_path="data/panel_scores.csv",
@@ -336,10 +430,94 @@ def load_gate_panel(scores_path="data/panel_scores.csv",
     scores.columns = scores.columns.str.strip()
     ret = scores[["company_id", "fiscal_year", "fwd_excess_return_1y"]]
     merged = fundamentals.merge(ret, on=["company_id", "fiscal_year"], how="left")
-    merged = merged[merged["fwd_excess_return_1y"].notna()].copy()
     if "company" not in merged.columns:
         merged["company"] = merged["company_id"]
-    return merged
+    # Year filtering runs BEFORE dropping target-less rows: those rows are the
+    # denominator for the coverage test. Filtering here covers the challenger
+    # gate and both panel optimizers at once -- all three source their panel
+    # through this function.
+    merged = drop_thin_years(merged, "fwd_excess_return_1y", label="gate")
+    return merged[merged["fwd_excess_return_1y"].notna()].copy()
+
+
+def forward_dividend_yield(dps_df, report_date, price_at_report):
+    """Dividends paid in ``(report_date, report_date + 1y]``, as a yield.
+
+    Avanza's OHLC close is not dividend-adjusted (Handelsbanken A drops ~12.5%
+    on its ex-div day in the raw snapshot; Yahoo's adjusted close moves ~1.2%
+    for the same session), so a price-only forward return systematically
+    understates high-yield stocks -- exactly the ones `dividend yield status`
+    rewards. This adds the missing leg back.
+
+    ``dividend_per_share`` dates are calendar-year labels for the **payment**
+    year, not ex-dividend dates (verified against a real payment:
+    Handelsbanken's ``2025-12-31: 15.0`` is the 15.00 SEK paid 2025-03-27). So
+    the 12-month window starting at ``report_date`` straddles two label years,
+    and we prorate by how much of the window falls in each. When DPS is flat
+    year over year this is exact; it only approximates when the payout changes,
+    and it degrades gracefully (a missing label year falls back to the other).
+
+    Returns 0.0 for a genuine non-payer, NaN when the price is unusable.
+    """
+    if price_at_report is None:
+        return float("nan")
+    try:
+        price = float(price_at_report)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not np.isfinite(price) or price <= 0:
+        return float("nan")
+
+    if not isinstance(dps_df, pd.DataFrame) or dps_df.empty:
+        return 0.0
+    if "date" not in dps_df.columns or "value" not in dps_df.columns:
+        return 0.0
+
+    by_year = {}
+    for _, e in dps_df.iterrows():
+        ts = pd.to_datetime(e["date"], errors="coerce")
+        val = pd.to_numeric(e["value"], errors="coerce")
+        if pd.notna(ts) and pd.notna(val):
+            by_year[ts.year] = float(val)
+    if not by_year:
+        return 0.0
+
+    report_date = pd.Timestamp(report_date)
+    year = report_date.year
+    # Fraction of the next 12 months still inside the report's own label year.
+    w = (365.0 - report_date.dayofyear) / 365.0
+    w = min(max(w, 0.0), 1.0)
+
+    this_year, next_year = by_year.get(year), by_year.get(year + 1)
+    if this_year is None and next_year is None:
+        return 0.0
+    if this_year is None:
+        this_year = next_year
+    if next_year is None:
+        next_year = this_year
+
+    return (w * this_year + (1.0 - w) * next_year) / price
+
+
+def load_verified_yahoo_closes(data_dir="data"):
+    """Verified Yahoo adjusted-close series, or {} when the backfill is absent.
+
+    Kept deliberately quiet and optional: the backfill is a manual Mac-only
+    step, so every consumer must work unchanged without it.
+    """
+    try:
+        from analyzer.yahoo_prices import load_symbol_map, load_verified_closes
+    except Exception:
+        return {}
+    symbol_map = load_symbol_map()
+    if not symbol_map:
+        return {}
+    try:
+        closes, _ = load_verified_closes(symbol_map, data_dir=data_dir)
+        return closes
+    except Exception as exc:
+        print(f"[panel] Yahoo closes unavailable ({exc}); using Avanza prices")
+        return {}
 
 
 def _close_series(ohlc_df):
@@ -382,6 +560,32 @@ def build_scores_panel(fundamentals_df, data_dir="data") -> pd.DataFrame:
         company: _close_series(df_hist.loc[company, "ohlc"])
         for company in df_hist.index
     }
+    dps_map = {
+        company: (df_hist.loc[company, "dividend_per_share"]
+                  if "dividend_per_share" in df_hist.columns else None)
+        for company in df_hist.index
+    }
+
+    # Yahoo's adjusted close already contains dividends and reaches back much
+    # further than Avanza's rolling ~5y window. Where a symbol is *verified*
+    # against the Avanza series (see yahoo_prices.verify_symbol) we use it and
+    # must NOT also add dividends back -- double-counting them would inflate
+    # exactly the stocks the price-only bug used to penalise. `return_basis`
+    # records which leg each row took so this can never be guessed later.
+    yahoo_closes = load_verified_yahoo_closes(data_dir)
+    if yahoo_closes:
+        share = len(yahoo_closes) / max(len(close_map), 1)
+        print(f"[panel] using Yahoo adjusted closes for {len(yahoo_closes)} "
+              f"of {len(close_map)} companies (dividends already included)")
+        if share < 0.9:
+            # A partial backfill is worse than none for the early years: only
+            # the backfilled companies reach back before Avanza's window, so
+            # those cross-sections are a biased subsample rather than the
+            # universe, and MIN_CROSS_SECTION would happily admit them.
+            print(f"  [WARN] only {share:.0%} of the universe has Yahoo prices. "
+                  "Fiscal years older than Avanza's window will contain just "
+                  "that subset -- a biased cross-section, not the universe. "
+                  "Finish --backfill-prices before trusting the extra years.")
 
     out_rows = []
     skipped_no_return = 0
@@ -409,7 +613,9 @@ def build_scores_panel(fundamentals_df, data_dir="data") -> pd.DataFrame:
         for i, r in df_fy.iterrows():
             company = r["company_id"]
             report_date = pd.Timestamp(r["report_date"])
-            close = close_map.get(company, pd.Series(dtype=float))
+            on_yahoo = company in yahoo_closes
+            close = (yahoo_closes[company] if on_yahoo
+                     else close_map.get(company, pd.Series(dtype=float)))
 
             fwd_return = np.nan
             price_at_report = np.nan
@@ -424,6 +630,21 @@ def build_scores_panel(fundamentals_df, data_dir="data") -> pd.DataFrame:
                     fwd_return = price_at_anchor / price_at_report - 1.0
             if np.isnan(fwd_return):
                 skipped_no_return += 1
+
+            # Dividends over the same window. Only meaningful where a price
+            # return exists -- otherwise there is nothing to add it to.
+            # On the Yahoo leg the adjusted close already includes them, so the
+            # add-back is deliberately zero rather than skipped: the column
+            # stays populated and the totals stay comparable across legs.
+            if np.isnan(fwd_return):
+                fwd_dy = np.nan
+            elif on_yahoo:
+                fwd_dy = 0.0
+            else:
+                fwd_dy = forward_dividend_yield(
+                    dps_map.get(company), report_date, price_at_report
+                )
+            fwd_total = fwd_return + fwd_dy if not np.isnan(fwd_dy) else np.nan
 
             row = {
                 "company_id": company,
@@ -442,22 +663,39 @@ def build_scores_panel(fundamentals_df, data_dir="data") -> pd.DataFrame:
                 "price_at_report": price_at_report,
                 "price_at_anchor": price_at_anchor,
                 "fwd_return_1y": fwd_return,
+                "fwd_dividend_yield_1y": fwd_dy,
+                "fwd_total_return_1y": fwd_total,
+                "return_basis": ("yahoo_adjusted" if on_yahoo
+                                 else "avanza_price_plus_dps"),
             }
             for sc in eq_score_cols:
                 row[sc] = _lookup(scored_eq, company, sc)
             fy_rows.append(row)
 
         # --- Step 3: demean within this fiscal year ---
-        returns = np.array(
-            [r["fwd_return_1y"] for r in fy_rows], dtype=float
-        )
-        mask = ~np.isnan(returns)
-        universe_mean = float(returns[mask].mean()) if mask.any() else np.nan
+        # fwd_excess_return_1y is the target every downstream consumer reads
+        # (the optimizers, the challenger gate, validation), and it is now
+        # TOTAL return. The price-only version is kept alongside under an
+        # explicit name so nothing can read a stale meaning by accident.
+        def _demean(key):
+            vals = np.array([r[key] for r in fy_rows], dtype=float)
+            mask = ~np.isnan(vals)
+            mean = float(vals[mask].mean()) if mask.any() else np.nan
+            return mean
+
+        price_mean = _demean("fwd_return_1y")
+        total_mean = _demean("fwd_total_return_1y")
         for r in fy_rows:
-            r["universe_mean_return_that_year"] = universe_mean
+            r["universe_mean_return_that_year"] = price_mean
+            r["universe_mean_total_return_that_year"] = total_mean
+            r["fwd_excess_price_return_1y"] = (
+                r["fwd_return_1y"] - price_mean
+                if not np.isnan(r["fwd_return_1y"]) and not np.isnan(price_mean)
+                else np.nan
+            )
             r["fwd_excess_return_1y"] = (
-                r["fwd_return_1y"] - universe_mean
-                if not np.isnan(r["fwd_return_1y"]) and not np.isnan(universe_mean)
+                r["fwd_total_return_1y"] - total_mean
+                if not np.isnan(r["fwd_total_return_1y"]) and not np.isnan(total_mean)
                 else np.nan
             )
         out_rows.extend(fy_rows)

@@ -56,7 +56,23 @@ Scoring is **cross-sectional** — each metric is ranked relative to all other s
 
 Each metric feeds into two "sleeves" — **quality** (business health: Piotroski F-Score, margin stability, ROE, leverage, momentum, etc.) and **value** (cheapness: P/E, FCF yield, dividend yield). `combined_score = quality_pct × value_pct` is the actual ranking key, favoring stocks that are both good *and* cheap, not just one or the other.
 
-The strongest weight variant (`optimization_results_panel.json`, the default once it exists) is validated out-of-sample: ranking companies by `combined_score` within each historical fiscal year and checking whether the top quintile actually outperformed the bottom quintile the following year, gated by a Deflated Sharpe Ratio bar that corrects for how many weight combinations were tried. It's a cross-sectional tool — good for ranking a basket of stocks against each other, not for predicting any single stock's outcome. (An earlier per-company/per-sector "reliability" score, tracking whether an individual company's own score history predicted its own returns, was tried and dropped — the data doesn't have enough depth per company to support it, see git history if curious.)
+It's a cross-sectional tool — good for ranking a basket of stocks against each other, not for predicting any single stock's outcome.
+
+### What is and isn't established
+
+Measured on 7 fiscal years (2019–2025, 813 company-years, dividend-inclusive returns):
+
+| Claim | Evidence |
+|---|---|
+| The ranking beats chance | **Yes.** IC +0.041, t=+3.29, p=0.017, positive in 6 of 7 years |
+| The concentrated pick beats the universe | **Not established.** Top-10 excess return +0.45%/yr, t=0.12, p=0.91 |
+| Optimized weights beat equal weight | **No.** Rejected twice; permutation p=0.41, and optimized OOS IC is negative in 5 of 7 years. The system runs equal weights |
+
+Those first two are not in tension: IC measures the whole ordering, the pick measures only the tail. A 10-stock bucket at ~36% cross-sectional return dispersion has a standard error of ~11.5%/yr — **a 2%/yr edge there would take ~208 years to detect**. That is a permanent consequence of universe size, not a data gap to be closed, which is why `--push-top` defaults to a quintile: information ratio scales as IC × √breadth, so breadth is how a weak-but-real ranking signal is actually harvested.
+
+Survivorship bias is not corrected for (Avanza exposes no point-in-time index membership) and inflates all of the above.
+
+(An earlier per-company/per-sector "reliability" score, tracking whether an individual company's own score history predicted its own returns, was tried and dropped — the data doesn't have enough depth per company to support it, see git history if curious.)
 
 ---
 
@@ -81,7 +97,7 @@ uv run python3 main.py --preset omxs30 omxs-mid
 # Combine a personal watchlist with a preset
 uv run python3 main.py --watchlists Test --preset omxs30
 
-# Push top 10 scoring stocks to "Bör köpa" (default)
+# Push top 25 scoring stocks to "Bör köpa" (default)
 uv run python3 main.py --push
 
 # Push top 5 to a different watchlist
@@ -131,9 +147,15 @@ uv run python3 main.py --optimize --optimize-combo --challenger-confidence 0.925
 
 `--backfill-panel` builds a fiscal-year cross-sectional panel from your saved `data/*.csv` snapshots (`data/panel_fundamentals.csv` + `data/panel_scores.csv`); `--validate` runs a diagnostic battery against it (quintile sorts, Information Coefficient, Fama-MacBeth) — useful for sanity-checking before optimizing, not required for daily use.
 
-`--optimize`/`--optimize-combo` compute per-metric correlations against historical returns and save weights to `optimization_results_individual.json` / `_combo.json`. If `data/panel_scores.csv` already exists (i.e. you ran `--backfill-panel` first), this also automatically runs an out-of-sample challenger test: rank companies by the optimized weights within each historical fiscal year, compare the top-vs-bottom quintile spread against equal-weighting via leave-one-fiscal-year-out cross-validation, and gate acceptance on a Deflated Sharpe Ratio bar (`--challenger-confidence`, default 0.925, correcting for how many weight combinations were tried). If it clears the bar, the result is saved to `optimization_results_panel.json` — the new default weight source for every future run, no flag needed.
+`--optimize`/`--optimize-combo` compute per-metric correlations against historical returns and save weights to `optimization_results_individual.json` / `_combo.json`. If `data/panel_scores.csv` already exists (i.e. you ran `--backfill-panel` first), this also automatically runs an out-of-sample challenger test: rank companies by the optimized weights within each historical fiscal year, compare the top-vs-bottom quintile spread against equal-weighting via leave-one-fiscal-year-out cross-validation, and gate acceptance on a Deflated Sharpe Ratio bar (`--challenger-confidence`, default 0.925). If it clears the bar, the result is saved to `optimization_results_panel.json` — the default weight source for every future run, no flag needed.
 
-> **Note:** the backtest previously had a look-ahead bug (predictors were measured across the same window as the return they were correlated against). This is now fixed, but it means any `optimization_results_*.json` saved before the fix are invalid — re-run this step at least once after upgrading.
+> **These are two separate commands, not one.** `--backfill-panel` (and `--validate`) return before the optimizer ever runs, so `main.py --backfill-panel --optimize` silently does only the backfill. Always run them as two invocations, in that order.
+
+**`--permutations` (default 200).** The DSR bar needs to know how good a result the search reaches by luck alone. It used to approximate that from the spread of objective values across grid candidates — a number that moves with how the grid was configured rather than with the evidence (the panel search evaluates ~1200 candidates but produces only ~90 distinct values, so duplicates skewed it in both directions at once). Instead the target is now shuffled *within* each fiscal year and the optimizer refitted 200 times, which measures the null directly. Costs a few minutes on a Mac; `--permutations 0` skips it and falls back to the old approximation, which the output then explicitly labels as not meaningful.
+
+**What the gate prints.** Alongside the DSR you get `beat equal weight in N of M held-out years` and a permutation p-value. At four usable fiscal years no statistic has real power, so that blunt count is often the most informative line in the report.
+
+> **Note:** two past bugs invalidate older weight files. (1) The backtest had a look-ahead bug — predictors measured across the same window as the return. (2) The forward-return target was price-only, while Avanza's OHLC close is not dividend-adjusted, so every high-yield stock was penalised by roughly its own yield. Both are fixed, but any `optimization_results_*.json` from before must be regenerated — re-run this step at least once after upgrading.
 
 ---
 
@@ -142,7 +164,7 @@ uv run python3 main.py --optimize --optimize-combo --challenger-confidence 0.925
 Optimized weights are loaded automatically — no extra flags needed.
 
 ```bash
-# Score a watchlist and push top 10 to "Bör köpa"
+# Score a watchlist and push top 25 to "Bör köpa"
 uv run python3 main.py --watchlists Äger --push
 
 # Just score, no push
@@ -232,6 +254,23 @@ uv run python3 main.py --watchlists Äger --push --sell-from Äger --email
 
 Sends a plain-text email with the watchlist update and any sell signals. Requires `EMAIL_*` vars in `.env` (see Setup).
 
+Every email opens with a **system status block** describing the weights it is recommending with:
+
+```
+SYSTEM STATUS  (weights fitted 2026-08-12, panel challenger: ACCEPTED)
+  Out-of-sample, 4 fiscal years (2022-2025), total return (price + dividends):
+    IC by year:   2022 -0.050   2023 +0.081   2024 +0.119   2025 +0.136
+    mean IC +0.072  |  top-bottom spread +5.5%/yr
+    beat equal weight in 4 of 4 held-out years
+    permutation test (200 refits on shuffled targets): p=0.015
+  CONFIDENCE: LOW — 4 periods only (t=+1.70, p=0.19). Directional, not proof.
+  Universe: 127 stocks, survivorship-biased (today's list applied backwards).
+```
+
+Read `ACCEPTED` vs `REJECTED` first: on a reject the system silently runs equal weight, and the reported numbers then describe equal weight rather than the challenger that was turned down. The `CONFIDENCE: LOW` line is permanent, not a placeholder — four fiscal years cannot support a significance claim, and a tidy top-10 list otherwise implies more than the data does.
+
+The block is read from the `validation` section of `optimization_results_panel.json`, so the one file you already copy to the Pi carries it. A Pi holding an older file, or none, prints a short "unknown" notice and still sends a complete email.
+
 ---
 
 ## Weight variants
@@ -266,7 +305,7 @@ Default (no flag): prefers `optimization_results_panel.json` when it exists — 
 | `--use-panel` | Force the panel challenger's out-of-sample-validated weights |
 | `--push` | Push top-scoring stocks to an Avanza watchlist |
 | `--push-to NAME` | Which watchlist to push to (default: `Bör köpa`) |
-| `--push-top N` | How many stocks to push (default: 10) |
+| `--push-top N` | How many stocks to push (default: 25 — breadth, see below) |
 | `--sell-from NAME` | Check this watchlist for sell signals |
 | `--email` | Send email summary (requires `EMAIL_*` in `.env`) |
 
