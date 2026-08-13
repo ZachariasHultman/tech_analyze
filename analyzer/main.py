@@ -887,6 +887,26 @@ def main():
              "pause. Raise it for a slow overnight run.",
     )
     ap.add_argument(
+        "--fetch-fx",
+        action="store_true",
+        help="Mac-only manual step: fetch daily ECB reference rates (via "
+             "Frankfurter, no API key) into data/fx_sek.csv so the panel's "
+             "forward return can be computed in SEK. 44% of the universe is "
+             "not SEK-listed and USD/SEK moved +24% over the sample, so "
+             "without this the within-year demeaning attributes a shared FX "
+             "move to whatever metric correlates with being US-listed. "
+             "Idempotent -- re-running when the cache already covers the "
+             "range makes no requests. The Pi never needs this; the panel "
+             "falls back to listing currency when the file is absent.",
+    )
+    ap.add_argument(
+        "--fx-from",
+        default="2015-01-01",
+        metavar="YYYY-MM-DD",
+        help="Earliest date for --fetch-fx (default 2015-01-01, matching "
+             "--prices-from).",
+    )
+    ap.add_argument(
         "--permutations",
         type=int,
         default=200,
@@ -959,6 +979,22 @@ def main():
                 save_panel_optimization_results(gate_result)
             except Exception as e:
                 print(f"[challenger] skipped (panel gate error: {e})")
+
+    # --fetch-fx: its own terminal branch, same shape as --backfill-prices --
+    # a manual Mac-only fetch whose output is then consumed by
+    # --backfill-panel. No Avanza session needed.
+    if args.fetch_fx:
+        from analyzer.fx import fetch_sek_rates
+        end = date.today().strftime("%Y-%m-%d")
+        try:
+            fetch_sek_rates(args.fx_from, end)
+        except Exception as exc:
+            print(f"[fx] fetch failed ({exc}) — the panel keeps working "
+                  "without the cache, in listing currency.")
+            return 1
+        print("\n[fx] done. Re-run --backfill-panel to rebuild the panel with "
+              "SEK forward returns.")
+        return 0
 
     # --backfill-prices: offline apart from a one-time symbol resolution, and
     # deliberately its own terminal branch -- it is a slow manual step whose

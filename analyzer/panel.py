@@ -52,6 +52,26 @@ Known limitations (documented, not fixed here):
   label year can also be a partial/forecast figure (e.g. Coca-Cola's 2026 entry
   shows 1.06 against a 2.04 full year), which understates rather than inflates.
 
+* **Only the target is in SEK; the predictors are not.** ``build_scores_panel``
+  converts prices to SEK before taking the forward return (see
+  ``convert_closes_to_sek`` / ``analyzer.fx``), because a mixed-currency target
+  demeaned within a fiscal year hands every US name's shared FX move to
+  whatever metric correlates with being US-listed. The predictor side is
+  untouched: ``build_fundamentals_panel``'s ``price momentum status`` and the
+  price CAGR feeding ``cagr_pe ratio status`` still come from local-currency
+  Avanza OHLC. That asymmetry is a deliberate scope boundary for
+  reviewability, not an oversight — momentum measured in listing currency
+  against a return measured in SEK is a real (small) inconsistency.
+
+* **The Avanza fallback leg is never converted either.** Conversion keys off
+  the Yahoo exchange suffix, so it only reaches companies whose Yahoo series
+  verified. Currently 4 non-SEK companies fail verification and fall back to
+  Avanza (1 ``.DE``, 2 ``.L``, 1 US) — their returns stay in listing currency.
+  Note the legs also disagree on units for the same stock: Yahoo quotes
+  London names in pence, Avanza in pounds (Glencore 5.129), which is why the
+  pence divisor lives in ``fx.to_sek`` and Avanza series must not be routed
+  through it. ``return_basis`` records the numeraire per row.
+
 * **``earnings quality status``** is permanently all-NaN historically
   (operatingCashFlow is Nordic-only live, never in the CSV snapshot schema).
   The column is kept (not dropped) so the schema matches production 1:1 and the
@@ -509,24 +529,80 @@ def forward_dividend_yield(dps_df, report_date, price_at_report):
 
 
 def load_verified_yahoo_closes(data_dir="data"):
-    """Verified Yahoo adjusted-close series, or {} when the backfill is absent.
+    """``({company: adjusted close}, {company: yahoo symbol})``.
 
-    Kept deliberately quiet and optional: the backfill is a manual Mac-only
-    step, so every consumer must work unchanged without it.
+    Both empty when the backfill is absent. Kept deliberately quiet and
+    optional: the backfill is a manual Mac-only step, so every consumer must
+    work unchanged without it. The symbol map comes back alongside the closes
+    because the exchange suffix is what identifies each series' currency.
     """
     try:
         from analyzer.yahoo_prices import load_symbol_map, load_verified_closes
     except Exception:
-        return {}
+        return {}, {}
     symbol_map = load_symbol_map()
     if not symbol_map:
-        return {}
+        return {}, {}
     try:
         closes, _ = load_verified_closes(symbol_map, data_dir=data_dir)
-        return closes
+        return closes, symbol_map
     except Exception as exc:
         print(f"[panel] Yahoo closes unavailable ({exc}); using Avanza prices")
-        return {}
+        return {}, {}
+
+
+def convert_closes_to_sek(closes, symbol_map, rates=None):
+    """Restate every Yahoo close series in SEK.
+
+    Returns ``(converted_closes, basis_by_company)``, where the basis string is
+    recorded verbatim in the panel's ``return_basis`` column so the numeraire a
+    row was measured in can never be inferred after the fact.
+
+    Degrades to a no-op on every failure path -- absent cache, unknown suffix,
+    currency missing from the cache -- because ``data/fx_sek.csv`` is a manual
+    Mac-only artefact and the Pi must never depend on it. Each of those paths
+    prints what it skipped and why.
+    """
+    if not closes:
+        return {}, {}
+    try:
+        from analyzer.fx import FX_CACHE_PATH, currency_for_symbol, load_sek_rates, to_sek
+    except Exception as exc:
+        print(f"[panel] FX module unavailable ({exc}); prices left in listing "
+              "currency")
+        return closes, {c: "unconverted" for c in closes}
+
+    if rates is None:
+        rates = load_sek_rates()
+    if rates is None:
+        print(f"[panel] no FX cache at {FX_CACHE_PATH} — forward returns stay "
+              "in each stock's listing currency (mixed-currency target; run "
+              "--fetch-fx to fix)")
+        return closes, {c: "unconverted" for c in closes}
+
+    out, basis, counts, unconverted = {}, {}, {}, []
+    for company, series in closes.items():
+        currency = currency_for_symbol(symbol_map.get(company))
+        if currency is None:
+            out[company] = series
+            basis[company] = "unconverted:unknown-currency"
+            unconverted.append(f"{company} ({symbol_map.get(company)})")
+            continue
+        try:
+            out[company] = to_sek(series, currency, rates)
+        except KeyError:
+            out[company] = series
+            basis[company] = f"unconverted:no-{currency}-rate"
+            unconverted.append(f"{company} ({currency})")
+            continue
+        basis[company] = "SEK" if currency == "SEK" else f"{currency}->SEK"
+        counts[currency] = counts.get(currency, 0) + 1
+
+    summary = ", ".join(f"{n}x {c}" for c, n in sorted(counts.items()))
+    print(f"[panel] forward returns in SEK — {summary}")
+    if unconverted:
+        print(f"  [WARN] left in listing currency: {', '.join(unconverted)}")
+    return out, basis
 
 
 def _close_series(ohlc_df):
@@ -581,7 +657,7 @@ def build_scores_panel(fundamentals_df, data_dir="data") -> pd.DataFrame:
     # must NOT also add dividends back -- double-counting them would inflate
     # exactly the stocks the price-only bug used to penalise. `return_basis`
     # records which leg each row took so this can never be guessed later.
-    yahoo_closes = load_verified_yahoo_closes(data_dir)
+    yahoo_closes, yahoo_symbols = load_verified_yahoo_closes(data_dir)
     if yahoo_closes:
         share = len(yahoo_closes) / max(len(close_map), 1)
         print(f"[panel] using Yahoo adjusted closes for {len(yahoo_closes)} "
@@ -595,6 +671,13 @@ def build_scores_panel(fundamentals_df, data_dir="data") -> pd.DataFrame:
                   "Fiscal years older than Avanza's window will contain just "
                   "that subset -- a biased cross-section, not the universe. "
                   "Finish --backfill-prices before trusting the extra years.")
+
+    # The one and only place prices change numeraire. Doing it here -- on the
+    # close map, before any return is taken -- is what makes double-conversion
+    # structurally impossible: nothing downstream sees the listing-currency
+    # series again. The dividend add-back is unaffected because it is exactly
+    # zero on this leg (Yahoo's adjusted close already carries dividends).
+    yahoo_closes, sek_basis = convert_closes_to_sek(yahoo_closes, yahoo_symbols)
 
     out_rows = []
     skipped_no_return = 0
@@ -674,8 +757,10 @@ def build_scores_panel(fundamentals_df, data_dir="data") -> pd.DataFrame:
                 "fwd_return_1y": fwd_return,
                 "fwd_dividend_yield_1y": fwd_dy,
                 "fwd_total_return_1y": fwd_total,
-                "return_basis": ("yahoo_adjusted" if on_yahoo
-                                 else "avanza_price_plus_dps"),
+                "return_basis": (
+                    f"yahoo_adjusted:{sek_basis.get(company, 'unconverted')}"
+                    if on_yahoo else "avanza_price_plus_dps:unconverted"
+                ),
             }
             for sc in eq_score_cols:
                 row[sc] = _lookup(scored_eq, company, sc)

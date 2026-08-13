@@ -208,6 +208,127 @@ def ic_time_series(panel_df, score_col=SCORE_COL, return_col=RETURN_COL):
     return {"per_year": ics, "mean_ic": mean_ic, "std_ic": std_ic, "icir": icir}
 
 
+# ------------------------------------------------------- currency-neutral IC
+# A currency cohort needs at least this many rows in a year to be demeaned.
+# A 1-company cohort demeans to exactly zero, which is a fake perfect
+# neutralisation rather than a measurement.
+_MIN_COHORT = 5
+
+
+def _load_currency_map():
+    """{company_id: currency} from the Yahoo symbol map, or {} when absent."""
+    try:
+        from analyzer.fx import currency_for_symbol
+        from analyzer.yahoo_prices import load_symbol_map
+    except Exception:
+        return {}
+    try:
+        return {
+            company: currency_for_symbol(symbol)
+            for company, symbol in load_symbol_map().items()
+            if currency_for_symbol(symbol)
+        }
+    except Exception:
+        return {}
+
+
+def currency_neutral_ic(panel_df, currency_map=None, score_col=SCORE_COL,
+                        total_return_col="fwd_total_return_1y"):
+    """IC against a target demeaned within (fiscal_year, currency).
+
+    The SEK target is correct -- it is what a SEK investor earns -- but it
+    gives every USD-listed name the same USD/SEK move, so a currency cohort
+    sits inside the target as a shared factor that within-year demeaning does
+    not remove. On the real panel, currency-within-year explains 5.3% of return
+    variance (year itself explains 6.7%), and neutralising it drops the pooled
+    quintile spread from +0.97% to +0.23%: most of the headline spread was
+    currency exposure, not company selection.
+
+    Reported *alongside* the headline IC, never instead of it. The raw number
+    is what you earn; this one is what you are skilled at. A score that merely
+    knows which currency a stock trades in scores well on the former and zero
+    on the latter.
+
+    Returns None when the currency map or the total-return column is missing,
+    so a fresh clone with no Yahoo backfill still runs --validate.
+    """
+    if panel_df is None or panel_df.empty or not currency_map:
+        return None
+    if total_return_col not in panel_df.columns:
+        return None
+
+    df = panel_df.copy()
+    df["_ccy"] = df["company_id"].map(currency_map)
+    df = df.dropna(subset=["_ccy", total_return_col, score_col])
+    if df.empty or df["_ccy"].nunique() < 1:
+        return None
+
+    # Variance attributable to the currency cohort, over and above the year.
+    total = df[total_return_col]
+    grand = total.mean()
+    ss_tot = float(((total - grand) ** 2).sum())
+    year_mean = df.groupby("fiscal_year")[total_return_col].transform("mean")
+    ccy_mean = df.groupby(["fiscal_year", "_ccy"])[total_return_col].transform("mean")
+    ccy_share = (float(((ccy_mean - year_mean) ** 2).sum()) / ss_tot
+                 if ss_tot > 0 else 0.0)
+
+    sizes = df.groupby(["fiscal_year", "_ccy"])[total_return_col].transform("size")
+    keep = df[sizes >= _MIN_COHORT].copy()
+    if keep.empty:
+        return None
+    keep["_neutral"] = keep[total_return_col] - keep.groupby(
+        ["fiscal_year", "_ccy"])[total_return_col].transform("mean")
+    keep["_raw"] = keep[total_return_col] - keep.groupby(
+        "fiscal_year")[total_return_col].transform("mean")
+
+    per_year, ics, ics_raw = [], [], []
+    for fy, g in keep.groupby("fiscal_year"):
+        if len(g) < 25:
+            continue
+        rho, _ = sp_stats.spearmanr(g[score_col], g["_neutral"])
+        rho_raw, _ = sp_stats.spearmanr(g[score_col], g["_raw"])
+        if np.isnan(rho) or np.isnan(rho_raw):
+            continue
+        per_year.append((int(fy), float(rho), float(rho_raw), len(g)))
+        ics.append(float(rho))
+        ics_raw.append(float(rho_raw))
+    if not ics:
+        return None
+
+    t_stat, p_value = (sp_stats.ttest_1samp(ics, 0.0) if len(ics) > 1
+                       else (np.nan, np.nan))
+    return {
+        "per_year": per_year,
+        "mean_ic": float(np.mean(ics)),
+        "mean_ic_raw": float(np.mean(ics_raw)),
+        "std_ic": float(np.std(ics, ddof=1)) if len(ics) > 1 else float("nan"),
+        "t_stat": float(t_stat), "p_value": float(p_value),
+        "currency_variance_share": ccy_share,
+        "cohorts_used": sorted(keep["_ccy"].unique()),
+    }
+
+
+def report_currency_neutral_ic(panel_df, currency_map=None):
+    """Print the currency-neutral IC beside the headline one."""
+    print("\n--- Currency-neutral IC (stock picking vs currency exposure) ---")
+    res = currency_neutral_ic(panel_df, currency_map=currency_map)
+    if res is None:
+        print("  skipped — no currency map (run --backfill-prices) or no "
+              "total-return column.")
+        return None
+    print(f"  currency-within-year explains {res['currency_variance_share']:.1%} "
+          f"of forward-return variance  (cohorts: {', '.join(res['cohorts_used'])})")
+    for fy, rho, rho_raw, n in res["per_year"]:
+        print(f"  {fy}: neutral IC={rho:+.3f}  (raw {rho_raw:+.3f})  n={n}")
+    print(f"  mean neutral IC={res['mean_ic']:+.3f}  vs raw {res['mean_ic_raw']:+.3f}"
+          f"   t={res['t_stat']:+.2f} p={res['p_value']:.3f}")
+    print("  Raw is what a SEK investor earns; neutral is what the score picks.")
+    if res["mean_ic_raw"] != 0 and res["mean_ic"] < 0.5 * res["mean_ic_raw"]:
+        print("  [WARN] over half the raw edge disappears once currency is "
+              "neutralised — the score is partly a currency bet.")
+    return res
+
+
 def per_metric_ic(panel_df, return_col=RETURN_COL):
     """Per-metric IC grouped by fiscal year — which individual metrics carry
     signal. Adapted from baseline_correlation's per-metric Spearman loop."""
@@ -277,6 +398,7 @@ def run_validation_battery(panel_scores_path="data/panel_scores.csv",
     sanity = run_sanity_checks(panel, fundamentals)
     quintiles = quintile_sorts_by_fiscal_year(panel)
     ic = ic_time_series(panel)
+    ccy_ic = report_currency_neutral_ic(panel, currency_map=_load_currency_map())
     metric_ic = per_metric_ic(panel)
     fm_single = run_fama_macbeth_report(panel, [SCORE_COL], "single-factor composite")
     metric_cols = _usable_metric_cols(panel)
@@ -292,6 +414,7 @@ def run_validation_battery(panel_scores_path="data/panel_scores.csv",
         "sanity": sanity,
         "quintiles": quintiles,
         "ic": ic,
+        "currency_neutral_ic": ccy_ic,
         "per_metric_ic": metric_ic,
         "fama_macbeth_single": fm_single,
         "fama_macbeth_multi": fm_multi,

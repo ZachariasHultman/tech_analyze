@@ -46,3 +46,5 @@ logs/
 .venv/
 
 CLAUDE.md
+# Local Claude Code permissions (machine-specific)
+.claude/settings.local.json

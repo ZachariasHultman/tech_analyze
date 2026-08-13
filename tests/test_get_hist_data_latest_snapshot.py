@@ -39,3 +39,16 @@ def test_get_hist_data_one_row_per_company_with_multiple_companies(tmp_path):
 
     assert sorted(df.index) == ["Acme 123", "Beta 456"]
     assert df.loc["Acme 123", "pe"].iloc[0]["value"] == 20
+
+
+def test_fx_cache_in_data_dir_is_not_read_as_a_snapshot(tmp_path):
+    # data/fx_sek.csv is a date-indexed rate table, not a company snapshot.
+    # Before it was skipped it crashed parse_ohlc_series on the first float.
+    _write_snapshot(tmp_path, "Acme 123", "2026-06-03", pe_value=20)
+    pd.DataFrame({"USD": [9.5], "EUR": [11.0]},
+                 index=pd.to_datetime(["2026-06-03"])).to_csv(
+                     tmp_path / "fx_sek.csv", index_label="date")
+
+    df = get_hist_data(data_dir=str(tmp_path))
+
+    assert list(df.index) == ["Acme 123"]

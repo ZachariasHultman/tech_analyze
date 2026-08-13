@@ -181,6 +181,10 @@ def convert_cell(cell, col):
     return cell
 
 
+# Files that live in data/ but are not per-company snapshots.
+_NON_SNAPSHOT_FILES = {"fx_sek.csv"}
+
+
 def get_hist_data(data_dir="data"):
     frames = []
     for csv in Path(data_dir).glob("*.csv"):
@@ -191,7 +195,10 @@ def get_hist_data(data_dir="data"):
         # snapshots would crash this reader (and thus the old --correlate
         # pipeline). No real snapshot is ever named panel_*, so this preserves
         # behavior exactly for every legitimate input.
-        if csv.name.startswith("panel_"):
+        # The FX rate cache (fx_sek.csv) is skipped for the same reason: it is
+        # a date-indexed rate table, and reading it as a snapshot crashes
+        # parse_ohlc_series.
+        if csv.name.startswith("panel_") or csv.name in _NON_SNAPSHOT_FILES:
             continue
         key = csv.stem.split("_")[0]
         # filename is "<key>_<YYYY-MM-DD>.csv" — last underscore-separated
