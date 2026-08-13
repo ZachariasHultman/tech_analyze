@@ -1,8 +1,16 @@
-"""_update_watchlist ranks purely by combined_score -- reliability (old
-company_reliability.csv-based tilt, and its short-lived panel-based
-replacement) was removed entirely: neither mechanism could produce a
-differentiated signal given the live OHLC depth ceiling, so ranking no
-longer reads any reliability file/state at all.
+"""_update_watchlist ranks by pts, with no reliability involved.
+
+Ranking moved from combined_score to pts: over 7 fiscal years pts carried the
+only significant out-of-sample signal (IC +0.041, t=+3.29, p=0.017, positive
+in 6 of 7 years), while combined_score reached only p=0.18 despite a higher
+point estimate -- multiplying two noisy percentiles amplifies the noise. The
+sleeve gate still filters on quality_pct/value_pct; only the ordering within
+the qualifying set changed.
+
+Reliability (the old company_reliability.csv tilt and its short-lived
+panel-based replacement) was removed entirely: neither could produce a
+differentiated signal given the live OHLC depth ceiling, so ranking reads no
+reliability file or state at all.
 """
 import pandas as pd
 
@@ -24,7 +32,7 @@ class _FakeAvanza:
         pass
 
 
-def test_ranks_purely_by_combined_score_no_reliability_involved(capsys):
+def test_ranks_by_points_not_combined_score(capsys):
     manager = SummaryManager()
     manager.summary = pd.DataFrame(
         {
@@ -32,7 +40,7 @@ def test_ranks_purely_by_combined_score_no_reliability_involved(capsys):
             "quality_pct": [0.8, 0.9],
             "value_pct": [0.7, 0.7],
             # Beta has the lower combined_score despite higher points --
-            # ranking must follow combined_score, not points.
+            # ranking must follow pts, so Beta comes first.
             "combined_score": [0.56, 0.50],
         },
         index=["Alpha AB 111", "Beta AB 222"],
@@ -43,11 +51,12 @@ def test_ranks_purely_by_combined_score_no_reliability_involved(capsys):
     result = main._update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa")
 
     added_names = [r[0] for r in result["added"]]
-    assert added_names == ["Alpha AB 111", "Beta AB 222"]
+    assert added_names == ["Beta AB 222", "Alpha AB 111"]
 
     out = capsys.readouterr().out
     assert "r=" not in out
     assert "reliability" not in out.lower()
+    # combined is still reported, it just no longer decides the order
     assert "(pts=+1.00, q=0.80, v=0.70, combined=0.56)" in out
 
 

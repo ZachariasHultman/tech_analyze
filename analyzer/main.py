@@ -312,7 +312,9 @@ def _format_optimizer_status(status):
 LEGEND_LINES = [
     "q = quality percentile (0-1, peer-ranked business health)",
     "v = value percentile (0-1, peer-ranked cheapness)",
-    "combined = q x v -- the actual ranking key",
+    "pts = summed metric score -- the ranking key (the validated one:",
+    "      IC +0.041, p=0.017 across 7 fiscal years, vs p=0.18 for q x v)",
+    "combined = q x v -- shown for context, and the sleeve gate still applies",
 ]
 
 
@@ -369,7 +371,13 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
         (combined["_quality"] >= SLEEVE_GATE_MIN)
         & (combined["_value"] >= SLEEVE_GATE_MIN)
     ].copy()
-    qualified = qualified.sort_values("_combined_score", ascending=False).head(top_n)
+    # Ranked on pts, not combined_score. Over 7 fiscal years pts carried the
+    # only significant signal (IC +0.041, t=+3.29, p=0.017, positive in 6 of 7
+    # years) while combined_score -- despite a higher point estimate -- was not
+    # significant (p=0.18, 5 of 7) because multiplying two noisy percentiles
+    # amplifies the noise. The sleeve gate above still enforces "decent on
+    # both dimensions"; this only changes the ordering within that set.
+    qualified = qualified.sort_values("_pts", ascending=False).head(top_n)
 
     # Build set of orderbook IDs that should be on the list
     qualified_ids = set()
@@ -447,7 +455,7 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
 
     # Report
     print(f"\n{'=' * 70}")
-    print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by combined_score)")
+    print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by pts)")
     print(f"{'=' * 70}")
     for line in _format_optimizer_status(_load_optimizer_status()):
         print(f"  {line}")
@@ -564,11 +572,11 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
     if push_results:
         n = push_results["top_n"]
         lines.append("=" * 50)
-        lines.append(f"  CONSIDER BUYING (top {n})")
+        lines.append(f"  CONSIDER BUYING (top {n} by pts)")
         lines.append("=" * 50)
 
         top10 = push_results["added"] + push_results["already"]
-        top10.sort(key=lambda x: x[4], reverse=True)  # sort by combined_score
+        top10.sort(key=lambda x: (x[1] is not None, x[1]), reverse=True)  # by pts
         added_set = {r[0] for r in push_results["added"]}
         for r in top10:
             tag = "NEW" if r[0] in added_set else "   "

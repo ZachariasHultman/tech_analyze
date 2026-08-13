@@ -510,12 +510,19 @@ class SummaryManager:
             return df[ordered]
 
         def _rank_key(df):
-            """Sort key: combined_score, falling back to points when the
-            sleeve columns aren't present. Indexed by company."""
-            if "combined_score" in df.columns:
-                base = pd.to_numeric(df["combined_score"], errors="coerce")
-            elif "points" in df.columns:
+            """Sort key: points, falling back to combined_score when absent.
+
+            points is the ranking key everywhere now -- it is the only score
+            with a significant out-of-sample IC (+0.041, p=0.017 over 7 fiscal
+            years) where combined_score reached p=0.18. Keeping the display
+            order consistent with the watchlist order matters: they used to
+            disagree, so the top of the printed table was not the set being
+            pushed.
+            """
+            if "points" in df.columns:
                 base = pd.to_numeric(df["points"], errors="coerce")
+            elif "combined_score" in df.columns:
+                base = pd.to_numeric(df["combined_score"], errors="coerce")
             else:
                 base = pd.Series(0.0, index=df.index)
             return base.fillna(float("-inf"))

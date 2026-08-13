@@ -34,6 +34,15 @@ Known limitations (documented, not fixed here):
   and cross-sectional comparison only needs "roughly the same point in time,"
   not exact fiscal-period alignment.
 
+* **Investment companies are absent entirely.** ``_iter_fiscal_years`` derives
+  a company's report dates from ``revenue_year``, and the investment-company
+  branch of ``get_data`` never records one (its snapshots carry no
+  ``revenue_year``/``de_ratio``/``netDebtEbitdaRatio``/quarterly series). So
+  Investor, Industrivärden, Öresund, Latour, Kinnevik and Ratos contribute
+  zero rows here and every panel statistic excludes them -- while they remain
+  live, scored, and eligible for the watchlist. Nothing in the validation
+  covers that part of the universe.
+
 * **Dividend timing is prorated, not exact.** The forward target is a total
   return (Avanza's close is not dividend-adjusted -- see
   ``forward_dividend_yield``), but ``dividend_per_share`` carries calendar-year

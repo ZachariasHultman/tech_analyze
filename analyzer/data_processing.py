@@ -472,12 +472,60 @@ def calculate_score(manager, metrics_to_score=None, use_cross_sectional_ranks=Tr
 
         return summary
 
-    manager.summary = apply_scores(
-        manager.summary, manager.template, manager, metrics_to_score
-    )
-    manager.summary_investment = apply_scores(
-        manager.summary_investment,
-        manager.template_investment,
-        manager,
-        metrics_to_score,
-    )
+    # ── One pool, not two ────────────────────────────────────────────────
+    # Regular and investment companies used to be scored in separate passes,
+    # so every percentile -- per-metric ranks, quality_pct, value_pct -- was
+    # computed *within* its own pool, and _update_watchlist then compared them
+    # as if they were the same scale. Being best-of-3 investment companies
+    # beat being best-of-26 regular ones (Investor B combined=1.00 against
+    # Alfa Laval's 0.73), and below 5 companies the small pool skipped
+    # cross-sectional ranking altogether and fell back to absolute thresholds
+    # -- two scoring regimes in one watchlist.
+    #
+    # Scoring the union fixes both. The frames are split back afterwards so
+    # the two-table display and every existing consumer are unaffected, each
+    # keeping only its own template's metric columns.
+    def _as_df(src):
+        if src is None:
+            return pd.DataFrame()
+        if isinstance(src, dict):
+            return pd.DataFrame(src).T if src else pd.DataFrame()
+        return src
+
+    regular = _as_df(manager.summary)
+    investment = _as_df(manager.summary_investment)
+    reg_index = list(regular.index)
+    inv_index = list(investment.index)
+
+    if regular.empty and investment.empty:
+        manager.summary, manager.summary_investment = regular, investment
+        return
+
+    frames = [f for f in (regular, investment) if not f.empty]
+    pooled = pd.concat(frames) if len(frames) > 1 else frames[0]
+    # Templates are normally dicts but tests (and any caller) may pass a
+    # plain sequence of column names; both iterate to the same key set.
+    union_template = list(dict.fromkeys(
+        list(manager.template) + list(manager.template_investment)
+    ))
+
+    scored = apply_scores(pooled, union_template, manager, metrics_to_score)
+
+    # Base inputs are shared by both templates; sleeve outputs must survive on
+    # both sides. Everything else belongs to whichever template declared it.
+    _shared = {"points", "quality_pct", "value_pct", "combined_score", "sector",
+               "roe", "pe", "cagr", "fcfy", "de"}
+
+    def _slice(index, template):
+        if not index or scored.empty:
+            return pd.DataFrame()
+        rows = scored.loc[[i for i in index if i in scored.index]]
+        keep = [
+            c for c in rows.columns
+            if c in _shared or c in template
+            or (str(c).endswith("_score") and c[: -len("_score")] in template)
+        ]
+        return rows[keep]
+
+    manager.summary = _slice(reg_index, manager.template)
+    manager.summary_investment = _slice(inv_index, manager.template_investment)
