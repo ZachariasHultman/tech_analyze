@@ -177,3 +177,46 @@ def test_survivorship_is_always_stated():
         s.update({"t_stat": 2.0, "p_value": p, "mean_spread": 0.05})
         block = "\n".join(_format_optimizer_status({"accepted": True, **s}))
         assert "Survivorship bias" in block
+
+
+# --------------------------------------------------------------------------
+# Deflated Sharpe Ratio: the number the accept/reject actually turns on
+# --------------------------------------------------------------------------
+
+def _status(dsr=0.73, confidence=0.925, accepted=False):
+    """Minimal status dict -- _format_optimizer_status reads a flat mapping
+    of the JSON's top level merged with its `validation` block."""
+    return {
+        "accepted": accepted, "dsr": dsr, "confidence": confidence,
+        "fitted_at": "2026-08-14", "n_periods": 7, "n_folds": 7,
+        "n_folds_beating_equal": 4, "permutation_p_value": 0.31,
+        "n_permutations": 200, "mean_ic": 0.044, "t_stat": 2.55,
+        "p_value": 0.043, "per_year": [],
+    }
+
+
+def test_dsr_and_bar_are_both_shown():
+    """'missed the significance bar' is an unquantified assertion on its own:
+    0.91 against a 0.925 bar and 0.53 against it are very different rejects."""
+    out = "\n".join(_format_optimizer_status(_status(dsr=0.712)))
+    assert "0.712" in out and "0.925" in out
+
+
+def test_reject_is_labelled_missed():
+    out = "\n".join(_format_optimizer_status(_status(dsr=0.50, accepted=False)))
+    assert "missed" in out
+
+
+def test_accept_is_labelled_cleared():
+    out = "\n".join(_format_optimizer_status(_status(dsr=0.97, accepted=True)))
+    assert "cleared" in out
+
+
+@pytest.mark.parametrize("dsr,confidence", [
+    (None, 0.925), (0.73, None), (float("nan"), 0.925), ("n/a", 0.925),
+])
+def test_missing_or_junk_dsr_omits_the_line_without_crashing(dsr, confidence):
+    """A Pi holding an older JSON must still render the rest of the block."""
+    out = "\n".join(_format_optimizer_status(_status(dsr=dsr, confidence=confidence)))
+    assert "deflated Sharpe" not in out
+    assert "SYSTEM STATUS" in out

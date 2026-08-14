@@ -258,6 +258,18 @@ def _format_optimizer_status(status):
         lines.append(f"    permutation test ({n_perm} refits on shuffled "
                      f"targets): p={p_perm:.3f}")
 
+    # The accept/reject above turns on this number, so print it rather than
+    # leaving "missed the significance bar" as an unquantified assertion --
+    # 0.91 against a 0.925 bar and 0.53 against it are very different rejects.
+    dsr, bar = status.get("dsr"), status.get("confidence")
+    try:
+        dsr, bar = float(dsr), float(bar)
+        if dsr == dsr and bar == bar:  # NaN-safe without importing numpy here
+            hit = "cleared" if dsr > bar else "missed"
+            lines.append(f"    deflated Sharpe {dsr:.3f} vs {bar:.3f} bar ({hit})")
+    except (TypeError, ValueError):
+        pass
+
     # The verdict is derived, not asserted. It used to be hardcoded "LOW",
     # which became self-contradictory the moment the IC test started clearing
     # 5% ("CONFIDENCE: LOW ... p=0.02").

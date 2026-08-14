@@ -57,11 +57,13 @@ Known limitations (documented, not fixed here):
   ``convert_closes_to_sek`` / ``analyzer.fx``), because a mixed-currency target
   demeaned within a fiscal year hands every US name's shared FX move to
   whatever metric correlates with being US-listed. The predictor side is
-  untouched: ``build_fundamentals_panel``'s ``price momentum status`` and the
-  price CAGR feeding ``cagr_pe ratio status`` still come from local-currency
-  Avanza OHLC. That asymmetry is a deliberate scope boundary for
-  reviewability, not an oversight — momentum measured in listing currency
-  against a return measured in SEK is a real (small) inconsistency.
+  untouched: the price CAGR feeding ``cagr_pe ratio status`` still comes from
+  local-currency Avanza OHLC. That asymmetry is a deliberate scope boundary
+  for reviewability, not an oversight — a predictor measured in listing
+  currency against a return measured in SEK is a real (small) inconsistency.
+  ``price momentum status`` is the one predictor exempt from it: it is a ratio
+  of two prices within one series, so it carries no numeraire and the
+  unconverted Yahoo leg is directly comparable to the Avanza one.
 
 * **The Avanza fallback leg is never converted either.** Conversion keys off
   the Yahoo exchange suffix, so it only reaches companies whose Yahoo series
@@ -132,6 +134,38 @@ _OTHER_KEYS = [
 _EXCL_COLS = {"company", "name", "sector", "ohlc", "market_cap", "currency"}
 
 
+MOMENTUM_SMA_DAYS = 200
+
+
+def momentum_as_of(close, report_date, min_days=MOMENTUM_SMA_DAYS):
+    """``price / SMA200 - 1`` from closes dated ``<= report_date`` only.
+
+    Returns None below ``min_days`` observations rather than shortening the
+    window: an SMA over 60 days is a different statistic, not a noisier
+    estimate of the same one, and silently mixing the two across fiscal years
+    would put a regime change into the metric itself.
+
+    A ratio of two prices in the same series, so it is numeraire-free — this
+    is why the Yahoo leg can be used unconverted alongside the SEK target.
+    """
+    if close is None:
+        return None
+    try:
+        s = close.dropna()
+        s = s[s.index <= report_date]
+    except (TypeError, AttributeError, KeyError):
+        return None
+    if len(s) < min_days:
+        return None
+    sma = float(s.iloc[-min_days:].mean())
+    if not np.isfinite(sma) or sma <= 0:
+        return None
+    last = float(s.iloc[-1])
+    if not np.isfinite(last):
+        return None
+    return last / sma - 1.0
+
+
 def _iter_fiscal_years(row):
     """Return the sorted unique report dates for a company.
 
@@ -147,7 +181,7 @@ def _iter_fiscal_years(row):
     return sorted(dates.unique())
 
 
-def build_fundamentals_panel(data_dir="data") -> pd.DataFrame:
+def build_fundamentals_panel(data_dir="data", yahoo_closes=None) -> pd.DataFrame:
     """One row per ``(company_id, fiscal_year)`` of as-of-report-date metrics.
 
     Loops per fiscal year, cutting every predictor to ``<= report_date``
@@ -155,14 +189,32 @@ def build_fundamentals_panel(data_dir="data") -> pd.DataFrame:
     to be the last element. There is no window concept here, so no target is
     computed at this stage — forward returns are attached later, in
     ``build_scores_panel`` (step 3).
+
+    ``price momentum status`` needs 200 trading days *before* the report date,
+    which the Avanza snapshot's rolling ~5-year OHLC window cannot supply for
+    the early fiscal years — measured, it was 0% populated for FY2019-2021 and
+    10% for FY2022, i.e. absent from four of the seven years the gate scores.
+    The verified Yahoo backfill reaches back to 2015, so it is preferred where
+    present and Avanza is the fallback. Deliberately a union rather than a
+    replacement: Yahoo verifies for 129 companies against Avanza's 133, so
+    replacing outright would trade four early years of coverage for four
+    companies lost in every late year. Pass ``yahoo_closes`` to override the
+    lookup (tests, and callers that already loaded it).
     """
     df = get_hist_data(data_dir)
     pre_metrics = [c for c in df.columns if c not in _EXCL_COLS]
+
+    if yahoo_closes is None:
+        yahoo_closes, _ = load_verified_yahoo_closes(data_dir)
+    if yahoo_closes:
+        print(f"[panel] momentum: Yahoo closes available for "
+              f"{len(yahoo_closes)} companies (Avanza is the fallback)")
 
     results = []
     for company, row in df.iterrows():
         sector = row.get("sector", "Unknown")
         ohlc_df = row["ohlc"]
+        yahoo_close = yahoo_closes.get(company) if yahoo_closes else None
 
         for report_date in _iter_fiscal_years(row):
             report_date = pd.Timestamp(report_date)
@@ -295,18 +347,15 @@ def build_fundamentals_panel(data_dir="data") -> pd.DataFrame:
             except Exception:
                 entry["dividend growth status"] = None
 
-            # price momentum: price / SMA200 as-of report_date
-            try:
-                close = ohlc_df["close"]
-                close_to_date = close[close.index <= report_date]
-                if len(close_to_date) >= 200:
-                    sma200 = close_to_date.iloc[-200:].mean()
-                    last_price = close_to_date.iloc[-1]
-                    entry["price momentum status"] = float(last_price / sma200) - 1.0
-                else:
-                    entry["price momentum status"] = None
-            except Exception:
-                entry["price momentum status"] = None
+            # price momentum: price / SMA200 as-of report_date, from the
+            # longer Yahoo series where it verified, else Avanza's OHLC.
+            mom = momentum_as_of(yahoo_close, report_date)
+            if mom is None:
+                try:
+                    mom = momentum_as_of(ohlc_df["close"], report_date)
+                except Exception:
+                    mom = None
+            entry["price momentum status"] = mom
 
             # ---- Ratios (sector-agnostic, using RATIO_SPECS) ----
             for rk, spec in RATIO_SPECS.items():
