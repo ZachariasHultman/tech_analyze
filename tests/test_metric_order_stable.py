@@ -2,7 +2,7 @@
 
 It used to be `list(set(...))`. Python randomizes string hashing per process
 (PYTHONHASHSEED), so the returned order differed on every run. The coordinate
-descent in optimize_panel_combo / optimize_combo iterates `for m in metrics`,
+descent in optimize_panel_combo iterates `for m in metrics`,
 so a different order walks a different greedy path and lands on different
 weights -- from identical input data. Observed in practice: two runs of
 leave_one_fiscal_year_out on the same panel produced mean optimized spreads of

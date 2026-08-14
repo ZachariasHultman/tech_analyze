@@ -6,8 +6,8 @@ deliberately not asserted here per this project's testing conventions).
 operatingCashFlow is populated live for Nordic stocks but Avanza exposes no
 historical OCF series, so the backtest/optimizer can never compute a real
 correlation for this metric -- its weight always resolves to whatever's in
-WEIGHT_FLOORS (see optimize_weights_and_thresholds's Step 2: metrics absent
-from positive_metrics get exactly WEIGHT_FLOORS.get(m, 0.0), nothing else).
+WEIGHT_FLOORS (see _scale_weights_from_corrs: metrics absent from the
+positive-correlation set get exactly WEIGHT_FLOORS.get(m, 0.0), nothing else).
 Without a floor entry, this metric silently contributes zero to scoring
 regardless of tier -- exactly the bug this floor exists to prevent.
 """

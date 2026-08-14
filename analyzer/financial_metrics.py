@@ -192,8 +192,8 @@ def calculate_eps_yoy_hit_rate(
     # YoY data point. Note this only helps the live path -- the historical
     # backtest adapter (_build_ticker_dicts) hardcodes this field to an empty
     # list because quarterly EPS isn't captured in the CSV snapshots at all,
-    # so "eps yoy hit-rate status" will still be empty in --correlate/--optimize
-    # regardless of this floor.
+    # so "eps yoy hit-rate status" will still be empty in the panel/--optimize
+    # path regardless of this floor.
     if len(_clean(q_eps)) < 5:
         return None, {"reason": "not_enough_quarters", "points": len(_clean(q_eps))}
     yoy = _rolling_yoy_from_quarterly(q_eps)

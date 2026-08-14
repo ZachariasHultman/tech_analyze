@@ -331,7 +331,7 @@ def report_currency_neutral_ic(panel_df, currency_map=None):
 
 def per_metric_ic(panel_df, return_col=RETURN_COL):
     """Per-metric IC grouped by fiscal year — which individual metrics carry
-    signal. Adapted from baseline_correlation's per-metric Spearman loop."""
+    signal."""
     print("\n--- Per-metric IC (mean Spearman across fiscal years) ---")
     score_cols = _metric_score_cols(panel_df)
     results = {}

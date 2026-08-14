@@ -5,11 +5,13 @@ Guards two things:
      for both the normal DataFrame shape and the stringified-JSON-dict shape
      used by free_cashflow/free_cashflow_yield (which convert_cell never
      turns into a DataFrame, so it silently leaked through the old
-     slice_df_between no-op).
+     non-slicing path).
   2. That predictors computed as-of start_d (pe/fcfy via _safe_last,
      _build_ticker_dicts fields, cagr) are unaffected by data dated strictly
-     after start_d, while total_return (the target variable) still reflects
-     data inside the window — sanity check against a trivially-wrong test.
+     after start_d.
+
+Both still apply: analyzer/panel.py cuts every predictor with slice_df_upto
+before scoring a fiscal year.
 """
 import json
 import math
@@ -18,7 +20,6 @@ import pandas as pd
 
 from analyzer.historical_calc import (
     slice_df_upto,
-    slice_df_between,
     price_cagr_window,
     _build_ticker_dicts,
     _safe_last,
@@ -64,7 +65,6 @@ def test_slice_df_upto_date_indexed_dataframe():
 
 def test_no_lookahead_bias_in_predictors():
     start_d = pd.Timestamp("2022-01-01")
-    end_d = pd.Timestamp("2023-01-01")
 
     # pe/de/roe: normal history before start_d, outlier spike strictly after
     pe_df = pd.DataFrame({
@@ -129,10 +129,7 @@ def test_no_lookahead_bias_in_predictors():
     expected_cagr = (100.0 / 50.0) ** (1 / years) - 1
     assert math.isclose(cagr, expected_cagr, abs_tol=1e-9)
 
-    # ---- sanity check: total_return (the target var) DOES reflect the spike ----
-    ohlc_df = pd.DataFrame({"close": close})
-    ohlc_win = slice_df_between(ohlc_df, start_d, end_d)
-    price_start = ohlc_win["close"].iloc[0]
-    price_end = ohlc_win["close"].iloc[-1]
-    total_return = (price_end / price_start) - 1
-    assert total_return > 100  # guards against a trivially-wrong test
+    # Sanity check against a trivially-passing test: the 100000.0 close dated
+    # after start_d is real data the as-of cut is deliberately hiding, so a
+    # window that DOES reach past start_d sees it.
+    assert close[close.index <= pd.Timestamp("2023-01-01")].max() == 100000.0

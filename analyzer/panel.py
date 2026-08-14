@@ -1,11 +1,11 @@
-"""Fiscal-year-anchored cross-sectional panel (new validation pipeline).
+"""Fiscal-year-anchored cross-sectional panel (the validation pipeline).
 
 This module builds a panel with one row per ``(company_id, fiscal_year)`` from
-the same ``data/*.csv`` snapshots the rolling-window backtest reads. It is
-purely additive: it reuses ``historical_calc.py``'s helpers directly and does
-not modify the existing rolling-window pipeline in any way. The old pipeline
-(``calculate_metrics_given_hist`` / ``metrics_by_timespan.csv``) stays a
-working fallback for weight optimization until this one is trusted. Per-company
+the ``data/*.csv`` snapshots, reusing ``historical_calc.py``'s reader and
+as-of helpers directly. It is the only backtest pipeline left: the older
+rolling-window one (``calculate_metrics_given_hist`` /
+``metrics_by_timespan.csv``) was removed, its objective windows being fully
+overlapping and its output consumed by nothing. Per-company
 reliability (an earlier use of this panel) was tried at both company and
 sector granularity and dropped entirely -- the ~5yr live OHLC ceiling leaves
 too little forward-return depth for either to detect real signal, old
@@ -110,7 +110,7 @@ from analyzer.financial_metrics import (
 )
 
 
-# metric name lists mirror calculate_metrics_given_hist exactly
+# metric name lists mirror the live scoring path's metric set exactly
 _OTHER_KEYS = [
     "revenue trend year status",
     "net debt - ebitda status",
@@ -150,13 +150,11 @@ def _iter_fiscal_years(row):
 def build_fundamentals_panel(data_dir="data") -> pd.DataFrame:
     """One row per ``(company_id, fiscal_year)`` of as-of-report-date metrics.
 
-    Near-verbatim reuse of ``calculate_metrics_given_hist``'s inner body, with
-    the rolling-window loop replaced by a per-fiscal-year loop. The as-of cut is
-    ``<= report_date`` (inclusive): this fiscal year's own value is meant to be
-    the last element, unlike the old pipeline's ``start_d`` cut which was
-    deliberately *before* the window. There is no window concept here, so
-    ``ohlc_win`` / ``total_return`` / ``fund_forward_score`` are dropped. Forward
-    returns are attached later, in ``build_scores_panel`` (step 3).
+    Loops per fiscal year, cutting every predictor to ``<= report_date``
+    (inclusive) via ``slice_df_upto``: this fiscal year's own value is meant
+    to be the last element. There is no window concept here, so no target is
+    computed at this stage — forward returns are attached later, in
+    ``build_scores_panel`` (step 3).
     """
     df = get_hist_data(data_dir)
     pre_metrics = [c for c in df.columns if c not in _EXCL_COLS]

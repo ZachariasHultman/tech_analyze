@@ -1,6 +1,8 @@
 # ----------------------------------------------------------------------
-#  Historical metrics generator
-#  – Produces one row per <company , window-label>
+#  Snapshot reader + as-of adapters
+#  – Loads data/*.csv snapshots and reshapes them into the Avanza-API-shaped
+#    dicts financial_metrics.py expects, cut to a given as-of date.
+#  – Consumed by analyzer/panel.py, which builds the fiscal-year panel.
 # ----------------------------------------------------------------------
 
 from pathlib import Path
@@ -9,20 +11,6 @@ import numpy as np
 import pandas as pd
 
 from analyzer.metrics import extract_sector
-from analyzer.metrics import RATIO_SPECS  # single source of truth
-from analyzer.financial_metrics import (
-    calculate_revenue_y_cagr,
-    calculate_eps_y_cagr,
-    calculate_revenue_yoy_hit_rate,
-    calculate_eps_yoy_hit_rate,
-    calculate_net_margin_vs_avg,
-    calculate_roe_vs_avg,
-    calculate_gross_margin_stability,
-    calculate_piotroski_f_score,
-    calculate_revenue_trend,
-    calculate_earnings_quality,
-    calculate_dividend_growth,
-)
 
 
 # ------------------------------------------------------------------ helpers
@@ -68,18 +56,6 @@ def price_cagr_window(close_ser, start, end, yrs_in_span):
     return (last_val / start_val) ** (1 / years) - 1
 
 
-def slice_df_between(df, start, end):
-    if not isinstance(df, pd.DataFrame):
-        return df
-    if "date" in df.columns:
-        df = df.copy()
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        mask = (df["date"] >= start) & (df["date"] <= end)
-        return df.loc[mask]
-    idx = pd.to_datetime(df.index, errors="coerce")
-    return df.loc[(idx >= start) & (idx <= end)]
-
-
 def slice_df_upto(df, end):
     """Return only data known as-of `end` (date <= end) — no look-ahead.
 
@@ -108,49 +84,6 @@ def slice_df_upto(df, end):
         return ser[ser.index <= end].sort_index()
 
     return df
-
-
-def make_windows(max_date, span_years):
-    """
-    Build a list of rolling-window definitions for a given high-level span.
-
-    Window labels follow this scheme
-    ─────────────────────────────────────────────────────────────────────
-        <N>Y_TOTAL
-            • “Cumulative” window: from <max_date  N years>  (inclusive)
-                up to <max_date> (inclusive).
-
-
-        <N>Y_YoY-k
-            • “Year-over-year” one-year window.
-            • k tells you how many complete years back the window ends:
-                    k = 1  →  (max_date − 1 year)  → max_date
-                    k = 2  →  (max_date − 2 years) → (max_date − 1 year)
-                    …
-                    k = N  →  (max_date − N years) → (max_date − N + 1 years)
-            • Every YoY window is exactly 1 year long, so yrs_in_span = 1.
-
-    The function returns
-        (label, start_date, end_date, yrs_in_span)
-    where:
-        label          string as described above
-        start_date     pd.Timestamp (inclusive)
-        end_date       pd.Timestamp (inclusive)
-        yrs_in_span    int
-                        • N      for the *_TOTAL window
-                        • 1      for all *_YoY-k windows
-    """
-
-    out = []
-    total_start = max_date - pd.DateOffset(years=span_years)
-    out.append((f"{span_years}Y_TOTAL", total_start, max_date, span_years))
-    for k in range(1, span_years + 1):
-        if span_years == 1 and k == 1:
-            continue  # skip redundant 1Y_YoY-1
-        end = max_date - pd.DateOffset(years=k - 1)
-        start = end - pd.DateOffset(years=1)
-        out.append((f"{span_years}Y_YoY-{k}", start, end, 1))
-    return out
 
 
 # ------------------------------------------------------------------ IO helpers
@@ -192,9 +125,9 @@ def get_hist_data(data_dir="data"):
         # panel_scores.csv). They are written into data/ by the new panel
         # pipeline but are NOT per-company snapshots — they already carry a
         # "company" column and no snapshot-date suffix, so treating them as
-        # snapshots would crash this reader (and thus the old --correlate
-        # pipeline). No real snapshot is ever named panel_*, so this preserves
-        # behavior exactly for every legitimate input.
+        # snapshots would crash this reader. No real snapshot is ever named
+        # panel_*, so this preserves behavior exactly for every legitimate
+        # input.
         # The FX rate cache (fx_sek.csv) is skipped for the same reason: it is
         # a date-indexed rate table, and reading it as a snapshot crashes
         # parse_ohlc_series.
@@ -229,10 +162,7 @@ def get_hist_data(data_dir="data"):
     return df.groupby(level=0).first().drop(columns=["_snapshot_date"])  # 1 row per company
 
 
-# ------------------------------------------------------------------ main
-
-
-# helpers (window calc already exists in your file)
+# ------------------------------------------------------------------ value helpers
 def _unwrap1(x):
     return x[0] if isinstance(x, (list, tuple)) and len(x) == 1 else x
 
@@ -280,52 +210,6 @@ def _safe_div(a, b):
         return None
 
 
-def _fund_forward_score(rev_start, rev_end, nm_start, nm_end,
-                        nde_start, nde_end, dps_start, dps_end, years):
-    """Forward-fundamentals target (0-4): did the company stay solid across the
-    window? Each available component contributes +1 when it passes:
-
-      1. forward revenue CAGR > 0
-      2. net margin didn't collapse (nm_end >= 0.8 * nm_start)
-      3. leverage didn't blow out (nde_end <= nde_start + 1.0)
-      4. dividend not cut (dps_end >= dps_start; never-paid counts as pass)
-
-    A component whose data is missing on either side is excluded and the score
-    is rescaled: passes * 4 / components_available. Fewer than 2 available
-    components -> NaN (not enough basis to judge). This is the ONE place
-    end_d-side (in-window) data is intentionally used -- it is the target being
-    validated against, not a predictor, so no look-ahead concern applies.
-    """
-    years = years if years and years > 0 else 1
-    passes = 0
-    available = 0
-
-    if rev_start is not None and rev_end is not None and rev_start > 0:
-        available += 1
-        if (rev_end / rev_start) ** (1.0 / years) - 1.0 > 0:
-            passes += 1
-
-    if nm_start is not None and nm_end is not None:
-        available += 1
-        if nm_end >= 0.8 * nm_start:
-            passes += 1
-
-    if nde_start is not None and nde_end is not None:
-        available += 1
-        if nde_end <= nde_start + 1.0:
-            passes += 1
-
-    # Dividend is unavailable only when there is no dividend data at all.
-    if dps_start is not None or dps_end is not None:
-        available += 1
-        if (dps_end or 0) >= (dps_start or 0):
-            passes += 1
-
-    if available < 2:
-        return float("nan")
-    return passes * 4.0 / available
-
-
 def _df_to_dict_list(df_or_obj, start=None, end=None):
     """Convert a CSV DataFrame (date, value cols) to list-of-dicts
     that financial_metrics functions expect: [{"value": x, "date": "...", "reportType": "FULL_YEAR"}, ...]
@@ -371,9 +255,9 @@ def _build_ticker_dicts(asof):
     """Build fake ticker_analysis and ticker_info dicts from CSV data
     so we can reuse the same financial_metrics functions as the live flow.
 
-    Consumes `asof` — data already cut to <= start_d by slice_df_upto in the
-    caller (calculate_metrics_given_hist), so every field here is as-of the
-    window start with no look-ahead into or past the window.
+    Consumes `asof` — data already cut to <= the as-of date by slice_df_upto
+    in the caller (analyzer/panel.py), so every field here is as-of that date
+    with no look-ahead into or past the window being predicted.
     """
     revenue_year = _df_to_dict_list(asof.get("revenue_year"))
     revenue_quarter = _df_to_dict_list(asof.get("revenue_quarter"))
@@ -447,268 +331,3 @@ def _build_ticker_dicts(asof):
     }
 
     return ticker_analysis, ticker_info
-
-
-def calculate_metrics_given_hist() -> None:
-    df = get_hist_data()
-
-    # metrics to compute (sector-agnostic)
-    ratio_keys = list(RATIO_SPECS.keys())
-    other_keys = [
-        "revenue trend year status",
-        "net debt - ebitda status",
-        "net margin vs avg status",
-        "roe vs avg status",
-        "revenue yoy hit-rate status",
-        "eps yoy hit-rate status",
-        "eps y cagr status",
-        "revenue y cagr status",
-        "gross margin stability status",
-        "piotroski f-score status",
-        "price momentum status",
-        "dividend yield status",
-        "earnings quality status",
-        "dividend growth status",
-    ]
-    metrics = ratio_keys + other_keys
-
-    excl_cols = {"name", "sector", "ohlc", "market_cap", "currency"}
-    pre_metrics = [c for c in df.columns if c not in excl_cols]
-
-    results = []
-
-    for company, row in df.iterrows():
-        sector = row.get("sector", "Unknown")
-        ohlc_df = row["ohlc"]
-        max_d = (
-            ohlc_df.index.max()
-            if isinstance(ohlc_df, pd.DataFrame)
-            else pd.Timestamp.today()
-        )
-
-        for span in (1, 3, 5):
-            for label, start_d, end_d, yrs_span in make_windows(max_d, span):
-
-                # as-of slices: only data known by start_d (no look-ahead
-                # into or past the window being predicted)
-                asof = {
-                    k: slice_df_upto(row[k], start_d)
-                    for k in pre_metrics
-                    if k in row
-                }
-                ohlc_win = slice_df_between(ohlc_df, start_d, end_d)  # target var — stays windowed
-
-                # ---- Forward-fundamentals target (end_d-side, intentional) ----
-                # See _fund_forward_score: this is the target being validated
-                # against, not a predictor -- the only place in-window (end_d)
-                # fundamental data is deliberately read.
-                rev_start = _safe_last(slice_df_upto(row.get("revenue_year"), start_d))
-                rev_end   = _safe_last(slice_df_upto(row.get("revenue_year"), end_d))
-                nm_start  = _safe_last(slice_df_upto(row.get("profit_margin"), start_d))
-                nm_end    = _safe_last(slice_df_upto(row.get("profit_margin"), end_d))
-                nde_start = _safe_last(slice_df_upto(row.get("netDebtEbitdaRatio"), start_d))
-                nde_end   = _safe_last(slice_df_upto(row.get("netDebtEbitdaRatio"), end_d))
-                dps_start = _safe_last(slice_df_upto(row.get("dividend_per_share"), start_d))
-                dps_end   = _safe_last(slice_df_upto(row.get("dividend_per_share"), end_d))
-                fund_forward_score = _fund_forward_score(
-                    rev_start, rev_end, nm_start, nm_end,
-                    nde_start, nde_end, dps_start, dps_end, yrs_span,
-                )
-
-                # ---- Total return ----
-                try:
-                    price_start = ohlc_win["close"].iloc[0]
-                    price_end = ohlc_win["close"].iloc[-1]
-                    total_return = (
-                        ((price_end / price_start) - 1) if price_start > 0 else None
-                    )
-                except Exception:
-                    total_return = None
-
-                # ---- Base fields for ratios ----
-                pe_val = _safe_last(asof.get("pe"))
-                de_val = _safe_last(asof.get("de_ratio")) or _safe_last(asof.get("de"))
-                roe_val = _safe_last(asof.get("roe"))
-                fcfy_val = _safe_last(asof.get("free_cashflow_yield")) or _safe_last(asof.get("fcfy"))
-
-                # CAGR proxy as-of start_d (price-based). Reuses price_cagr_window's
-                # YoY branch (yrs_in_span=1), which only looks at data <= start_d:
-                # last_val = last close <= start_d, start_val = last close < start_d-1yr.
-                price_cagr = price_cagr_window(
-                    ohlc_df["close"], start_d - pd.DateOffset(years=1), start_d, 1
-                )
-                if isinstance(price_cagr, np.floating):
-                    price_cagr = float(price_cagr)
-
-                # ---- Build adapter dicts for financial_metrics functions ----
-                ticker_analysis, ticker_info = _build_ticker_dicts(asof)
-
-                # ---- Build row ----
-                entry = {
-                    "company": company,
-                    "sector": sector,
-                    "timespan": label,
-                    "total_return": total_return,
-                    "pe": pe_val,
-                    "de": de_val,
-                    "roe": roe_val,
-                    "fcfy": fcfy_val,
-                    "cagr": price_cagr,
-                    "fund_forward_score": fund_forward_score,
-                }
-
-                # ---- Use financial_metrics functions (same as live flow) ----
-                try:
-                    rev_trend_y, _, _, _ = calculate_revenue_trend(ticker_analysis)
-                    entry["revenue trend year status"] = rev_trend_y
-                except Exception:
-                    entry["revenue trend year status"] = None
-
-                # net debt / ebitda
-                nde_val = _safe_last(asof.get("netDebtEbitdaRatio"))
-                entry["net debt - ebitda status"] = nde_val
-
-                # revenue y cagr
-                try:
-                    rev_cagr, _ = calculate_revenue_y_cagr(ticker_analysis)
-                    entry["revenue y cagr status"] = rev_cagr
-                except Exception:
-                    entry["revenue y cagr status"] = None
-
-                # eps y cagr
-                try:
-                    eps_cagr, _ = calculate_eps_y_cagr(ticker_analysis)
-                    entry["eps y cagr status"] = eps_cagr
-                except Exception:
-                    entry["eps y cagr status"] = None
-
-                # revenue yoy hit-rate
-                try:
-                    rev_hit, _ = calculate_revenue_yoy_hit_rate(ticker_analysis, lookback_quarters=12)
-                    entry["revenue yoy hit-rate status"] = rev_hit
-                except Exception:
-                    entry["revenue yoy hit-rate status"] = None
-
-                # eps yoy hit-rate
-                try:
-                    eps_hit, _ = calculate_eps_yoy_hit_rate(ticker_analysis, lookback_quarters=12)
-                    entry["eps yoy hit-rate status"] = eps_hit
-                except Exception:
-                    entry["eps yoy hit-rate status"] = None
-
-                # net margin vs avg
-                try:
-                    nm_vs, _ = calculate_net_margin_vs_avg(ticker_info, ticker_analysis, years=5)
-                    entry["net margin vs avg status"] = nm_vs
-                except Exception:
-                    entry["net margin vs avg status"] = None
-
-                # roe vs avg
-                try:
-                    roe_vs, _ = calculate_roe_vs_avg(ticker_info, ticker_analysis, years=5)
-                    entry["roe vs avg status"] = roe_vs
-                except Exception:
-                    entry["roe vs avg status"] = None
-
-                # gross margin stability
-                try:
-                    gm_stab = calculate_gross_margin_stability(ticker_analysis)
-                    entry["gross margin stability status"] = gm_stab
-                except Exception:
-                    entry["gross margin stability status"] = None
-
-                # piotroski f-score
-                try:
-                    f_score = calculate_piotroski_f_score(
-                        ticker_analysis, ticker_info, fcfy_val, de_val, roe_val
-                    )
-                    entry["piotroski f-score status"] = f_score
-                except Exception:
-                    entry["piotroski f-score status"] = None
-
-                # dividend yield
-                try:
-                    from analyzer.financial_metrics import calculate_dividend_yield
-                    entry["dividend yield status"] = calculate_dividend_yield(ticker_info)
-                except Exception:
-                    entry["dividend yield status"] = None
-
-                # earnings quality (OCF / net income)
-                try:
-                    eq = calculate_earnings_quality(ticker_info, ticker_analysis)
-                    entry["earnings quality status"] = eq
-                except Exception:
-                    entry["earnings quality status"] = None
-
-                # dividend growth (CAGR of dividend per share)
-                try:
-                    dg = calculate_dividend_growth(ticker_analysis, years=3)
-                    entry["dividend growth status"] = dg
-                except Exception:
-                    entry["dividend growth status"] = None
-
-                # price momentum: price / SMA200 at end of window
-                try:
-                    close = ohlc_df["close"]
-                    # Use data up to start_d (as-of window start) for SMA200
-                    close_to_start = close[close.index <= start_d]
-                    if len(close_to_start) >= 200:
-                        sma200 = close_to_start.iloc[-200:].mean()
-                        last_price = close_to_start.iloc[-1]
-                        entry["price momentum status"] = float(last_price / sma200) - 1.0
-                    else:
-                        entry["price momentum status"] = None
-                except Exception:
-                    entry["price momentum status"] = None
-
-                # ---- Ratios (sector-agnostic, using RATIO_SPECS) ----
-                for rk, spec in RATIO_SPECS.items():
-                    # Skip if we already computed a valid value (e.g. net debt-ebitda from direct extraction)
-                    if rk in entry and entry[rk] is not None:
-                        continue
-                    num_name = spec["num"]
-                    den_name = spec["den"]
-                    num_is_rate = spec.get("num_is_rate", False)
-
-                    if num_name == "cagr":
-                        num_val = price_cagr
-                    elif num_name == "roe":
-                        num_val = roe_val
-                    elif num_name == "fcfy":
-                        num_val = fcfy_val
-                    else:
-                        num_val = _safe_last(asof.get(num_name))
-
-                    den_val = (
-                        pe_val
-                        if den_name == "pe"
-                        else (
-                            de_val
-                            if den_name == "de"
-                            else _safe_last(asof.get(den_name))
-                        )
-                    )
-
-                    if num_is_rate:
-                        num_val = _to_pct(num_val, force_convert=True)
-
-                    den_floor = spec.get("den_floor")
-                    if den_floor is not None and den_val is not None:
-                        try:
-                            den_val = float(den_val)
-                            if abs(den_val) < den_floor:
-                                den_val = den_floor if den_val >= 0 else -den_floor
-                        except (TypeError, ValueError):
-                            pass
-
-                    entry[rk] = _safe_div(num_val, den_val)
-
-                results.append(entry)
-
-    pd.DataFrame(results).set_index(["company", "timespan"]).to_csv(
-        "metrics_by_timespan.csv"
-    )
-
-
-if __name__ == "__main__":
-    calculate_metrics_given_hist()

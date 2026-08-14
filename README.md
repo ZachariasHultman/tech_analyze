@@ -42,7 +42,7 @@ Cloning the repo alone isn't enough to run it — the following are gitignored a
 |---|---|---|
 | `.env` | Yes | Avanza credentials (see above); nothing runs without it |
 | `analyzer/metrics.py` | Yes | Scoring weights/thresholds — load-bearing, every module imports from it. Doesn't exist in a fresh clone. Either `cp analyzer/metrics.example.py analyzer/metrics.py` to bootstrap with placeholder values, or scp a tuned copy from an existing machine |
-| `optimization_results_panel.json` / `_individual.json` / `_combo.json` | Optional | Optimized weights/thresholds loaded at runtime. Default prefers `_panel.json` (out-of-sample validated) if present, else `_individual.json`, else `metrics.py`'s hardcoded defaults — see "Weight variants" below |
+| `optimization_results_panel.json` | Optional | Optimized weights/thresholds loaded at runtime. Used when present, else `metrics.py`'s hardcoded defaults — see "Weight variants" below |
 
 None of these are ever committed (`*.json`/`*.csv` are blanket-ignored, and `metrics.py` is explicitly excluded).
 
@@ -142,20 +142,20 @@ uv run python3 main.py --save --preset omxs30 omxs-mid --watchlists Test Utdelar
 
 ```bash
 uv run python3 main.py --backfill-panel --validate
-uv run python3 main.py --optimize --optimize-combo --challenger-confidence 0.925
+uv run python3 main.py --optimize --challenger-confidence 0.925
 ```
 
 `--backfill-panel` builds a fiscal-year cross-sectional panel from your saved `data/*.csv` snapshots (`data/panel_fundamentals.csv` + `data/panel_scores.csv`); `--validate` runs a diagnostic battery against it (quintile sorts, Information Coefficient, Fama-MacBeth) — useful for sanity-checking before optimizing, not required for daily use.
 
-`--optimize`/`--optimize-combo` compute per-metric correlations against historical returns and save weights to `optimization_results_individual.json` / `_combo.json`. If `data/panel_scores.csv` already exists (i.e. you ran `--backfill-panel` first), this also automatically runs an out-of-sample challenger test: rank companies by the optimized weights within each historical fiscal year, compare the top-vs-bottom quintile spread against equal-weighting via leave-one-fiscal-year-out cross-validation, and gate acceptance on a Deflated Sharpe Ratio bar (`--challenger-confidence`, default 0.925). If it clears the bar, the result is saved to `optimization_results_panel.json` — the default weight source for every future run, no flag needed.
+`--optimize` runs the challenger gate against that panel: coordinate descent over per-metric weights and thresholds, ranked within each historical fiscal year, with the top-vs-bottom quintile spread compared against equal-weighting via leave-one-fiscal-year-out cross-validation and acceptance gated on a Deflated Sharpe Ratio bar (`--challenger-confidence`, default 0.925). The verdict is written to `optimization_results_panel.json` on **both** accept and reject — on a reject the file holds the gate's own equal-weight fallback, so it is always a defensible recommendation. That file is the weight source for every future run, no flag needed.
 
-> **These are two separate commands, not one.** `--backfill-panel` (and `--validate`) return before the optimizer ever runs, so `main.py --backfill-panel --optimize` silently does only the backfill. Always run them as two invocations, in that order.
+> **These are two separate commands, not one.** `--backfill-panel` (and `--validate`) return before the optimizer ever runs, so `main.py --backfill-panel --optimize` silently does only the backfill. Always run them as two invocations, in that order. `--optimize` needs `data/panel_scores.csv` + `data/panel_fundamentals.csv` to exist and exits with an error if they don't.
 
 **`--permutations` (default 200).** The DSR bar needs to know how good a result the search reaches by luck alone. It used to approximate that from the spread of objective values across grid candidates — a number that moves with how the grid was configured rather than with the evidence (the panel search evaluates ~1200 candidates but produces only ~90 distinct values, so duplicates skewed it in both directions at once). Instead the target is now shuffled *within* each fiscal year and the optimizer refitted 200 times, which measures the null directly. Costs a few minutes on a Mac; `--permutations 0` skips it and falls back to the old approximation, which the output then explicitly labels as not meaningful.
 
 **What the gate prints.** Alongside the DSR you get `beat equal weight in N of M held-out years` and a permutation p-value. At four usable fiscal years no statistic has real power, so that blunt count is often the most informative line in the report.
 
-> **Note:** two past bugs invalidate older weight files. (1) The backtest had a look-ahead bug — predictors measured across the same window as the return. (2) The forward-return target was price-only, while Avanza's OHLC close is not dividend-adjusted, so every high-yield stock was penalised by roughly its own yield. Both are fixed, but any `optimization_results_*.json` from before must be regenerated — re-run this step at least once after upgrading.
+> **Note:** two past bugs invalidate older weight files. (1) The backtest had a look-ahead bug — predictors measured across the same window as the return. (2) The forward-return target was price-only, while Avanza's OHLC close is not dividend-adjusted, so every high-yield stock was penalised by roughly its own yield. Both are fixed, but any `optimization_results_*.json` from before must be regenerated — re-run this step at least once after upgrading. Any leftover `optimization_results_individual.json` / `_combo.json` is inert and can be deleted; nothing reads them.
 
 ---
 
@@ -178,8 +178,8 @@ uv run python3 main.py --watchlists Äger
 | When | Command |
 |---|---|
 | **After new quarterly earnings** | `uv run python3 main.py --save --preset omxs30 omxs-mid ...` |
-| **After re-saving** | `--backfill-panel --validate`, then `--optimize --optimize-combo` |
-| **If you only changed a threshold in code** | `uv run python3 main.py --correlate` (skips optimize, just shows the correlation report) |
+| **After re-saving** | `--backfill-panel --validate`, then `--optimize` |
+| **If you only changed a threshold in code** | `uv run python3 main.py --backfill-panel --validate` (rebuilds the panel and prints the diagnostics, without re-fitting weights) |
 | **If you add new stocks to universe** | Re-save then re-optimize |
 
 Re-saving quarterly is enough. Re-optimizing is only needed after a re-save or when you've significantly expanded the universe.
@@ -188,7 +188,7 @@ Re-saving quarterly is enough. Re-optimizing is only needed after a re-save or w
 
 ## Raspberry Pi deployment
 
-The Pi only runs the weekly scoring job — no `--save`, no `--optimize`. Those stay on your Mac. The optimized weights (`optimization_results_panel.json` and/or `_individual.json`) are gitignored (`*.json`/`*.csv` are blanket-ignored) — they're never committed, so they must be copied to the Pi manually via `scp` (see below) after each re-optimize.
+The Pi only runs the weekly scoring job — no `--save`, no `--optimize`. Those stay on your Mac. The optimized weights (`optimization_results_panel.json`) are gitignored (`*.json`/`*.csv` are blanket-ignored) — never committed, so the file must be copied to the Pi manually via `scp` (see below) after each re-optimize.
 
 ### First-time Pi setup
 
@@ -201,7 +201,7 @@ uv sync
 
 # Copy credentials and output files from Mac
 scp .env pi@raspberrypi:~/tech_analyze/.env
-scp optimization_results_panel.json optimization_results_individual.json pi@raspberrypi:~/tech_analyze/
+scp optimization_results_panel.json pi@raspberrypi:~/tech_analyze/
 ```
 
 ### Set up the cron job
@@ -220,8 +220,8 @@ Add this line (runs at 08:00 every Monday; matches the schedule documented at th
 
 | Where | When | Action |
 |---|---|---|
-| Mac | After a re-save | `--backfill-panel --validate`, then `--optimize --optimize-combo` |
-| Mac | After optimize | `scp optimization_results_panel.json optimization_results_individual.json pi@raspberrypi:~/tech_analyze/` |
+| Mac | After a re-save | `--backfill-panel --validate`, then `--optimize` |
+| Mac | After optimize | `scp optimization_results_panel.json pi@raspberrypi:~/tech_analyze/` |
 | Pi | Automatic (cron) | `cron_pi.sh` — pulls code via git, scores, pushes to Avanza, sends email |
 
 ### Manual Pi run (test it first)
@@ -276,13 +276,11 @@ The block is read from the `validation` section of `optimization_results_panel.j
 ## Weight variants
 
 ```bash
-uv run python3 main.py --no-opt          # Use hardcoded default weights (ignore optimizer output)
-uv run python3 main.py --use-individual  # Force the individual-correlation weights
-uv run python3 main.py --use-combo       # Force the grid-sweep + cross-validation weights
-uv run python3 main.py --use-panel       # Force the panel challenger's out-of-sample-validated weights
+uv run python3 main.py --no-opt     # Use hardcoded default weights (ignore optimizer output)
+uv run python3 main.py --use-panel  # Force the panel challenger's out-of-sample-validated weights
 ```
 
-Default (no flag): prefers `optimization_results_panel.json` when it exists — the out-of-sample, Deflated-Sharpe-Ratio-gated result (run `--optimize` once with `data/panel_scores.csv` present, see Workflow above) — falling back to `optimization_results_individual.json`, then hardcoded `metrics.py` defaults.
+Default (no flag): reads `optimization_results_panel.json` when it exists — the out-of-sample, Deflated-Sharpe-Ratio-gated result (run `--backfill-panel` then `--optimize` once, see Workflow above) — falling back to hardcoded `metrics.py` defaults. `--use-panel` is the same thing, stated explicitly.
 
 ---
 
@@ -293,15 +291,12 @@ Default (no flag): prefers `optimization_results_panel.json` when it exists — 
 | `--watchlists NAME ...` | Personal Avanza watchlists to analyze |
 | `--preset NAME ...` | Built-in presets: `omxs30`, `omxs-mid` |
 | `--save` | Save today's metric snapshot to `data/` |
-| `--correlate` | Run baseline correlation report against historical snapshots |
-| `--optimize` | Re-optimize metric weights from historical data |
-| `--optimize-combo` | Optimize with grid sweep + cross-validation |
+| `--optimize` | Run the panel challenger gate and write `optimization_results_panel.json` (needs `--backfill-panel` first) |
 | `--backfill-panel` | Build the fiscal-year panel from `data/*.csv` (writes `data/panel_fundamentals.csv` + `data/panel_scores.csv`) |
 | `--validate` | Run the cross-sectional validation battery against `data/panel_scores.csv` |
 | `--challenger-confidence X` | Deflated Sharpe Ratio bar the panel challenger must clear to accept optimized weights (default 0.925) |
+| `--permutations N` | Refits on shuffled targets used to measure the gate's null distribution (default 200; 0 skips) |
 | `--no-opt` | Ignore saved weights, use hardcoded defaults |
-| `--use-individual` | Force individual-correlation weights |
-| `--use-combo` | Force combo-optimized weights |
 | `--use-panel` | Force the panel challenger's out-of-sample-validated weights |
 | `--push` | Push top-scoring stocks to an Avanza watchlist |
 | `--push-to NAME` | Which watchlist to push to (default: `Bör köpa`) |
