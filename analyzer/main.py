@@ -929,6 +929,20 @@ def build_arg_parser():
              "hitting the rate limit.",
     )
     ap.add_argument(
+        "--prices-refresh-after",
+        type=int, default=30, metavar="DAYS",
+        help="Refetch a cached symbol when its series ends more than DAYS "
+             "before today (default 30). Without this, --backfill-prices only "
+             "ever downloaded symbols it had no file for, so the cache could "
+             "not move forward and the newest fiscal year kept reading a "
+             "truncated price series. A refresh refetches the FULL range and "
+             "replaces the file rather than appending: Yahoo restates adjusted "
+             "closes retroactively on every dividend, so a spliced tail would "
+             "put a step the size of the dividend into the panel's forward "
+             "returns. Use a large number to keep the old skip-if-present "
+             "behavior, or 0 to refetch everything.",
+    )
+    ap.add_argument(
         "--prices-cooldown",
         type=float, default=600.0, metavar="SECONDS",
         help="Wait after a batch exhausts its retries before moving to the "
@@ -1087,8 +1101,12 @@ def main():
         result = backfill_prices(
             symbol_map.values(), start=args.prices_from,
             batch_size=args.prices_batch_size, cooldown=args.prices_cooldown,
+            refresh_after_days=args.prices_refresh_after,
         )
         verified = verify_all(symbol_map)
+        if result.get("refreshed"):
+            print(f"[yahoo] refreshed {len(result['refreshed'])} stale "
+                  "symbol(s) to today")
         missing = len(result["rate_limited"]) + len(result["failed"])
         if missing:
             print(f"\n[yahoo] {missing} symbol(s) not downloaded — re-run this "

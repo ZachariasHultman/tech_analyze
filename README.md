@@ -192,6 +192,8 @@ uv run python3 main.py --fetch-fx           # ECB daily rates -> data/fx_sek.csv
 Skipping these does not error — the panel silently falls back to Avanza's own prices in each stock's listing currency — but the panel it builds is **not** the one the numbers above describe. Both are worth understanding before you skip them:
 
 - **`--backfill-prices`** fetches dividend-adjusted daily closes from Yahoo into `data/yahoo_prices/`, verifies each series against the Avanza prices already in your snapshots (an unverifiable symbol is dropped, not guessed), and caches the symbol map in `data/yahoo_symbols.json`. Avanza's OHLC is a rolling, unadjusted ~5-year window; Yahoo's goes back to 2015. This is what takes the panel from 4 usable fiscal years to 7. It is resumable and rate-limit-prone — re-run it after a wall, and lower `--prices-batch-size` (default 8) or raise `--prices-cooldown` (default 600s) if it keeps hitting one. `--prices-from` sets the start date (default 2015-01-01).
+
+  Re-running it also **brings the cache forward**: any symbol whose series ends more than `--prices-refresh-after` days ago (default 30) is refetched, everything newer is skipped so you don't pay the rate limit for data you already have. Pass a large number for the old skip-if-present behavior, or `0` to refetch the lot.
 - **`--fetch-fx`** caches ECB daily reference rates (via Frankfurter — free, no API key) so forward returns can be taken in SEK. 44% of the universe is not SEK-listed and USD/SEK moved roughly +24% across the sample, so without it every US name in a given year carries the same FX move, and the within-year demeaning hands that shared move to whatever metric happens to correlate with being US-listed. Idempotent: re-running when the cache already covers the range makes no requests. `--fx-from` mirrors `--prices-from`.
 
 Only the *target* is converted to SEK; the predictors stay in listing currency (see the module docstring in `analyzer/panel.py`). The Pi never needs either command — both caches only matter when building the panel.
@@ -239,11 +241,13 @@ uv run python3 main.py --watchlists Äger
 | **After re-saving** | `--backfill-panel --validate`, then `--optimize` |
 | **If you only changed a threshold in code** | `uv run python3 main.py --backfill-panel --validate` (rebuilds the panel and prints the diagnostics, without re-fitting weights) |
 | **If you add new stocks to universe** | `--save`, then `--backfill-prices` (the new names have no Yahoo cache yet), then re-optimize |
-| **Every few months, or before trusting a number** | `--fetch-fx` then `--backfill-prices` — both are incremental and skip what's already cached |
+| **Before rebuilding the panel** | `--fetch-fx` then `--backfill-prices` — both skip what's already current, and the second brings stale series forward |
 
 Re-saving quarterly is enough. Re-optimizing is only needed after a re-save or when you've significantly expanded the universe.
 
-`--backfill-prices` only downloads symbols it doesn't already have on disk, so it will *not* extend an existing series forward on its own — delete a company's file under `data/yahoo_prices/` to force a refetch. The panel's most recent fiscal year is the one this affects.
+**On refreshing the price cache.** `--backfill-prices` used to only download symbols it had no file for, so the cache never moved forward and the panel's most recent fiscal year kept reading a truncated series. It now refetches anything staler than `--prices-refresh-after` days (default 30) and skips the rest.
+
+A refresh **refetches a symbol's whole history and replaces the file** rather than appending the missing tail, and that is deliberate: Yahoo restates its adjusted close *retroactively* every time a dividend or split lands, so the entire series rescales. Splicing a freshly-adjusted tail onto a stale history would put a step the size of the dividend at the seam — inside `close_adj`, which is exactly the series the panel computes forward returns from. That is the bug this repo already fixed once when the target was price-only; the bandwidth saved isn't worth reintroducing it. If a refetch gets rate-limited, the existing file stays put, so a refresh is never worse than not refreshing.
 
 ---
 
@@ -370,6 +374,7 @@ Default (no flag): reads `optimization_results_panel.json` when it exists — th
 | `--backfill-prices` | Mac-only one-time step: fetch Yahoo dividend-adjusted closes into `data/yahoo_prices/`, verified against the Avanza prices in your snapshots. Lifts the panel from 4 fiscal years to 7. Resumable |
 | `--prices-from YYYY-MM-DD` | Earliest date for `--backfill-prices` (default `2015-01-01`) |
 | `--prices-batch-size N` | Symbols per Yahoo request (default 8). Lower it if you keep getting rate-limited |
+| `--prices-refresh-after DAYS` | Refetch a cached symbol whose series ends more than DAYS ago (default 30); newer ones are skipped. A refresh replaces the full history, it does not append. `0` refetches everything |
 | `--prices-cooldown SECONDS` | Pause after a batch exhausts its retries (default 600). Within a batch the backoff is already 30s doubling to a 900s cap |
 | `--fetch-fx` | Mac-only manual step: cache ECB daily rates to `data/fx_sek.csv` so forward returns are computed in SEK. Idempotent |
 | `--fx-from YYYY-MM-DD` | Earliest date for `--fetch-fx` (default `2015-01-01`) |

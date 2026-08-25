@@ -135,6 +135,9 @@ def test_partial_progress_survives_a_rate_limit_wall(tmp_path):
 
 
 def test_resume_skips_what_is_already_downloaded(tmp_path):
+    """resume in isolation: refresh_after_days=None so only the
+    already-on-disk rule is under test. The staleness rule that now sits on
+    top of it has its own tests below."""
     calls = []
 
     def downloader(symbols, **kw):
@@ -142,11 +145,12 @@ def test_resume_skips_what_is_already_downloaded(tmp_path):
         return _yf_frame(list(symbols))
 
     yp.backfill_prices(["A.ST", "B.ST"], out_dir=str(tmp_path), batch_size=2,
+                       refresh_after_days=None,
                        sleep_fn=lambda s: None, downloader=downloader)
     calls.clear()
     res = yp.backfill_prices(["A.ST", "B.ST", "C.ST"], out_dir=str(tmp_path),
-                             batch_size=2, sleep_fn=lambda s: None,
-                             downloader=downloader)
+                             batch_size=2, refresh_after_days=None,
+                             sleep_fn=lambda s: None, downloader=downloader)
     assert res["skipped"] == 2
     assert calls == [["C.ST"]], "already-downloaded symbols must not be refetched"
 
@@ -383,12 +387,152 @@ def test_rerun_picks_up_only_what_is_missing(tmp_path):
 
     first = yp.backfill_prices(["A.ST", "B.ST", "C.ST"], out_dir=str(tmp_path),
                                batch_size=1, max_retries=1,
+                               refresh_after_days=None,
                                sleep_fn=lambda s: None, downloader=downloader)
     assert first["rate_limited"] == ["B.ST"]
 
     state["wall"] = False
     second = yp.backfill_prices(["A.ST", "B.ST", "C.ST"], out_dir=str(tmp_path),
                                 batch_size=1, max_retries=1,
+                                refresh_after_days=None,
                                 sleep_fn=lambda s: None, downloader=downloader)
     assert second["written"] == ["B.ST"]
     assert second["skipped"] == 2
+
+
+# ------------------------------------------------------- staleness / refresh
+def _write_price_file(tmp_path, symbol, last_date, n=50):
+    """A cached price file whose series ends on ``last_date``."""
+    idx = pd.bdate_range(end=pd.Timestamp(last_date), periods=n)
+    pd.DataFrame({"close_adj": np.arange(n, dtype=float),
+                  "close_raw": np.arange(n, dtype=float)},
+                 index=idx).rename_axis("date").to_csv(
+        yp._price_path(symbol, str(tmp_path)))
+
+
+def test_a_stale_cache_is_refetched(tmp_path):
+    """The gap this closes: resume=True used to skip any symbol already on
+    disk, so a cache could never move forward and the newest fiscal year kept
+    reading a truncated price series."""
+    calls = []
+
+    def downloader(symbols, **kw):
+        calls.append(list(symbols))
+        return _yf_frame(list(symbols))
+
+    _write_price_file(tmp_path, "A.ST", "2026-01-15")
+    res = yp.backfill_prices(["A.ST"], out_dir=str(tmp_path), batch_size=1,
+                             end="2026-08-25", refresh_after_days=30,
+                             sleep_fn=lambda s: None, downloader=downloader)
+
+    assert calls == [["A.ST"]]
+    assert res["refreshed"] == ["A.ST"]
+    assert res["skipped"] == 0
+
+
+def test_a_current_cache_is_still_skipped(tmp_path):
+    """Rate-limit protection is the reason resume exists -- staleness must not
+    turn every run into a full 136-symbol refetch."""
+    calls = []
+
+    def downloader(symbols, **kw):
+        calls.append(list(symbols))
+        return _yf_frame(list(symbols))
+
+    _write_price_file(tmp_path, "A.ST", "2026-08-21")
+    res = yp.backfill_prices(["A.ST"], out_dir=str(tmp_path), batch_size=1,
+                             end="2026-08-25", refresh_after_days=30,
+                             sleep_fn=lambda s: None, downloader=downloader)
+
+    assert calls == [], "a cache inside the freshness window must not refetch"
+    assert res["skipped"] == 1
+    assert res["refreshed"] == []
+
+
+def test_refresh_refetches_the_whole_range_not_just_the_tail(tmp_path):
+    """close_adj is restated retroactively by every new dividend or split, so
+    appending a freshly-adjusted tail to a stale history would splice in a jump
+    of exactly the dividend size -- straight into the panel's forward returns.
+    A refresh must therefore replace the file, and ask for the full range."""
+    asked = {}
+
+    def downloader(symbols, start=None, end=None, **kw):
+        asked["start"], asked["end"] = start, end
+        return _yf_frame(list(symbols))
+
+    _write_price_file(tmp_path, "A.ST", "2026-01-15")
+    yp.backfill_prices(["A.ST"], out_dir=str(tmp_path), batch_size=1,
+                       start="2015-01-01", end="2026-08-25",
+                       refresh_after_days=30,
+                       sleep_fn=lambda s: None, downloader=downloader)
+
+    assert asked["start"] == "2015-01-01", "a refresh must refetch full history"
+    on_disk = yp.load_symbol_prices("A.ST", out_dir=str(tmp_path))
+    # _yf_frame starts in 2023; the stale 2026-01 file is gone, not merged
+    assert on_disk.index.min().year == 2023
+    assert len(on_disk) == 400
+
+
+def test_refresh_after_none_never_refetches(tmp_path):
+    """The old behavior stays reachable for a pure resume."""
+    calls = []
+
+    def downloader(symbols, **kw):
+        calls.append(list(symbols))
+        return _yf_frame(list(symbols))
+
+    _write_price_file(tmp_path, "A.ST", "2020-01-15")
+    res = yp.backfill_prices(["A.ST"], out_dir=str(tmp_path), batch_size=1,
+                             end="2026-08-25", refresh_after_days=None,
+                             sleep_fn=lambda s: None, downloader=downloader)
+    assert calls == []
+    assert res["skipped"] == 1
+
+
+def test_refresh_after_zero_refetches_everything(tmp_path):
+    calls = []
+
+    def downloader(symbols, **kw):
+        calls.append(list(symbols))
+        return _yf_frame(list(symbols))
+
+    _write_price_file(tmp_path, "A.ST", "2026-08-25")
+    res = yp.backfill_prices(["A.ST"], out_dir=str(tmp_path), batch_size=1,
+                             end="2026-08-25", refresh_after_days=0,
+                             sleep_fn=lambda s: None, downloader=downloader)
+    assert calls == [["A.ST"]]
+    assert res["refreshed"] == ["A.ST"]
+
+
+def test_an_unreadable_cache_counts_as_stale(tmp_path):
+    """A truncated or corrupt file must not be treated as current forever."""
+    calls = []
+
+    def downloader(symbols, **kw):
+        calls.append(list(symbols))
+        return _yf_frame(list(symbols))
+
+    yp._price_path("A.ST", str(tmp_path))
+    (tmp_path / "A.ST.csv").write_text("not,a,price,file\n")
+    res = yp.backfill_prices(["A.ST"], out_dir=str(tmp_path), batch_size=1,
+                             end="2026-08-25", refresh_after_days=30,
+                             sleep_fn=lambda s: None, downloader=downloader)
+    assert calls == [["A.ST"]]
+    assert res["refreshed"] == ["A.ST"]
+
+
+def test_a_walled_refresh_keeps_the_stale_file(tmp_path):
+    """Refreshing must never be worse than not refreshing: if Yahoo walls the
+    refetch, the existing series stays on disk rather than being cleared."""
+    def downloader(symbols, **kw):
+        raise _FakeRateLimit()
+
+    _write_price_file(tmp_path, "A.ST", "2026-01-15")
+    res = yp.backfill_prices(["A.ST"], out_dir=str(tmp_path), batch_size=1,
+                             end="2026-08-25", refresh_after_days=30,
+                             max_retries=1, sleep_fn=lambda s: None,
+                             downloader=downloader)
+
+    assert res["rate_limited"] == ["A.ST"]
+    kept = yp.load_symbol_prices("A.ST", out_dir=str(tmp_path))
+    assert kept is not None and kept.index.max() == pd.Timestamp("2026-01-15")

@@ -218,15 +218,67 @@ def _price_path(symbol, out_dir=PRICES_DIR):
     return os.path.join(out_dir, f"{safe}.csv")
 
 
+def _cached_last_date(symbol, out_dir):
+    """Last date in a symbol's cached series, or None if absent/unreadable.
+
+    Unreadable counts the same as absent on purpose: a truncated or half-written
+    file must not be mistaken for a current one and skipped forever.
+    """
+    df = load_symbol_prices(symbol, out_dir=out_dir)
+    if df is None or df.empty:
+        return None
+    try:
+        return pd.Timestamp(df.index.max())
+    except Exception:
+        return None
+
+
+def _is_stale(symbol, out_dir, end, refresh_after_days):
+    """Should this cached symbol be refetched?
+
+    ``refresh_after_days=None`` disables the check entirely (pure resume, the
+    original behavior); 0 refreshes everything that exists.
+    """
+    if refresh_after_days is None:
+        return False
+    if refresh_after_days == 0:
+        return True
+    last = _cached_last_date(symbol, out_dir)
+    if last is None:
+        return True
+    return (pd.Timestamp(end) - last).days > refresh_after_days
+
+
 def backfill_prices(symbols, start="2015-01-01", end=None, out_dir=PRICES_DIR,
                     batch_size=8, pause=3.0, resume=True, max_retries=6,
                     base_sleep=30.0, cooldown=600.0, max_consecutive_walls=3,
-                    sleep_fn=time.sleep, downloader=None):
+                    refresh_after_days=30, sleep_fn=time.sleep,
+                    downloader=None):
     """Download adjusted + raw closes for ``symbols``, one file per symbol.
 
     Resumable by design: each symbol is written the moment its batch returns
     and ``resume=True`` skips symbols already on disk, so nothing downloaded is
     ever re-fetched or lost.
+
+    ``resume`` alone used to mean a cache could never move forward: any symbol
+    with a file was skipped, so re-running after a ``--save`` left the newest
+    fiscal year reading a truncated price series. ``refresh_after_days`` closes
+    that -- a cached series whose last date is more than that many days before
+    ``end`` is refetched. ``None`` restores the old skip-if-present behavior,
+    0 refreshes every symbol that exists.
+
+    **A refresh refetches the full range and replaces the file; it does not
+    append a tail.** Yahoo's adjusted close is restated *retroactively* every
+    time a dividend or split lands, so the whole history rescales. Splicing a
+    freshly-adjusted tail onto a stale history would inject a step of exactly
+    the dividend size at the seam -- directly into ``close_adj``, which is the
+    series ``load_verified_closes`` hands the panel to compute forward returns
+    from. The bandwidth saved is not worth reintroducing the class of bug this
+    pipeline already fixed once.
+
+    Refreshing is never worse than not refreshing: the existing file is only
+    overwritten once a replacement actually arrives, so a walled refetch leaves
+    the stale series in place.
 
     Rate-limit handling has two layers, because a wall is not always fatal:
 
@@ -247,11 +299,19 @@ def backfill_prices(symbols, start="2015-01-01", end=None, out_dir=PRICES_DIR,
     end = end or pd.Timestamp.today().strftime("%Y-%m-%d")
     symbols = sorted(set(s for s in symbols if s))
 
-    todo = [s for s in symbols
-            if not (resume and os.path.exists(_price_path(s, out_dir)))]
+    todo, refreshed = [], []
+    for symbol in symbols:
+        if not (resume and os.path.exists(_price_path(symbol, out_dir))):
+            todo.append(symbol)
+        elif _is_stale(symbol, out_dir, end, refresh_after_days):
+            todo.append(symbol)
+            refreshed.append(symbol)
     skipped = len(symbols) - len(todo)
     if skipped:
-        print(f"  [yahoo] {skipped} symbol(s) already on disk, skipping")
+        print(f"  [yahoo] {skipped} symbol(s) already current, skipping")
+    if refreshed:
+        print(f"  [yahoo] {len(refreshed)} cached symbol(s) stale by more than "
+              f"{refresh_after_days}d — refetching full history")
 
     n_batches = (len(todo) + batch_size - 1) // batch_size
     written, failed, walled = [], [], []
@@ -304,7 +364,7 @@ def backfill_prices(symbols, start="2015-01-01", end=None, out_dir=PRICES_DIR,
               "of this project) — Yahoo throttles on TLS fingerprint and a "
               "browser-impersonating session sidesteps the limit entirely.")
     return {"written": written, "failed": failed, "rate_limited": walled,
-            "skipped": skipped, "aborted": aborted}
+            "skipped": skipped, "refreshed": refreshed, "aborted": aborted}
 
 
 def _extract_symbol(data, symbol, batch_len):
