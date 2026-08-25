@@ -130,182 +130,104 @@ def get_data(
 ):
     ticker_analysis = avanza.get_analysis(ticker_id)
 
-    investment = any(
-        sector["sectorName"] == "Investmentbolag" for sector in ticker_info["sectors"]
-    )
-
     if get_hist:
         hist = {}
 
     ticker_name = f'{ticker_info["name"]} {ticker_info["orderbookId"]}'
 
-    if not investment:
-        sector = [sector for sector in ticker_info["sectors"]]
-        manager._initialize_template(ticker_name, sector)
+    sector = [sector for sector in ticker_info["sectors"]]
+    manager._initialize_template(ticker_name, sector)
 
-        # --- OHLC data (needed for CAGR, FCFY) ---
-        sma200, weekly_average_close, sma200_slope, closing_hist_data = (
-            calculate_sma200(avanza, ticker_id)
-        )
+    # --- OHLC data (needed for CAGR, FCFY) ---
+    sma200, weekly_average_close, sma200_slope, closing_hist_data = (
+        calculate_sma200(avanza, ticker_id)
+    )
 
-        # --- revenue trend (year only, quarterly removed as too noisy) ---
-        rev_trend_year, rev_trend_quarter, rev_year_hist, rev_quarter_hist = (
-            calculate_revenue_trend(ticker_analysis)
-        )
-        manager._update(
-            ticker_name, sector, "revenue trend year status", rev_trend_year
-        )
+    # --- revenue trend (year only, quarterly removed as too noisy) ---
+    rev_trend_year, rev_trend_quarter, rev_year_hist, rev_quarter_hist = (
+        calculate_revenue_trend(ticker_analysis)
+    )
+    manager._update(
+        ticker_name, sector, "revenue trend year status", rev_trend_year
+    )
 
-        # --- valuation/growth/cashflow base fields (sector-agnostic ratios use these) ---
-        pe, pe_hist = calculate_PE(ticker_analysis)
-        cagr = calculate_closing_CAGR(avanza, ticker_id)
-        (fcfy, free_cashflow, fcfy_hist, free_cashflow_hist) = (
-            calculate_free_cashflow_yield(yahoo_ticker, ticker_info, closing_hist_data)
-        )
-        de_ratio, de_ratio_hist = calculate_de(ticker_analysis)
-        roe, roe_hist = calculate_roe(ticker_analysis)
-        nd_ebitda_ratio, nd_ebitda_hist = extract_netdebt_ebitda_ratio(ticker_analysis)
+    # --- valuation/growth/cashflow base fields (sector-agnostic ratios use these) ---
+    pe, pe_hist = calculate_PE(ticker_analysis)
+    cagr = calculate_closing_CAGR(avanza, ticker_id)
+    (fcfy, free_cashflow, fcfy_hist, free_cashflow_hist) = (
+        calculate_free_cashflow_yield(yahoo_ticker, ticker_info, closing_hist_data)
+    )
+    de_ratio, de_ratio_hist = calculate_de(ticker_analysis)
+    roe, roe_hist = calculate_roe(ticker_analysis)
+    nd_ebitda_ratio, nd_ebitda_hist = extract_netdebt_ebitda_ratio(ticker_analysis)
 
-        # write base inputs (SummaryManager accepts these even if not in template)
-        manager._update(ticker_name, sector, "pe", pe[-1] if pe else None)
-        manager._update(ticker_name, sector, "cagr", cagr[-1] if cagr else None)
-        manager._update(ticker_name, sector, "fcfy", fcfy)
-        manager._update(ticker_name, sector, "de", de_ratio)
-        manager._update(ticker_name, sector, "roe", roe)
-        manager._update(
-            ticker_name, sector, "net debt - ebitda status", nd_ebitda_ratio
-        )
-        # multi-year growth
-        rev_cagr_y, _ = calculate_revenue_y_cagr(ticker_analysis)
-        eps_cagr_y, _ = calculate_eps_y_cagr(ticker_analysis)
-        manager._update(ticker_name, sector, "revenue y cagr status", rev_cagr_y)
-        manager._update(ticker_name, sector, "eps y cagr status", eps_cagr_y)
+    # write base inputs (SummaryManager accepts these even if not in template)
+    manager._update(ticker_name, sector, "pe", pe[-1] if pe else None)
+    manager._update(ticker_name, sector, "cagr", cagr[-1] if cagr else None)
+    manager._update(ticker_name, sector, "fcfy", fcfy)
+    manager._update(ticker_name, sector, "de", de_ratio)
+    manager._update(ticker_name, sector, "roe", roe)
+    manager._update(
+        ticker_name, sector, "net debt - ebitda status", nd_ebitda_ratio
+    )
+    # multi-year growth
+    rev_cagr_y, _ = calculate_revenue_y_cagr(ticker_analysis)
+    eps_cagr_y, _ = calculate_eps_y_cagr(ticker_analysis)
+    manager._update(ticker_name, sector, "revenue y cagr status", rev_cagr_y)
+    manager._update(ticker_name, sector, "eps y cagr status", eps_cagr_y)
 
-        # quality vs own history
-        nm_vs_avg, _ = calculate_net_margin_vs_avg(
-            ticker_info, ticker_analysis, years=5
-        )
-        roe_vs_avg, _ = calculate_roe_vs_avg(ticker_info, ticker_analysis, years=5)
-        manager._update(ticker_name, sector, "net margin vs avg status", nm_vs_avg)
-        manager._update(ticker_name, sector, "roe vs avg status", roe_vs_avg)
+    # quality vs own history
+    nm_vs_avg, _ = calculate_net_margin_vs_avg(
+        ticker_info, ticker_analysis, years=5
+    )
+    roe_vs_avg, _ = calculate_roe_vs_avg(ticker_info, ticker_analysis, years=5)
+    manager._update(ticker_name, sector, "net margin vs avg status", nm_vs_avg)
+    manager._update(ticker_name, sector, "roe vs avg status", roe_vs_avg)
 
-        # --- : gross margin stability ---
-        gm_stability = calculate_gross_margin_stability(ticker_analysis)
-        manager._update(ticker_name, sector, "gross margin stability status", gm_stability)
+    # --- : gross margin stability ---
+    gm_stability = calculate_gross_margin_stability(ticker_analysis)
+    manager._update(ticker_name, sector, "gross margin stability status", gm_stability)
 
-        # --- : Piotroski F-Score ---
-        f_score = calculate_piotroski_f_score(
-            ticker_analysis, ticker_info, fcfy, de_ratio, roe
-        )
-        manager._update(ticker_name, sector, "piotroski f-score status", f_score)
+    # --- : Piotroski F-Score ---
+    f_score = calculate_piotroski_f_score(
+        ticker_analysis, ticker_info, fcfy, de_ratio, roe
+    )
+    manager._update(ticker_name, sector, "piotroski f-score status", f_score)
 
-        # --- : dividend growth ---
-        div_growth = calculate_dividend_growth(ticker_analysis, years=3)
-        manager._update(ticker_name, sector, "dividend growth status", div_growth)
+    # --- : dividend growth ---
+    div_growth = calculate_dividend_growth(ticker_analysis, years=3)
+    manager._update(ticker_name, sector, "dividend growth status", div_growth)
 
-        # --- Price momentum: price / SMA200 - 1 ---
-        if sma200 is not None and weekly_average_close is not None and sma200 > 0:
-            momentum = (weekly_average_close / sma200) - 1.0
-        else:
-            momentum = None
-        manager._update(ticker_name, sector, "price momentum status", momentum)
-
-        if get_hist:
-            hist["sector"] = sector
-            hist["ohlc"] = closing_hist_data
-            hist["pe"] = pe_hist
-            hist["roe"] = roe_hist
-            hist["revenue_year"] = rev_year_hist
-            hist["revenue_quarter"] = rev_quarter_hist
-            hist["eps_quarter"] = _extract_quarterly_series(
-                ticker_analysis, "companyKeyRatiosByQuarterQuarter", "earningsPerShare"
-            )
-            hist["de_ratio"] = de_ratio_hist
-            hist["free_cashflow_yield"] = fcfy_hist
-            hist["free_cashflow"] = free_cashflow_hist
-            hist["netDebtEbitdaRatio"] = nd_ebitda_hist
-            hist["profit_margin"] = extract_profit_margin_hist(ticker_analysis)
-            hist["profit_per_share"] = extract_eps_hist(ticker_analysis)
-            # Full financial data for Piotroski and new metrics
-            hist["net_profit"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "netProfit")
-            hist["total_assets"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalAssets")
-            hist["total_liabilities"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalLiabilities")
-            hist["equity_per_share"] = _extract_yearly_series(ticker_analysis, "companyKeyRatiosByYear", "equityPerShare")
-            hist["ev_ebit"] = _extract_yearly_series(ticker_analysis, "stockKeyRatiosByYear", "evEbitRatio")
-            hist["dividend_per_share"] = _extract_dividend_series(ticker_analysis)
-
+    # --- Price momentum: price / SMA200 - 1 ---
+    if sma200 is not None and weekly_average_close is not None and sma200 > 0:
+        momentum = (weekly_average_close / sma200) - 1.0
     else:
-        sector = [{"sectorId": "51", "sectorName": "Investmentbolag"}]
-        manager._initialize_template(ticker_name, sector)
+        momentum = None
+    manager._update(ticker_name, sector, "price momentum status", momentum)
 
-        # --- OHLC data ---
-        sma200, weekly_average_close, sma200_slope, closing_hist_data = (
-            calculate_sma200(avanza, ticker_id)
+    if get_hist:
+        hist["sector"] = sector
+        hist["ohlc"] = closing_hist_data
+        hist["pe"] = pe_hist
+        hist["roe"] = roe_hist
+        hist["revenue_year"] = rev_year_hist
+        hist["revenue_quarter"] = rev_quarter_hist
+        hist["eps_quarter"] = _extract_quarterly_series(
+            ticker_analysis, "companyKeyRatiosByQuarterQuarter", "earningsPerShare"
         )
-
-        # --- base fields for ratios ---
-        pe, pe_hist = calculate_PE(ticker_analysis)
-        cagr = calculate_closing_CAGR(avanza, ticker_id)
-        (fcfy, free_cashflow, fcfy_hist, free_cashflow_hist) = (
-            calculate_free_cashflow_yield(yahoo_ticker, ticker_info, closing_hist_data)
-        )
-        roe, roe_hist = calculate_roe(ticker_analysis)
-        nd_ebitda_ratio, nd_ebitda_hist = extract_netdebt_ebitda_ratio(ticker_analysis)
-
-        manager._update(ticker_name, sector, "pe", pe[-1] if pe else None)
-        manager._update(ticker_name, sector, "cagr", cagr[-1] if cagr else None)
-        manager._update(ticker_name, sector, "fcfy", fcfy)
-        manager._update(ticker_name, sector, "roe", roe)
-        manager._update(
-            ticker_name, sector, "net debt - ebitda status", nd_ebitda_ratio
-        )
-
-        # --- NAV fields kept in investment template ---
-        (
-            nav_discount,
-            calculated_nav_discount,
-            nav_discount_trend,
-            nav_discount_hist,
-            calculated_nav_discount_hist,
-        ) = calculate_NAV_discount(ticker_info["listing"]["tickerSymbol"])
-        manager._update(ticker_name, sector, "nav discount status", nav_discount)
-        manager._update(
-            ticker_name,
-            sector,
-            "calculated nav discount status",
-            calculated_nav_discount,
-        )
-        manager._update(
-            ticker_name, sector, "nav discount trend status", nav_discount_trend
-        )
-
-        # --- Price momentum: price / SMA200 - 1 ---
-        # Same computation as the regular branch. The SMA200 above was already
-        # being calculated here and dropped on the floor; the ranking key needs
-        # it (see template_investment in summary_manager.py).
-        if sma200 is not None and weekly_average_close is not None and sma200 > 0:
-            momentum = (weekly_average_close / sma200) - 1.0
-        else:
-            momentum = None
-        manager._update(ticker_name, sector, "price momentum status", momentum)
-
-        if get_hist:
-            hist["sector"] = sector
-            hist["ohlc"] = closing_hist_data
-            hist["pe"] = pe_hist
-            hist["roe"] = roe_hist
-            hist["nav_discount"] = nav_discount_hist
-            hist["calculated_nav_discount"] = calculated_nav_discount_hist
-            hist["free_cashflow_yield"] = fcfy_hist
-            hist["free_cashflow"] = free_cashflow_hist
-            hist["profit_margin"] = extract_profit_margin_hist(ticker_analysis)
-            hist["profit_per_share"] = extract_eps_hist(ticker_analysis)
-            hist["net_profit"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "netProfit")
-            hist["total_assets"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalAssets")
-            hist["total_liabilities"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalLiabilities")
-            hist["equity_per_share"] = _extract_yearly_series(ticker_analysis, "companyKeyRatiosByYear", "equityPerShare")
-            hist["ev_ebit"] = _extract_yearly_series(ticker_analysis, "stockKeyRatiosByYear", "evEbitRatio")
-            hist["dividend_per_share"] = _extract_dividend_series(ticker_analysis)
+        hist["de_ratio"] = de_ratio_hist
+        hist["free_cashflow_yield"] = fcfy_hist
+        hist["free_cashflow"] = free_cashflow_hist
+        hist["netDebtEbitdaRatio"] = nd_ebitda_hist
+        hist["profit_margin"] = extract_profit_margin_hist(ticker_analysis)
+        hist["profit_per_share"] = extract_eps_hist(ticker_analysis)
+        # Full financial data for Piotroski and new metrics
+        hist["net_profit"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "netProfit")
+        hist["total_assets"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalAssets")
+        hist["total_liabilities"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalLiabilities")
+        hist["equity_per_share"] = _extract_yearly_series(ticker_analysis, "companyKeyRatiosByYear", "equityPerShare")
+        hist["ev_ebit"] = _extract_yearly_series(ticker_analysis, "stockKeyRatiosByYear", "evEbitRatio")
+        hist["dividend_per_share"] = _extract_dividend_series(ticker_analysis)
 
     if get_hist:
         return ticker_name, hist
@@ -511,19 +433,21 @@ def calculate_score(manager, metrics_to_score=None, use_cross_sectional_ranks=Tr
 
         return summary
 
-    # ── One pool, not two ────────────────────────────────────────────────
-    # Regular and investment companies used to be scored in separate passes,
-    # so every percentile -- per-metric ranks, quality_pct, value_pct -- was
-    # computed *within* its own pool, and _update_watchlist then compared them
-    # as if they were the same scale. Being best-of-3 investment companies
-    # beat being best-of-26 regular ones (Investor B combined=1.00 against
-    # Alfa Laval's 0.73), and below 5 companies the small pool skipped
-    # cross-sectional ranking altogether and fell back to absolute thresholds
-    # -- two scoring regimes in one watchlist.
+    # ── One pool ─────────────────────────────────────────────────────────
+    # Every company is scored in a single cross-section, so percentiles mean
+    # the same thing for all of them. This used to be two pools -- regular and
+    # investment companies were scored in separate passes, so every percentile
+    # was computed *within* its own pool and then compared across them in
+    # _update_watchlist. Being best-of-3 investment companies beat being
+    # best-of-26 regular ones (Investor B combined=1.00 against Alfa Laval's
+    # 0.73), and below 5 companies the small pool skipped cross-sectional
+    # ranking altogether and fell back to absolute thresholds -- two scoring
+    # regimes in one watchlist.
     #
-    # Scoring the union fixes both. The frames are split back afterwards so
-    # the two-table display and every existing consumer are unaffected, each
-    # keeping only its own template's metric columns.
+    # Pooling fixed the percentiles; the second pool has since been removed
+    # outright (investment companies are excluded from the universe, see
+    # config.EXCLUDED_SECTORS), so there is now one summary and one template
+    # and the split-and-rejoin this function used to do is gone with it.
     def _as_df(src):
         if src is None:
             return pd.DataFrame()
@@ -531,41 +455,11 @@ def calculate_score(manager, metrics_to_score=None, use_cross_sectional_ranks=Tr
             return pd.DataFrame(src).T if src else pd.DataFrame()
         return src
 
-    regular = _as_df(manager.summary)
-    investment = _as_df(manager.summary_investment)
-    reg_index = list(regular.index)
-    inv_index = list(investment.index)
-
-    if regular.empty and investment.empty:
-        manager.summary, manager.summary_investment = regular, investment
+    pooled = _as_df(manager.summary)
+    if pooled.empty:
+        manager.summary = pooled
         return
 
-    frames = [f for f in (regular, investment) if not f.empty]
-    pooled = pd.concat(frames) if len(frames) > 1 else frames[0]
-    # Templates are normally dicts but tests (and any caller) may pass a
-    # plain sequence of column names; both iterate to the same key set.
-    union_template = list(dict.fromkeys(
-        list(manager.template) + list(manager.template_investment)
-    ))
-
-    scored = apply_scores(pooled, union_template, manager, metrics_to_score)
-
-    # Base inputs are shared by both templates; sleeve outputs must survive on
-    # both sides. Everything else belongs to whichever template declared it.
-    _shared = {"points", "quality_pct", "value_pct", "combined_score", "sector",
-               "momentum_pct", "fundamental_pct", "blend_score",
-               "roe", "pe", "cagr", "fcfy", "de"}
-
-    def _slice(index, template):
-        if not index or scored.empty:
-            return pd.DataFrame()
-        rows = scored.loc[[i for i in index if i in scored.index]]
-        keep = [
-            c for c in rows.columns
-            if c in _shared or c in template
-            or (str(c).endswith("_score") and c[: -len("_score")] in template)
-        ]
-        return rows[keep]
-
-    manager.summary = _slice(reg_index, manager.template)
-    manager.summary_investment = _slice(inv_index, manager.template_investment)
+    manager.summary = apply_scores(
+        pooled, list(manager.template), manager, metrics_to_score
+    )

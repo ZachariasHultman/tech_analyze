@@ -23,7 +23,6 @@ def test_combined_score_survives_csv_export(tmp_path, monkeypatch):
         },
         index=["Alpha AB 111", "Beta AB 222"],
     )
-    m.summary_investment = pd.DataFrame()
 
     m._display(save_df=True)
 

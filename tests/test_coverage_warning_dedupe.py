@@ -27,8 +27,6 @@ def _manager(values, metric="test_metric"):
     m = SummaryManager()
     m._weight_overrides = {metric: 1.0}
     m.template = [metric]
-    m.template_investment = []
-    m.summary_investment = {}
     m.summary = pd.DataFrame(
         {metric: values}, index=[f"Company {i}" for i in range(len(values))]
     )

@@ -56,7 +56,7 @@ Each stock is scored on metrics like Piotroski F-Score, revenue and EPS CAGR, RO
 
 Scoring is **cross-sectional** — each metric is ranked relative to all other stocks in the current run (percentile 0–1), so a utility with solid-for-utilities ROE ranks in the top half just like a tech company with high ROE. No sector-specific thresholds needed.
 
-Each metric feeds into two "sleeves" — **quality** (business health: Piotroski F-Score, margin stability, ROE, leverage, etc.) and **value** (cheapness: ROE/PE, CAGR/PE, FCF yield/PE, NAV discount, dividend growth, momentum). `combined_score = quality_pct × value_pct`, and both sleeves must clear `SLEEVE_GATE_MIN` (0.40) for a stock to qualify at all.
+Each metric feeds into two "sleeves" — **quality** (business health: Piotroski F-Score, margin stability, ROE, leverage, etc.) and **value** (cheapness: ROE/PE, CAGR/PE, FCF yield/PE, dividend growth, momentum). `combined_score = quality_pct × value_pct`, and both sleeves must clear `SLEEVE_GATE_MIN` (0.40) for a stock to qualify at all.
 
 The **ranking key within that qualifying set is `blend_score`**: half the stock's price-vs-SMA200 percentile, half its `points` percentile. See "The ranking key" below.
 
@@ -110,11 +110,15 @@ The last three are the important case. All were ~100% populated **live**, so the
 
 Still present and measuring *negative*, though none significantly so: `eps y cagr` (−0.071), `revenue trend year` (−0.055), `dividend growth` (−0.042). Left in — removing metrics because they measure mildly negative on 7 observations is fitting to noise.
 
-### Known gap: investment companies aren't backtested
+### Investment companies are excluded
 
-Öresund, Investor, Industrivärden, Kinnevik, Latour and Lundbergföretagen appear in the live watchlist but contribute **zero rows to the panel**. Their snapshots don't carry a `revenue_year` column, and that's what report dates are derived from. So every number in the tables above describes the other 127 companies only — an investment company's placement in the list is unvalidated.
+Öresund, Investor, Industrivärden, Kinnevik, Latour and Lundbergföretagen are **not scored and not pushed** (`config.EXCLUDED_SECTORS`).
 
-Fixing it needs a dated fallback for report dates plus a decision about whether partial-coverage companies belong in the same cross-section. Not attempted.
+They used to be, through a separate template carrying three NAV-discount metrics no other company had — which meant they were scored on **8 metrics against everyone else's ~17**, and `points`, a *sum* of weighted metric scores, was then ranked across both groups for the same 25 slots. Summing 8 things and 17 things and comparing the totals is the same two-ranking-regimes defect that scoring the two pools separately used to cause.
+
+It had also never been measured. `_iter_fiscal_years` derives report dates from `revenue_year`, which their snapshots don't carry, so they produced **zero panel rows** — every number in the tables above always described the other 127 companies only. Removing them changed the panel not at all (811 company-years, 127 companies, IC +0.118 before and after); it just stopped the live list from ranking six names on a basis nothing had validated.
+
+Routing them through the regular template instead was the obvious alternative and is worse: their snapshots also lack `de_ratio`, `eps_quarter`, `revenue_quarter` and `netDebtEbitdaRatio`, so they would score on a handful of metrics and go on competing — the same defect, quieter. Bringing them back properly means giving `_iter_fiscal_years` a dated fallback (`net_profit`/`profit_per_share` are present and FULL_YEAR-dated) *and* deciding whether partial-coverage companies belong in the same cross-section as fully-covered ones. Not attempted.
 
 (An earlier per-company/per-sector "reliability" score, tracking whether an individual company's own score history predicted its own returns, was tried and dropped — the data doesn't have enough depth per company to support it, see git history if curious.)
 

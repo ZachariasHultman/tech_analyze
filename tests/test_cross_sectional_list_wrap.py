@@ -19,8 +19,6 @@ def test_list_wrapped_values_count_toward_cross_sectional_coverage(capsys):
     m = SummaryManager()
     m._weight_overrides = {"test_metric": 1.0}
     m.template = ["test_metric"]
-    m.template_investment = []
-    m.summary_investment = {}
 
     # 10 companies, all list-wrapped -- matches process_historical's shape.
     # min_samples for n=10 is max(3, ceil(0.6*10)) = 6, well below 10.

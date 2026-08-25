@@ -29,7 +29,6 @@ class _FakeAvanza:
 def _manager_with_no_scored_stocks():
     m = SummaryManager()
     m.summary = pd.DataFrame({"points": []})
-    m.summary_investment = pd.DataFrame()
     return m
 
 

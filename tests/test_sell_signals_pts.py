@@ -26,7 +26,6 @@ def _manager(points_by_company):
         {"points": list(points_by_company.values())},
         index=list(points_by_company.keys()),
     )
-    m.summary_investment = pd.DataFrame()
     return m
 
 

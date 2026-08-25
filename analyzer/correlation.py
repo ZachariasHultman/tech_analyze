@@ -125,23 +125,14 @@ def _score_snapshot(df_slice, metrics_to_score=None, thresholds=None,
 
     out = sm.summary
     if out is None or (isinstance(out, pd.DataFrame) and out.empty):
-        out = sm.summary_investment
-    if out is None or (isinstance(out, pd.DataFrame) and out.empty):
         return pd.DataFrame()
 
-    # Merge both summaries if both have data
     frames = []
-    if sm.summary is not None and not (isinstance(sm.summary, pd.DataFrame) and sm.summary.empty):
-        s = sm.summary if isinstance(sm.summary, pd.DataFrame) else pd.DataFrame(sm.summary).T
-        # Drop columns that are entirely NA to avoid FutureWarning on concat
-        s = s.dropna(axis=1, how="all")
-        if not s.empty:
-            frames.append(s)
-    if sm.summary_investment is not None and not (isinstance(sm.summary_investment, pd.DataFrame) and sm.summary_investment.empty):
-        s = sm.summary_investment if isinstance(sm.summary_investment, pd.DataFrame) else pd.DataFrame(sm.summary_investment).T
-        s = s.dropna(axis=1, how="all")
-        if not s.empty:
-            frames.append(s)
+    s = out if isinstance(out, pd.DataFrame) else pd.DataFrame(out).T
+    # Drop columns that are entirely NA to avoid FutureWarning on concat
+    s = s.dropna(axis=1, how="all")
+    if not s.empty:
+        frames.append(s)
 
     if not frames:
         return pd.DataFrame()
@@ -240,8 +231,6 @@ def _score_with_weights(df_ts, metrics, weights_dict, thresholds_dict=None,
     calculate_score(sm, metrics_to_score=metrics)
 
     scored = sm.summary
-    if scored is None or (isinstance(scored, pd.DataFrame) and scored.empty):
-        scored = sm.summary_investment
     if scored is None or (isinstance(scored, pd.DataFrame) and scored.empty):
         return None, None
     if isinstance(scored, dict):

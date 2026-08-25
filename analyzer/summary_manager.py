@@ -74,74 +74,27 @@ class SummaryManager:
             "price momentum status": None,
         }
 
-        self.summary_investment = {}
-        # ---- INVESTMENT TEMPLATE (keeps NAV items) ----
-        self.template_investment = {
-            "sector": None,
-            "points": 0,
-            # ratios (computed and stored during ingestion)
-            "roe_pe ratio status": None,
-            "cagr_pe ratio status": None,
-            "fcfy_pe ratio status": None,
-            "roe_de ratio status": None,
-            # investment-specific items
-            "nav discount status": None,
-            "calculated nav discount status": None,
-            "nav discount trend status": None,
-            # fundamentals
-            "net debt - ebitda status": None,
-            # Present here because the watchlist ranking key is half momentum
-            # (config.MOMENTUM_BLEND_WEIGHT). Without it an investment company
-            # would compete for the same 25 slots ranked on fundamentals alone
-            # -- two ranking regimes in one list, the same defect that scoring
-            # the two pools separately used to cause. The SMA200 it needs was
-            # already being computed for these companies and discarded.
-            "price momentum status": None,
-        }
-
     def _initialize_template(self, key, sector):
         """
         Ensure the given key exists in the specified sector and initialize it with the template.
         """
-        target = (
-            self.summary
-            if sector[0]["sectorName"] != "Investmentbolag"
-            else self.summary_investment
-        )
-        template = (
-            self.template
-            if sector[0]["sectorName"] != "Investmentbolag"
-            else self.template_investment
-        )
-
-        if key not in target:
-            target[key] = template.copy()  # Create a fresh copy for the key
+        if key not in self.summary:
+            self.summary[key] = self.template.copy()  # fresh copy for the key
 
     def _is_summary_initialized(self, sector=""):
         """
         Checks if self.summary contains at least one company key.
         Returns False if empty, True otherwise.
         """
-        summary = (
-            self.summary if sector != "Investmentbolag" else self.summary_investment
-        )
-        return bool(summary)
+        return bool(self.summary)
 
     def _update(self, ticker, sector, metric, value):
         """
         Updates the summary for the given key with calculated metrics.
         Accepts template metrics AND base ratio inputs (roe, pe, cagr, fcfy, de).
         """
-        target = (
-            self.summary
-            if sector[0]["sectorName"] != "Investmentbolag"
-            else self.summary_investment
-        )
-        template = (
-            self.template
-            if sector[0]["sectorName"] != "Investmentbolag"
-            else self.template_investment
-        )
+        target = self.summary
+        template = self.template
 
         # Ensure the metric is valid (template metric or required base input)
         if metric not in template and metric not in REQUIRED_BASE_COLS:
@@ -158,12 +111,8 @@ class SummaryManager:
 
     def _perform_update(self, ticker, metric, value, sector):
         # Update the metric in the summary
-        if sector[0]["sectorName"] != "Investmentbolag":
-            self.summary[ticker][metric] = [value]
-            self.summary[ticker]["sector"] = [sector]
-        else:
-            self.summary_investment[ticker][metric] = [value]
-            self.summary_investment[ticker]["sector"] = [sector]
+        self.summary[ticker][metric] = [value]
+        self.summary[ticker]["sector"] = [sector]
         return True
 
     def _assign_weight(self, metric):
@@ -368,12 +317,7 @@ class SummaryManager:
 
         def _colorize_row(row):
             colored = row.copy()
-            cols = (
-                self.template
-                if "nav discount status" not in row
-                else self.template_investment
-            )
-            for col in cols:
+            for col in self.template:
                 score_col = col + "_score"
                 if score_col in row:
                     v = row[col]
@@ -406,13 +350,8 @@ class SummaryManager:
 
             # Create flags from *_score while we still have them
             def _flags_row(row):
-                cols = (
-                    self.template
-                    if "nav discount status" not in row
-                    else self.template_investment
-                )
                 out = {}
-                for col in cols:
+                for col in self.template:
                     sc = col + "_score"
                     if sc in row:
                         s = row[sc]
@@ -566,8 +505,6 @@ class SummaryManager:
         # summaries
         if not self.summary.empty:
             _sort_and_print(self.summary, "summary.csv")
-        if not self.summary_investment.empty:
-            _sort_and_print(self.summary_investment, "summary_investment.csv")
 
     def process_historical(
         self, historical_df, metrics_to_use, thresholds=None, sector_column="sector"
@@ -585,10 +522,7 @@ class SummaryManager:
             v = row.get(field)
             if v is not None:
                 return v
-            target = (
-                self.summary if sector != "Investmentbolag" else self.summary_investment
-            )
-            stored = target.get(ticker, {}).get(field)
+            stored = self.summary.get(ticker, {}).get(field)
             if isinstance(stored, (list, tuple)) and stored:
                 return stored[0]
             return stored
@@ -608,10 +542,8 @@ class SummaryManager:
                 if base_val is not None:
                     self._update(ticker, sector_info, base, base_val)
 
-            # 2) template metrics (trends/NAV/etc.)
-            template = (
-                self.template if sector != "Investmentbolag" else self.template_investment
-            )
+            # 2) template metrics (trends etc.)
+            template = self.template
             for metric in metrics_to_use:
                 if metric not in template:
                     continue
@@ -645,10 +577,5 @@ class SummaryManager:
                 if ratio_val is not None:
                     self._update(ticker, sector_info, out_col, ratio_val)
                 else:
-                    target = (
-                        self.summary
-                        if sector != "Investmentbolag"
-                        else self.summary_investment
-                    )
-                    if out_col not in target[ticker]:
-                        target[ticker][out_col] = [None]
+                    if out_col not in self.summary[ticker]:
+                        self.summary[ticker][out_col] = [None]

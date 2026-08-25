@@ -48,7 +48,6 @@ def test_ranks_by_points_not_combined_score(capsys):
         },
         index=["Alpha AB 111", "Beta AB 222"],
     )
-    manager.summary_investment = pd.DataFrame()
 
     avanza = _FakeAvanza(watchlist_orderbook_ids=[])
     result = main._update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa")
@@ -74,7 +73,6 @@ def test_removed_stock_still_shows_full_metrics(capsys):
         },
         index=["Alpha AB 111", "Beta AB 222"],
     )
-    manager.summary_investment = pd.DataFrame()
 
     avanza = _FakeAvanza(watchlist_orderbook_ids=["222"])
     main._update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa")
@@ -125,7 +123,6 @@ def test_ranks_by_blend_when_present(capsys):
         },
         index=["Alpha AB 111", "Beta AB 222"],
     )
-    manager.summary_investment = pd.DataFrame()
 
     avanza = _FakeAvanza(watchlist_orderbook_ids=[])
     result = main._update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa")
@@ -150,7 +147,6 @@ def test_falls_back_to_pts_when_no_blend_column():
         },
         index=["Alpha AB 111", "Beta AB 222"],
     )
-    manager.summary_investment = pd.DataFrame()
 
     avanza = _FakeAvanza(watchlist_orderbook_ids=[])
     result = main._update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa")

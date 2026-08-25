@@ -1,7 +1,7 @@
 """Tests for item 2: two-sleeve (quality/value) scoring.
 
 Covers:
-- every status metric in either SummaryManager template is assigned to
+- every status metric in the SummaryManager template is assigned to
   exactly one of QUALITY_METRICS / VALUE_METRICS (fails loudly if a future
   template addition is left unassigned or double-assigned);
 - the >= SLEEVE_GATE_MIN AND >= SLEEVE_GATE_MIN push gate rejects a stock
@@ -16,10 +16,9 @@ from analyzer.summary_manager import SummaryManager
 def _template_metrics():
     sm = SummaryManager()
     names = set()
-    for tmpl in (sm.template, sm.template_investment):
-        for k in tmpl:
-            if isinstance(k, str) and k.endswith(" status"):
-                names.add(k)
+    for k in sm.template:
+        if isinstance(k, str) and k.endswith(" status"):
+            names.add(k)
     return names
 
 

@@ -176,28 +176,23 @@ def test_pts_is_left_untouched_by_the_blend():
 
 # ------------------------------------------------- survives the pooling split
 
-def test_blend_survives_the_regular_investment_split():
-    """calculate_score scores one pooled frame and slices it back into the two
-    templates; the blend columns are shared outputs and must appear on both."""
+def test_blend_columns_land_on_every_scored_row():
+    """calculate_score scores one pooled frame; the blend columns are outputs
+    of that pass and must be populated for every company in it. This used to
+    also assert they survived the slice back into a second investment frame --
+    that frame no longer exists (config.EXCLUDED_SECTORS)."""
     sm = SummaryManager()
     sm._weight_overrides = {"roe_pe ratio status": 1.0,
                             "net debt - ebitda status": 1.0,
                             "price momentum status": 1.0}
-    inv_sector = [{"sectorId": "51", "sectorName": "Investmentbolag"}]
     for i in range(26):
         n = f"Reg{i:02d}"
         sm._initialize_template(n, _SECTOR)
         sm._update(n, _SECTOR, "roe_pe ratio status", 0.2 + i * 0.1)
         sm._update(n, _SECTOR, "net debt - ebitda status", 5.0 - i * 0.15)
         sm._update(n, _SECTOR, "price momentum status", -0.2 + i * 0.02)
-    for i in range(3):
-        n = f"Inv{i:02d}"
-        sm._initialize_template(n, inv_sector)
-        sm._update(n, inv_sector, "roe_pe ratio status", 1.0 + i * 0.05)
-        sm._update(n, inv_sector, "net debt - ebitda status", 2.5 - i * 0.05)
-        sm._update(n, inv_sector, "price momentum status", 0.05 + i * 0.01)
 
     calculate_score(sm)
-    for frame in (sm.summary, sm.summary_investment):
-        assert "blend_score" in frame.columns
-        assert pd.to_numeric(frame["blend_score"], errors="coerce").notna().all()
+    frame = sm.summary
+    assert "blend_score" in frame.columns
+    assert pd.to_numeric(frame["blend_score"], errors="coerce").notna().all()

@@ -3,7 +3,6 @@ from currency_converter import CurrencyConverter
 import requests
 from avanza.avanza import Resolution, TimePeriod
 from analyzer.helper import *
-from analyzer.get_NAV_data import get_nav_data
 from datetime import datetime
 from analyzer.metrics import ticker_reporting_currency_map
 from analyzer.config import PRICE_SMOOTHING_WINDOW
@@ -688,66 +687,6 @@ def extract_netdebt_ebitda_ratio(avanza_data):
     records.sort(key=lambda r: r["date"])
     latest_val = records[-1]["value"]
     return latest_val, records
-
-
-def calculate_NAV_discount(ticker_name):
-    """
-    Return:
-        nav_discount_mean_30           – float
-        calculated_nav_discount_mean_30– float
-        nav_trend_slope                – float
-        nav_discount_raw               – list[dict{date,value}]
-        calc_nav_discount_raw          – list[dict{date,value}]
-    """
-
-    df_nav = get_nav_data(ticker_name)
-    if df_nav is None or df_nav.empty:
-        return None, None, None, None, None
-
-    # --- keep last 300 records & ensure we have real datetimes ----------
-    df_nav = df_nav.tail(300).copy()
-    df_nav["DATUM"] = pd.to_datetime(df_nav["DATUM"], errors="coerce")
-    df_nav = df_nav.dropna(subset=["DATUM"])
-
-    # --- core columns ---------------------------------------------------
-    nav = df_nav["SUBSTANSVÄRDE"].astype(float)
-    nav_calc = df_nav["BERÄKNAT_SUBSTANSVÄRDE"].astype(float)
-    price = df_nav["PRIS"].astype(float)
-
-    # avoid division-by-zero → replace 0 with NaN
-    nav_discount_series = (price - nav) / nav.replace(0, np.nan)
-    calc_discount_series = (price - nav_calc) / nav_calc.replace(0, np.nan)
-
-    # --- build raw [{"date": …, "value": …}, …] -------------------------
-    nav_discount_raw = [
-        {"date": dt.strftime("%Y-%m-%d"), "value": float(val)}
-        for dt, val in zip(df_nav["DATUM"], nav_discount_series)
-        if pd.notna(val)
-    ]
-    calc_nav_discount_raw = [
-        {"date": dt.strftime("%Y-%m-%d"), "value": float(val)}
-        for dt, val in zip(df_nav["DATUM"], calc_discount_series)
-        if pd.notna(val)
-    ]
-
-    # need at least two points for a trend
-    if len(nav_discount_raw) < 2:
-        return None, None, None, None, None
-
-    # --- 30-day means ---------------------------------------------------
-    nav_mean_30 = float(nav_discount_series.tail(30).mean())
-    calc_nav_mean_30 = float(calc_discount_series.tail(30).mean())
-
-    # --- slope of the last 5 discount values (similar to EPS trend) -----
-    nav_trend_slope = calculate_slope([d["value"] for d in nav_discount_raw[-5:]])
-
-    return (
-        nav_mean_30,
-        calc_nav_mean_30,
-        float(nav_trend_slope),
-        nav_discount_raw,
-        calc_nav_discount_raw,
-    )
 
 
 def calculate_gross_margin_stability(

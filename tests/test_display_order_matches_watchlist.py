@@ -40,7 +40,6 @@ def _display_order(df, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     sm = SummaryManager()
     sm.summary = df
-    sm.summary_investment = pd.DataFrame()
     sm._display(save_df=True)
     return list(pd.read_csv(tmp_path / "summary.csv", index_col=0).index)
 
@@ -78,7 +77,6 @@ def test_display_and_watchlist_agree_on_the_top_slot(monkeypatch, tmp_path):
 
     manager = SummaryManager()
     manager.summary = _frame()
-    manager.summary_investment = pd.DataFrame()
 
     result = _update_watchlist(_FakeAvanza(), manager, top_n=3,
                                target_name="Bör köpa")

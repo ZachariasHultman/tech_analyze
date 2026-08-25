@@ -47,6 +47,7 @@ from analyzer.config import (
     SLEEVE_GATE_MIN,
     MOMENTUM_BLEND_WEIGHT,
     EXCLUDED_TICKER_IDS,
+    EXCLUDED_SECTORS,
 )
 from datetime import date
 import argparse
@@ -140,6 +141,22 @@ def to_yahoo_symbol(ticker_info) -> str | None:
     if country == "US":
         return symbol
     return None
+
+
+def _is_excluded(ticker_id, ticker_info):
+    """Should this ticker be left out of the run entirely?
+
+    Three reasons, all deliberate: no sector metadata at all (nothing can be
+    scored), an explicitly excluded id, or an excluded sector. The last is
+    investment companies -- see config.EXCLUDED_SECTORS for why they are out
+    rather than scored on a partial template.
+    """
+    sectors = ticker_info.get("sectors") or []
+    if not sectors:
+        return True
+    if ticker_id in EXCLUDED_TICKER_IDS:
+        return True
+    return any(s.get("sectorName") in EXCLUDED_SECTORS for s in sectors)
 
 
 def _extract_orderbook_id(index_name):
@@ -339,8 +356,6 @@ def _format_optimizer_status(status):
         )
         lines.append("    Momentum is the metric survivorship bias most "
                      "inflates — treat this as the optimistic end.")
-        lines.append("    Investment companies are not in the panel at all, so "
-                     "their placement in the list is unvalidated.")
 
     lines.append("    Survivorship bias is not corrected for and inflates all "
                  "of the above.")
@@ -398,7 +413,7 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
 
     # Collect all scored stocks from both summaries
     frames = []
-    for summary in [manager.summary, manager.summary_investment]:
+    for summary in [manager.summary]:
         if summary is not None and isinstance(summary, pd.DataFrame) and not summary.empty:
             if "points" in summary.columns:
                 frames.append(summary)
@@ -570,7 +585,7 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
     portfolio_ids = set(str(oid) for oid in (_wl_attr(wl, "orderbookIds") or []))
 
     frames = []
-    for summary in [manager.summary, manager.summary_investment]:
+    for summary in [manager.summary]:
         if summary is not None and isinstance(summary, pd.DataFrame) and not summary.empty:
             frames.append(summary)
     if not frames:
@@ -1216,7 +1231,7 @@ def main():
             skipped.append((ticker_id, str(e)))
             continue
 
-        if not ticker_info["sectors"] or ticker_id in EXCLUDED_TICKER_IDS:
+        if _is_excluded(ticker_id, ticker_info):
             continue
         yahoo_symbol = to_yahoo_symbol(ticker_info)
         if yahoo_symbol is None:

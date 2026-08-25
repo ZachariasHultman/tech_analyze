@@ -7,11 +7,10 @@
 # quality and value sleeves. Replaces the old single-spearman qualify gate.
 SLEEVE_GATE_MIN = 0.4
 
-# Metric-to-sleeve assignment. Every status column present in either
-# SummaryManager template (regular + investment) must appear in exactly one
-# sleeve — enforced by tests/test_sleeves.py. QUALITY = "is this a solid,
-# well-run business"; VALUE = "is it cheaply priced / shareholder-friendly".
-# NAV-discount metrics (investment companies) are a cheapness signal → VALUE.
+# Metric-to-sleeve assignment. Every status column in the SummaryManager
+# template must appear in exactly one sleeve — enforced by tests/test_sleeves.py.
+# QUALITY = "is this a solid, well-run business"; VALUE = "is it cheaply priced
+# / shareholder-friendly".
 #
 # Four metrics were removed outright rather than down-weighted:
 #   dividend yield          - measured IC -0.026 over 7 fiscal years (p=0.76),
@@ -36,8 +35,6 @@ QUALITY_METRICS = [
 VALUE_METRICS = [
     "fcfy_pe ratio status", "cagr_pe ratio status", "roe_pe ratio status",
     "dividend growth status", "price momentum status",
-    "nav discount status", "calculated nav discount status",
-    "nav discount trend status",
 ]
 
 # Minimum companies a fiscal year must have (with a usable forward return)
@@ -117,3 +114,26 @@ MOMENTUM_BLEND_WEIGHT = 0.5
 # 1640718 — unidentified; original reason for exclusion unknown (not
 # recoverable from the repo or git history), kept from prior behavior.
 EXCLUDED_TICKER_IDS = {"1640718"}
+
+# Sectors excluded from the universe entirely.
+#
+# Investment companies (Investor, Industrivärden, Kinnevik, Latour,
+# Lundbergföretagen, Öresund) used to be scored through a separate template
+# carrying three NAV-discount metrics no other company had. That meant they
+# were scored on 8 metrics against everyone else's ~17 -- and `points`, a *sum*
+# of weighted metric scores, was then ranked across both groups for the same 25
+# watchlist slots. Summing 8 things and 17 things and comparing the totals is
+# the same two-ranking-regimes defect that scoring the two pools separately
+# used to cause.
+#
+# It had also never been measured: panel._iter_fiscal_years derives report
+# dates from `revenue_year`, which their snapshots do not carry, so they
+# produced zero panel rows and every backtest number in this repo described the
+# other companies only. Excluding them makes the running system the one that
+# was actually validated.
+#
+# Excluded rather than routed through the regular template, because their
+# snapshots also lack de_ratio, eps_quarter, revenue_quarter and
+# netDebtEbitdaRatio -- they would score on a handful of metrics and go on
+# competing, which is the same defect wearing a quieter hat.
+EXCLUDED_SECTORS = {"Investmentbolag"}

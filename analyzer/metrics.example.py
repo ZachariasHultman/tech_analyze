@@ -33,9 +33,6 @@ LOW_WEIGHT_METRICS = [
     "roe_de ratio status",
     "net debt - ebitda status",
     "revenue trend year status",
-    "nav discount status",
-    "calculated nav discount status",
-    "nav discount trend status",
     "revenue y cagr status",
     "eps y cagr status",
     "net margin vs avg status",
@@ -107,9 +104,6 @@ DIRECTION_OVERRIDES = {
 # =========================
 GLOBAL_THRESHOLDS = {
     "revenue trend year status": (0.0, 1.0),
-    "nav discount status": (0.0, 1.0),
-    "calculated nav discount status": (0.0, 1.0),
-    "nav discount trend status": (0.0, 1.0),
     "revenue y cagr status": (0.0, 1.0),
     "eps y cagr status": (0.0, 1.0),
     "net margin vs avg status": (0.0, 1.0),
