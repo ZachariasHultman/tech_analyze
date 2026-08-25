@@ -512,15 +512,27 @@ class SummaryManager:
             return df[ordered]
 
         def _rank_key(df):
-            """Sort key: points, falling back to combined_score when absent.
+            """Sort key: blend_score, falling back to points, then combined_score.
 
-            points is the ranking key everywhere now -- it is the only score
-            with a significant out-of-sample IC (+0.041, p=0.017 over 7 fiscal
-            years) where combined_score reached p=0.18. Keeping the display
+            This chain must stay identical to `main._update_watchlist`'s, which
+            sorts on `_blend` and falls back to `_pts`. Keeping the display
             order consistent with the watchlist order matters: they used to
             disagree, so the top of the printed table was not the set being
-            pushed.
+            pushed -- and they silently disagreed again for a while after the
+            ranking key moved from `points` to `blend_score` and only the
+            watchlist side was updated. tests/test_display_order_matches_
+            watchlist.py pins both sides against each other.
+
+            On why blend_score is the key at all, see config.MOMENTUM_BLEND_
+            WEIGHT: over 7 fiscal years it carries the best ordering signal in
+            the system (IC +0.118, positive 7 of 7, p=0.052) against points'
+            +0.081 and combined_score's, which multiplies two noisy percentiles
+            and amplifies the noise.
             """
+            if "blend_score" in df.columns:
+                base = pd.to_numeric(df["blend_score"], errors="coerce")
+                if base.notna().any():
+                    return base.fillna(float("-inf"))
             if "points" in df.columns:
                 base = pd.to_numeric(df["points"], errors="coerce")
             elif "combined_score" in df.columns:

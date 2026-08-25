@@ -43,8 +43,10 @@ Cloning the repo alone isn't enough to run it — the following are gitignored a
 | `.env` | Yes | Avanza credentials (see above); nothing runs without it |
 | `analyzer/metrics.py` | Yes | Scoring weights/thresholds — load-bearing, every module imports from it. Doesn't exist in a fresh clone. Either `cp analyzer/metrics.example.py analyzer/metrics.py` to bootstrap with placeholder values, or scp a tuned copy from an existing machine |
 | `optimization_results_panel.json` | Optional | Optimized weights/thresholds loaded at runtime. Used when present, else `metrics.py`'s hardcoded defaults — see "Weight variants" below |
+| `data/yahoo_prices/` + `data/yahoo_symbols.json` | Mac only | Dividend-adjusted daily closes, 2015→today. Rebuildable with `--backfill-prices`, but that's a slow rate-limited run — scp it if you have it. Without it the panel drops from 7 fiscal years to 4 |
+| `data/fx_sek.csv` | Mac only | ECB daily rates, so the panel's forward return is in SEK. Rebuildable in seconds with `--fetch-fx` |
 
-None of these are ever committed (`*.json`/`*.csv` are blanket-ignored, and `metrics.py` is explicitly excluded).
+Neither cache is needed on the Pi — they only matter when building the panel. None of these are ever committed (`*.json`/`*.csv` are blanket-ignored, and `metrics.py` is explicitly excluded).
 
 ---
 
@@ -72,24 +74,26 @@ Momentum enters as the **raw** `(price − SMA200) / SMA200`, not as its banded 
 
 The 0.5 is not fitted. With 7 annual observations any fitted split is noise — the weight optimizer has been rejected three times, permutation p climbing 0.199 → 0.408 → 0.512. Equal weight between two comparably predictive, weakly correlated (~0.29) signals is the defensible default.
 
-Momentum also stays inside `points`, so its effective weight is ≈0.52. Stripping it out scored the same on IC but worse on the basket (+4.65 vs +5.90%/yr).
+Momentum also stays inside `points`, so its effective weight is ≈0.52. Stripping it out scored the same on IC but worse on the basket (+4.65 vs +5.90%/yr, measured on the panel as it stood at the time — not re-run since the SEK/adjusted-price rebuild).
 
 `points` is unchanged and still drives the sell-signal deterioration check.
 
 ### What is and isn't established
 
-Measured on 7 fiscal years (2019–2025, 814 company-years, dividend-inclusive returns in SEK):
+Measured on 7 fiscal years (2019–2025, 811 company-years, dividend-inclusive returns in SEK), last refreshed 2026-08-25:
 
 | Claim | Evidence |
 |---|---|
-| The ranking beats chance | **Yes.** `blend_score` IC +0.108, p=0.047, positive in **7 of 7** years. Fama-MacBeth coef +0.1532, t=+2.84, **p=0.029** |
-| The blend beats ranking on `points` alone | **Yes, on the measured window.** Top-25 basket +6.35%/yr excess (p=0.086, 6 of 7) vs +2.62%/yr (p=0.408, 4 of 7) |
-| The concentrated pick beats the universe | **Still not significant.** p=0.086 is suggestive, not established |
-| Optimized weights beat equal weight | **No.** Rejected three times; permutation p up to 0.51. The system runs equal weights |
+| The ranking beats chance | **Probably, but it no longer clears p<0.05.** `blend_score` IC +0.118, p=0.052, positive in **7 of 7** years. Fama-MacBeth coef +0.1547, t=+2.32, p=0.059 |
+| The blend beats ranking on `points` alone | **On the measured window, yes.** Top-25 basket +6.36%/yr excess vs +2.59%/yr — but neither is significant (p=0.146 and p=0.495) and both are positive in only 4 of 7 years |
+| The concentrated pick beats the universe | **No.** p=0.146. The consistent result is the *ordering* (7 of 7 years), not the tail |
+| Optimized weights beat equal weight | **No.** Rejected again on 2026-08-25: out-of-sample spread +4.8%/yr against equal weight's +8.1%/yr, so it failed on the spread condition before the DSR (0.943) even mattered. The system runs equal weights |
+
+**The two rows about the basket used to read better than they do now.** Earlier revisions of this table reported the top-25 pick at p=0.086 and 6 of 7 years positive, and Fama-MacBeth at p=0.029. Those came from a shallower, price-only, mixed-currency panel. Rebuilding it on Yahoo adjusted closes converted to SEK raised the mean IC and the mean basket return while *lowering* consistency and significance — a reminder that the tail statistics move a lot on 7 observations, and that the whole-ordering IC is the more stable of the two measurements.
 
 IC measures the whole ordering; the basket measures only the tail. A 10-stock bucket at ~36% cross-sectional return dispersion has a standard error of ~11.5%/yr — **a 2%/yr edge there would take ~208 years to detect**. That is a permanent consequence of universe size, not a data gap to be closed, which is why `--push-top` defaults to a quintile: information ratio scales as IC × √breadth.
 
-**Survivorship bias is not corrected for** (Avanza exposes no point-in-time index membership) and inflates all of the above — *and it inflates momentum more than any other metric here*, because the universe is today's list applied backwards and survivors are precisely the stocks that trended up. That is the main reason the ranking key is a blend rather than pure momentum, despite momentum alone measuring higher (+6.82%/yr, but only 5 of 7 years positive).
+**Survivorship bias is not corrected for** (Avanza exposes no point-in-time index membership) and inflates all of the above — *and it inflates momentum more than any other metric here*, because the universe is today's list applied backwards and survivors are precisely the stocks that trended up. That is the main reason the ranking key is a blend rather than pure momentum, despite momentum alone measuring higher on the basket (+6.82%/yr, 5 of 7 years, p=0.144 — nominally better than the blend's 4 of 7 on the current panel).
 
 ### Metrics that were removed
 
@@ -178,7 +182,21 @@ Aim for 30+ companies. Each save pulls multi-year financial history and 5 years 
 uv run python3 main.py --save --preset omxs30 omxs-mid --watchlists Test Utdelare Äger
 ```
 
-**Step 2 — Build the panel and optimize metric weights**
+**Step 2 — Backfill adjusted prices and FX rates (Mac only, one-time)**
+
+```bash
+uv run python3 main.py --backfill-prices    # Yahoo adjusted closes back to 2015
+uv run python3 main.py --fetch-fx           # ECB daily rates -> data/fx_sek.csv
+```
+
+Skipping these does not error — the panel silently falls back to Avanza's own prices in each stock's listing currency — but the panel it builds is **not** the one the numbers above describe. Both are worth understanding before you skip them:
+
+- **`--backfill-prices`** fetches dividend-adjusted daily closes from Yahoo into `data/yahoo_prices/`, verifies each series against the Avanza prices already in your snapshots (an unverifiable symbol is dropped, not guessed), and caches the symbol map in `data/yahoo_symbols.json`. Avanza's OHLC is a rolling, unadjusted ~5-year window; Yahoo's goes back to 2015. This is what takes the panel from 4 usable fiscal years to 7. It is resumable and rate-limit-prone — re-run it after a wall, and lower `--prices-batch-size` (default 8) or raise `--prices-cooldown` (default 600s) if it keeps hitting one. `--prices-from` sets the start date (default 2015-01-01).
+- **`--fetch-fx`** caches ECB daily reference rates (via Frankfurter — free, no API key) so forward returns can be taken in SEK. 44% of the universe is not SEK-listed and USD/SEK moved roughly +24% across the sample, so without it every US name in a given year carries the same FX move, and the within-year demeaning hands that shared move to whatever metric happens to correlate with being US-listed. Idempotent: re-running when the cache already covers the range makes no requests. `--fx-from` mirrors `--prices-from`.
+
+Only the *target* is converted to SEK; the predictors stay in listing currency (see the module docstring in `analyzer/panel.py`). The Pi never needs either command — both caches only matter when building the panel.
+
+**Step 3 — Build the panel and optimize metric weights**
 
 ```bash
 uv run python3 main.py --backfill-panel --validate
@@ -195,7 +213,7 @@ uv run python3 main.py --optimize --challenger-confidence 0.925
 
 **What the gate prints.** Alongside the DSR you get `beat equal weight in N of M held-out years` and a permutation p-value. At four usable fiscal years no statistic has real power, so that blunt count is often the most informative line in the report.
 
-> **Note:** two past bugs invalidate older weight files. (1) The backtest had a look-ahead bug — predictors measured across the same window as the return. (2) The forward-return target was price-only, while Avanza's OHLC close is not dividend-adjusted, so every high-yield stock was penalised by roughly its own yield. Both are fixed, but any `optimization_results_*.json` from before must be regenerated — re-run this step at least once after upgrading. Any leftover `optimization_results_individual.json` / `_combo.json` is inert and can be deleted; nothing reads them.
+> **Note:** two past bugs invalidate older weight files. (1) The backtest had a look-ahead bug — predictors measured across the same window as the return. (2) The forward-return target was price-only, while Avanza's OHLC close is not dividend-adjusted, so every high-yield stock was penalised by roughly its own yield. Both are fixed, but any `optimization_results_*.json` from before must be regenerated — re-run this step at least once after upgrading. The inert `optimization_results_individual.json` / `_combo.json` leftovers have been deleted; nothing reads them.
 
 ---
 
@@ -220,9 +238,12 @@ uv run python3 main.py --watchlists Äger
 | **After new quarterly earnings** | `uv run python3 main.py --save --preset omxs30 omxs-mid ...` |
 | **After re-saving** | `--backfill-panel --validate`, then `--optimize` |
 | **If you only changed a threshold in code** | `uv run python3 main.py --backfill-panel --validate` (rebuilds the panel and prints the diagnostics, without re-fitting weights) |
-| **If you add new stocks to universe** | Re-save then re-optimize |
+| **If you add new stocks to universe** | `--save`, then `--backfill-prices` (the new names have no Yahoo cache yet), then re-optimize |
+| **Every few months, or before trusting a number** | `--fetch-fx` then `--backfill-prices` — both are incremental and skip what's already cached |
 
 Re-saving quarterly is enough. Re-optimizing is only needed after a re-save or when you've significantly expanded the universe.
+
+`--backfill-prices` only downloads symbols it doesn't already have on disk, so it will *not* extend an existing series forward on its own — delete a company's file under `data/yahoo_prices/` to force a refetch. The panel's most recent fiscal year is the one this affects.
 
 ---
 
@@ -301,15 +322,24 @@ Sends a plain-text email with the watchlist update and any sell signals. Require
 Every email opens with a **system status block** describing the weights it is recommending with:
 
 ```
-SYSTEM STATUS  (weights fitted 2026-08-12, panel challenger: ACCEPTED)
-  Out-of-sample, 4 fiscal years (2022-2025), total return (price + dividends):
-    IC by year:   2022 -0.050   2023 +0.081   2024 +0.119   2025 +0.136
-    mean IC +0.072  |  top-bottom spread +5.5%/yr
-    beat equal weight in 4 of 4 held-out years
-    permutation test (200 refits on shuffled targets): p=0.015
-  CONFIDENCE: LOW — 4 periods only (t=+1.70, p=0.19). Directional, not proof.
-  Universe: 127 stocks, survivorship-biased (today's list applied backwards).
+SYSTEM STATUS  (weights fitted 2026-08-25, panel challenger: REJECTED (running equal weight))
+  Out-of-sample, 7 fiscal years (2019-2025), total return (price + dividends), demeaned within year:
+    IC by year:   2019 +0.289   2020 +0.082   2021 +0.025   2022 -0.034   2023 +0.057   2024 +0.067   2025 +0.077
+    mean IC +0.080  |  top-bottom spread +8.1%/yr
+    challenger beat equal weight in 3 of 7 held-out years but missed the significance bar
+    permutation test (200 refits on shuffled targets): p=0.149
+    deflated Sharpe 0.943 vs 0.925 bar (cleared)
+  CONFIDENCE: LOW — 7 periods only (t=+2.42, p=0.05). Directional, not proof.
+  RANKING KEY (blend_score = 50% momentum + 50% pts), same 7 years:
+    IC +0.118 (p=0.052, positive 7/7)
+    top-25 basket +6.36%/yr excess (p=0.146, positive 4/7)
+    Momentum is the metric survivorship bias most inflates — treat this as the optimistic end.
+    Investment companies are not in the panel at all, so their placement in the list is unvalidated.
+    Survivorship bias is not corrected for and inflates all of the above.
+  Universe: 127 stocks (today's list applied backwards).
 ```
+
+That is the block as of the last real run, reproduced verbatim. Note the DSR **cleared** its bar (0.943 > 0.925) and the challenger was still rejected: acceptance needs the optimized spread to beat equal weight *as well*, and it didn't (+4.8%/yr against +8.1%/yr). Two conditions, both required.
 
 Read `ACCEPTED` vs `REJECTED` first: on a reject the system silently runs equal weight, and the reported numbers then describe equal weight rather than the challenger that was turned down. The `CONFIDENCE: LOW` line is permanent, not a placeholder — four fiscal years cannot support a significance claim, and a tidy top-10 list otherwise implies more than the data does.
 
@@ -337,6 +367,12 @@ Default (no flag): reads `optimization_results_panel.json` when it exists — th
 | `--save` | Save today's metric snapshot to `data/` |
 | `--optimize` | Run the panel challenger gate and write `optimization_results_panel.json` (needs `--backfill-panel` first) |
 | `--backfill-panel` | Build the fiscal-year panel from `data/*.csv` (writes `data/panel_fundamentals.csv` + `data/panel_scores.csv`) |
+| `--backfill-prices` | Mac-only one-time step: fetch Yahoo dividend-adjusted closes into `data/yahoo_prices/`, verified against the Avanza prices in your snapshots. Lifts the panel from 4 fiscal years to 7. Resumable |
+| `--prices-from YYYY-MM-DD` | Earliest date for `--backfill-prices` (default `2015-01-01`) |
+| `--prices-batch-size N` | Symbols per Yahoo request (default 8). Lower it if you keep getting rate-limited |
+| `--prices-cooldown SECONDS` | Pause after a batch exhausts its retries (default 600). Within a batch the backoff is already 30s doubling to a 900s cap |
+| `--fetch-fx` | Mac-only manual step: cache ECB daily rates to `data/fx_sek.csv` so forward returns are computed in SEK. Idempotent |
+| `--fx-from YYYY-MM-DD` | Earliest date for `--fetch-fx` (default `2015-01-01`) |
 | `--validate` | Run the cross-sectional validation battery against `data/panel_scores.csv` |
 | `--challenger-confidence X` | Deflated Sharpe Ratio bar the panel challenger must clear to accept optimized weights (default 0.925) |
 | `--permutations N` | Refits on shuffled targets used to measure the gate's null distribution (default 200; 0 skips) |

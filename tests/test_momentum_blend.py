@@ -1,8 +1,10 @@
 """The watchlist ranks on a 50/50 blend of momentum and fundamentals.
 
 Measured on the fiscal-year panel (7 years, 811 company-years), ranking the
-top-25 basket on `pts` alone returned +2.77%/yr excess (p=0.171, positive 5 of
-7 years); the blend returned +5.90%/yr (p=0.053, positive 6 of 7).
+top-25 basket on `pts` alone returns +2.59%/yr excess (p=0.495, positive 4 of
+7 years); the blend returns +6.36%/yr (p=0.146, 4 of 7). Neither is close to
+significant -- the blend's case rests on the ordering, where it measures
+IC +0.118 (p=0.052, positive 7 of 7) against pts' +0.081.
 
 Momentum enters as the *raw* SMA200 distance rather than its banded metric
 score: ranking on the score measured IC +0.092 (p=0.117, 5 of 7), ranking on

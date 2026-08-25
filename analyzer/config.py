@@ -45,10 +45,15 @@ VALUE_METRICS = [
 # _quintile_spread uses to switch from terciles to quintiles: below it, a
 # "quintile spread" is really a 3-vs-3 comparison.
 #
-# Concretely: FY2021 in the real panel has 9 companies, because the live OHLC
-# window starts mid-2021 and only off-cycle reporters got a price anchor. That
-# year scored IC=+0.867 / spread=+41.6% off three US mega-caps beating two
-# Nordic small-caps, and dragged the reported mean IC from +0.038 to +0.203.
+# Where this bit, historically: before --backfill-prices, FY2021 had only 9
+# companies -- the live OHLC window started mid-2021, so only off-cycle
+# reporters got a price anchor. That year scored IC=+0.867 / spread=+41.6% off
+# three US mega-caps beating two Nordic small-caps, and dragged the reported
+# mean IC from +0.038 to +0.203.
+#
+# The Yahoo backfill fixed that specific year (FY2021 now has 122 companies);
+# on the current panel the floor drops FY2018, which has 3. The guard stays --
+# the failure mode is structural, not tied to one year.
 MIN_CROSS_SECTION = 25
 
 # A fiscal year must also cover this fraction of the companies that *have*
@@ -60,7 +65,9 @@ MIN_CROSS_SECTION = 25
 MIN_YEAR_COVERAGE = 0.60
 
 # Trading days of close history averaged before a price is used as the
-# denominator of a valuation ratio (FCF yield's market cap, dividend yield).
+# denominator of a valuation ratio. FCF yield's market cap is the only
+# remaining consumer -- dividend yield was the other, and has since been
+# removed from scoring outright (see the QUALITY_METRICS comment above).
 # Spot price made those two metrics the only fast-moving inputs in an otherwise
 # annual-report-driven score, and with ranks 19-25 of the watchlist packed
 # inside 0.65 points, that noise alone reshuffled the bottom of the list every
@@ -83,14 +90,26 @@ PRICE_SMOOTHING_WINDOW = 60
 # permutation p climbing 0.199 -> 0.408 -> 0.512). Equal weight between two
 # comparably predictive, weakly correlated signals is the defensible default.
 #
-# Measured on the panel, top-25 basket mean excess return: fundamentals alone
-# +2.77%/yr (p=0.171), momentum alone +6.82%/yr (p=0.144, and the metric most
-# flattered by survivorship bias), the 50/50 blend +5.90%/yr (p=0.053) and
-# positive in 6 of 7 years -- the most consistent of the three.
+# Measured on the current panel (7 fiscal years, SEK total return, refreshed
+# 2026-08-25), top-25 basket mean excess return: fundamentals alone +2.59%/yr
+# (p=0.495, 4 of 7 years), momentum alone +6.82%/yr (p=0.144, 5 of 7, and the
+# metric most flattered by survivorship bias), the 50/50 blend +6.36%/yr
+# (p=0.146, 4 of 7).
+#
+# An earlier revision of this comment called the blend "the most consistent of
+# the three" on 6-of-7 years. On the rebuilt panel (Yahoo adjusted closes,
+# SEK-converted) that is no longer true -- momentum alone is nominally more
+# consistent on the basket. The case for the blend now rests on the *ordering*,
+# where it is the best of the three (IC +0.118, positive 7 of 7, p=0.052,
+# against momentum's +0.112 and fundamentals' +0.081), plus the point above
+# that momentum is precisely the signal survivorship bias inflates most. Do not
+# read the basket numbers as favouring pure momentum: they are 7 observations
+# with p-values around 0.15, and the tail is the noisiest thing measured here.
 #
 # Momentum stays inside the fundamental composite as well, so its effective
 # weight is 0.5 + 0.5*(1/21) ~ 0.52. Stripping it out scored the same on IC
-# but worse on the basket (+4.65 vs +5.90%/yr), and would have forced
+# but worse on the basket (+4.65 vs +5.90%/yr, on the panel as it stood
+# when that variant was tested), and would have forced
 # `price momentum status` out of the VALUE sleeve for no measured gain.
 MOMENTUM_BLEND_WEIGHT = 0.5
 

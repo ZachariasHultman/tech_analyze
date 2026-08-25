@@ -1,15 +1,18 @@
-"""_update_watchlist ranks by pts, with no reliability involved.
+"""_update_watchlist ranks by blend_score (pts as fallback), no reliability.
 
-Ranking moved from combined_score to pts: over 7 fiscal years pts carried the
-only significant out-of-sample signal (IC +0.041, t=+3.29, p=0.017, positive
-in 6 of 7 years), while combined_score reached only p=0.18 despite a higher
-point estimate -- multiplying two noisy percentiles amplifies the noise. The
-sleeve gate still filters on quality_pct/value_pct; only the ordering within
-the qualifying set changed.
+Ranking moved combined_score -> pts -> blend_score. combined_score multiplies
+two noisy percentiles and amplifies the noise; on the current 7-year panel pts
+measures IC +0.081 (p=0.078, positive 6 of 7) against blend_score's +0.118
+(p=0.052, positive 7 of 7). The fixtures below mostly omit blend_score so they
+exercise the pts fallback directly -- the blend path and its agreement with the
+printed table live in tests/test_display_order_matches_watchlist.py.
+
+The sleeve gate still filters on quality_pct/value_pct; only the ordering
+within the qualifying set changed.
 
 Reliability (the old company_reliability.csv tilt and its short-lived
 panel-based replacement) was removed entirely: neither could produce a
-differentiated signal given the live OHLC depth ceiling, so ranking reads no
+differentiated signal at the per-company depth available, so ranking reads no
 reliability file or state at all.
 """
 import pandas as pd
@@ -84,8 +87,9 @@ def test_removed_stock_still_shows_full_metrics(capsys):
 def test_push_top_defaults_to_a_quintile_not_a_handful():
     """Breadth is what harvests a weak ranking signal: IR ~ IC x sqrt(breadth).
 
-    At IC +0.041 a 10-stock pick discards most of the measured edge, and the
-    top-10's year-to-year excess-return sd was 9.98% against 4.48% at N=25 --
+    At the ranking key's measured IC (+0.118 over 7 fiscal years) a 10-stock
+    pick discards most of the measured edge, and the top-10's year-to-year
+    excess-return sd was 9.98% against 4.48% at N=25 --
     noise large enough that no edge of a plausible size is ever observable
     there. 25 is also ~the top quintile of the ~127-stock universe, which is
     the bucket the backtest actually validates.
@@ -102,9 +106,10 @@ def test_push_top_defaults_to_a_quintile_not_a_handful():
 def test_ranks_by_blend_when_present(capsys):
     """With blend_score present it, not pts, decides the order.
 
-    Measured on the panel: the top-25 basket ranked on pts returned +2.77%/yr
-    excess (p=0.171, positive 5 of 7 fiscal years); ranked on the 50/50
-    momentum blend, +5.90%/yr (p=0.053, 6 of 7).
+    Measured on the panel: the top-25 basket ranked on pts returns +2.59%/yr
+    excess (p=0.495, positive 4 of 7 fiscal years); ranked on the 50/50
+    momentum blend, +6.36%/yr (p=0.146, 4 of 7). The blend's real edge is the
+    ordering (IC +0.118 positive 7 of 7, vs pts' +0.081), not the tail.
     """
     manager = SummaryManager()
     manager.summary = pd.DataFrame(

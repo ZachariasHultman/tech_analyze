@@ -355,8 +355,9 @@ def _format_optimizer_status(status):
 # report and the email summary.
 LEGEND_LINES = [
     "rank = the ranking key: 50% price-vs-SMA200 percentile, 50% pts percentile",
-    "       (top-25 basket +5.90%/yr excess over 7 fiscal years, p=0.053,",
-    "        positive 6 of 7, vs +2.77%/yr p=0.171 for pts alone)",
+    "       (IC +0.118 over 7 fiscal years, p=0.052, positive 7 of 7, vs",
+    "        +0.081 p=0.078 for pts alone; top-25 basket +6.36%/yr excess",
+    "        but only p=0.146 -- the ordering is the solid part, not the tail)",
     "mom = price vs its own SMA200, as a peer percentile (0-1)",
     "q = quality percentile (0-1, peer-ranked business health)",
     "v = value percentile (0-1, peer-ranked cheapness)",
@@ -426,10 +427,14 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
     # config.MOMENTUM_BLEND_WEIGHT for the measurements behind the 50/50).
     #
     # Ranking on pts alone -- the previous key, itself chosen because pts beat
-    # combined_score -- gave the top-25 basket +2.77%/yr excess (p=0.171,
-    # positive 5 of 7 fiscal years). The blend gives +5.90%/yr (p=0.053,
-    # positive 6 of 7). Momentum alone scores a higher mean (+6.82%/yr) but is
-    # less consistent and is the metric survivorship bias most inflates.
+    # combined_score -- gives the top-25 basket +2.59%/yr excess (p=0.495,
+    # positive 4 of 7 fiscal years) on the current panel. The blend gives
+    # +6.36%/yr (p=0.146, 4 of 7). Momentum alone scores a higher mean
+    # (+6.82%/yr, 5 of 7) but is the metric survivorship bias most inflates.
+    #
+    # None of those basket p-values clear anything: the case for the blend is
+    # the ordering, where it beats both (IC +0.118 positive 7 of 7, against
+    # momentum's +0.112 and pts' +0.081). See config.MOMENTUM_BLEND_WEIGHT.
     #
     # The sleeve gate above still enforces "decent on both dimensions"; this
     # only changes the ordering within that set. `pts` is untouched and still
@@ -879,7 +884,7 @@ def build_arg_parser():
         metavar="N",
         help="How many top stocks to push (default: 25). Breadth, not "
              "conviction, is what harvests a weak ranking signal: information "
-             "ratio scales as IC x sqrt(breadth), so at IC +0.041 a 10-stock "
+             "ratio scales as IC x sqrt(breadth), so at IC +0.118 a 10-stock "
              "pick throws away most of the measured edge. 25 is roughly the "
              "top quintile of the universe, matching the bucket the backtest "
              "actually validates. Measured across 7 fiscal years, the "
