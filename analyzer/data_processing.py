@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from analyzer.metrics import HIGHEST_WEIGHT_METRICS, RATIO_SPECS, DIRECTION_OVERRIDES
-from analyzer.config import QUALITY_METRICS, VALUE_METRICS
+from analyzer.config import QUALITY_METRICS, VALUE_METRICS, MOMENTUM_BLEND_WEIGHT
 from analyzer.helper import *
 from analyzer.financial_metrics import *
 
@@ -181,14 +181,6 @@ def get_data(
         manager._update(ticker_name, sector, "revenue y cagr status", rev_cagr_y)
         manager._update(ticker_name, sector, "eps y cagr status", eps_cagr_y)
 
-        # consistency
-        rev_hit, _ = calculate_revenue_yoy_hit_rate(
-            ticker_analysis, lookback_quarters=12
-        )
-        eps_hit, _ = calculate_eps_yoy_hit_rate(ticker_analysis, lookback_quarters=12)
-        manager._update(ticker_name, sector, "revenue yoy hit-rate status", rev_hit)
-        manager._update(ticker_name, sector, "eps yoy hit-rate status", eps_hit)
-
         # quality vs own history
         nm_vs_avg, _ = calculate_net_margin_vs_avg(
             ticker_info, ticker_analysis, years=5
@@ -201,19 +193,11 @@ def get_data(
         gm_stability = calculate_gross_margin_stability(ticker_analysis)
         manager._update(ticker_name, sector, "gross margin stability status", gm_stability)
 
-        # --- : dividend yield ---
-        div_yield = calculate_dividend_yield(ticker_info)
-        manager._update(ticker_name, sector, "dividend yield status", div_yield)
-
         # --- : Piotroski F-Score ---
         f_score = calculate_piotroski_f_score(
             ticker_analysis, ticker_info, fcfy, de_ratio, roe
         )
         manager._update(ticker_name, sector, "piotroski f-score status", f_score)
-
-        # --- : earnings quality (OCF / net income) ---
-        eq = calculate_earnings_quality(ticker_info, ticker_analysis)
-        manager._update(ticker_name, sector, "earnings quality status", eq)
 
         # --- : dividend growth ---
         div_growth = calculate_dividend_growth(ticker_analysis, years=3)
@@ -242,7 +226,6 @@ def get_data(
             hist["netDebtEbitdaRatio"] = nd_ebitda_hist
             hist["profit_margin"] = extract_profit_margin_hist(ticker_analysis)
             hist["profit_per_share"] = extract_eps_hist(ticker_analysis)
-            hist["dividend_yield"] = div_yield
             # Full financial data for Piotroski and new metrics
             hist["net_profit"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "netProfit")
             hist["total_assets"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalAssets")
@@ -264,7 +247,7 @@ def get_data(
         pe, pe_hist = calculate_PE(ticker_analysis)
         cagr = calculate_closing_CAGR(avanza, ticker_id)
         (fcfy, free_cashflow, fcfy_hist, free_cashflow_hist) = (
-            calculate_free_cashflow_yield(yahoo_ticker, ticker_info)
+            calculate_free_cashflow_yield(yahoo_ticker, ticker_info, closing_hist_data)
         )
         roe, roe_hist = calculate_roe(ticker_analysis)
         nd_ebitda_ratio, nd_ebitda_hist = extract_netdebt_ebitda_ratio(ticker_analysis)
@@ -296,9 +279,15 @@ def get_data(
             ticker_name, sector, "nav discount trend status", nav_discount_trend
         )
 
-        # --- : dividend yield ---
-        div_yield = calculate_dividend_yield(ticker_info)
-        manager._update(ticker_name, sector, "dividend yield status", div_yield)
+        # --- Price momentum: price / SMA200 - 1 ---
+        # Same computation as the regular branch. The SMA200 above was already
+        # being calculated here and dropped on the floor; the ranking key needs
+        # it (see template_investment in summary_manager.py).
+        if sma200 is not None and weekly_average_close is not None and sma200 > 0:
+            momentum = (weekly_average_close / sma200) - 1.0
+        else:
+            momentum = None
+        manager._update(ticker_name, sector, "price momentum status", momentum)
 
         if get_hist:
             hist["sector"] = sector
@@ -311,7 +300,6 @@ def get_data(
             hist["free_cashflow"] = free_cashflow_hist
             hist["profit_margin"] = extract_profit_margin_hist(ticker_analysis)
             hist["profit_per_share"] = extract_eps_hist(ticker_analysis)
-            hist["dividend_yield"] = div_yield
             hist["net_profit"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "netProfit")
             hist["total_assets"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalAssets")
             hist["total_liabilities"] = _extract_yearly_series(ticker_analysis, "companyFinancialsByYear", "totalLiabilities")
@@ -488,6 +476,39 @@ def calculate_score(manager, metrics_to_score=None, use_cross_sectional_ranks=Tr
         summary["value_pct"] = value_raw.rank(pct=True, na_option="keep")
         summary["combined_score"] = summary["quality_pct"] * summary["value_pct"]
 
+        # ── Momentum blend: the watchlist ranking key ────────────────────
+        # Half the ranking comes from the raw SMA200 distance, half from the
+        # fundamental point total, each as a within-cross-section percentile.
+        #
+        # The raw value is used deliberately. Scoring momentum through the
+        # normal metric path and ranking on that score measured IC +0.092
+        # (p=0.117, positive 5 of 7 years); ranking on the underlying ratio
+        # measured +0.112 (p=0.045, positive 7 of 7) -- the banding into
+        # ok/nok bands discards roughly a fifth of the signal of the single
+        # strongest predictor in the system, which on its own out-predicts
+        # the whole 21-metric composite (+0.065).
+        #
+        # Survivorship bias flatters momentum more than any other metric here
+        # (the universe is today's list applied backwards, and survivors
+        # trended up), which is exactly why this is a blend and not a switch.
+        mom_raw = pd.to_numeric(
+            summary["price momentum status"].map(_unwrap)
+            if "price momentum status" in summary.columns
+            else pd.Series(np.nan, index=summary.index),
+            errors="coerce",
+        )
+        summary["momentum_pct"] = mom_raw.rank(pct=True, na_option="keep")
+        summary["fundamental_pct"] = summary["points"].rank(pct=True, na_option="keep")
+        w = MOMENTUM_BLEND_WEIGHT
+        # A company with no usable price history keeps its fundamental rank
+        # rather than dropping out of the ranking entirely -- momentum is a
+        # tilt on the composite, not a filter.
+        summary["blend_score"] = np.where(
+            summary["momentum_pct"].isna(),
+            summary["fundamental_pct"],
+            w * summary["momentum_pct"] + (1.0 - w) * summary["fundamental_pct"],
+        )
+
         return summary
 
     # ── One pool, not two ────────────────────────────────────────────────
@@ -532,6 +553,7 @@ def calculate_score(manager, metrics_to_score=None, use_cross_sectional_ranks=Tr
     # Base inputs are shared by both templates; sleeve outputs must survive on
     # both sides. Everything else belongs to whichever template declared it.
     _shared = {"points", "quality_pct", "value_pct", "combined_score", "sector",
+               "momentum_pct", "fundamental_pct", "blend_score",
                "roe", "pe", "cagr", "fcfy", "de"}
 
     def _slice(index, template):

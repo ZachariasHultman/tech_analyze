@@ -309,16 +309,15 @@ def _build_ticker_dicts(asof):
     if pe_list:
         latest_pe = pe_list[-1]["value"]
 
-    # Dividend yield: scalar in CSV (not time-series)
-    div_yield_raw = asof.get("dividend_yield")
-    div_yield = None
-    if div_yield_raw is not None:
-        try:
-            dv = float(div_yield_raw)
-            if not np.isnan(dv):
-                div_yield = dv
-        except (TypeError, ValueError):
-            pass
+    # No dividend-yield field here: `dividend yield status` was removed from
+    # scoring (measured IC -0.026 over 7 fiscal years, p=0.76).
+    #
+    # Worth keeping the reason it could never have been read from the CSV's
+    # `dividend_yield` column, because the trap is general: that column is a
+    # bare scalar with no date, and `slice_df_upto` passes scalars through
+    # untouched (see its "scalar passthrough" branch), so every fiscal year in
+    # the panel was scored with the *snapshot's* value. Any new predictor
+    # sourced from an undated snapshot column will leak exactly the same way.
 
     # Operating cash flow not in CSV, but net_profit + total_assets lets Piotroski work
     ticker_info = {
@@ -326,7 +325,6 @@ def _build_ticker_dicts(asof):
             "netMargin": latest_margin,
             "returnOnEquity": latest_roe,
             "priceEarningsRatio": latest_pe,
-            "directYield": div_yield,
         },
     }
 

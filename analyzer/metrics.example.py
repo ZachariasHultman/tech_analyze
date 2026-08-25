@@ -40,13 +40,9 @@ LOW_WEIGHT_METRICS = [
     "eps y cagr status",
     "net margin vs avg status",
     "roe vs avg status",
-    "revenue yoy hit-rate status",
-    "eps yoy hit-rate status",
     "gross margin stability status",
     "piotroski f-score status",
-    "dividend yield status",
     "price momentum status",
-    "earnings quality status",
     "dividend growth status",
 ]
 
@@ -118,13 +114,9 @@ GLOBAL_THRESHOLDS = {
     "eps y cagr status": (0.0, 1.0),
     "net margin vs avg status": (0.0, 1.0),
     "roe vs avg status": (0.0, 1.0),
-    "revenue yoy hit-rate status": (0.0, 1.0),
-    "eps yoy hit-rate status": (0.0, 1.0),
     "gross margin stability status": (0.0, 1.0),
     "piotroski f-score status": (0.0, 1.0),
-    "dividend yield status": (0.0, 1.0),
     "price momentum status": (0.0, 1.0),
-    "earnings quality status": (0.0, 1.0),
     "dividend growth status": (0.0, 1.0),
 }
 

@@ -74,11 +74,16 @@ def test_one_row_per_company_fiscal_year(monkeypatch):
 
     # Key/schema columns are present.
     for col in ("company_id", "fiscal_year", "report_date", "sector",
-                "pe", "roe", "earnings quality status"):
+                "pe", "roe", "piotroski f-score status"):
         assert col in out.columns
 
-    # earnings quality status is permanently NaN historically (no OCF).
-    assert out["earnings quality status"].isna().all()
+    # Removed from scoring: earnings quality (no historical OCF, so the column
+    # was permanently NaN here) and both yoy hit-rates (0% coverage here) --
+    # all three ~100% populated live, so they moved the live ranking while
+    # contributing nothing to the backtest that validated it.
+    for gone in ("earnings quality status", "revenue yoy hit-rate status",
+                 "eps yoy hit-rate status", "dividend yield status"):
+        assert gone not in out.columns, f"{gone} should no longer be built"
 
     # fiscal_year == report_date.year.
     for _, r in out.iterrows():

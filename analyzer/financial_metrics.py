@@ -6,6 +6,7 @@ from analyzer.helper import *
 from analyzer.get_NAV_data import get_nav_data
 from datetime import datetime
 from analyzer.metrics import ticker_reporting_currency_map
+from analyzer.config import PRICE_SMOOTHING_WINDOW
 import numpy as np
 
 
@@ -77,22 +78,6 @@ def _cagr(first: Optional[float], last: Optional[float], years: int) -> Optional
         return None
 
 
-def _rolling_yoy_from_quarterly(vals):
-    out = [None] * len(vals)
-    for i in range(4, len(vals)):
-        ratio = _safe_div(vals[i], vals[i - 4])
-        out[i] = (ratio - 1.0) if ratio is not None else None
-    return out
-
-
-def _hit_rate(last_n: List[Optional[float]]) -> Optional[float]:
-    """Share of positives among last_n (ignoring None)."""
-    valid = [v for v in last_n if v is not None]
-    if not valid:
-        return None
-    return sum(1 for v in valid if v > 0) / float(len(valid))
-
-
 def _avg(vals: List[Optional[float]]) -> Optional[float]:
     xs = _clean(vals)
     if not xs:
@@ -138,78 +123,7 @@ def calculate_eps_y_cagr(
     return cagr, {"first": first, "last": last, "years": YEARS}
 
 
-# ---------- 3) Revenue YoY hit-rate (last 12 quarters) ----------
-
-
-def calculate_revenue_yoy_hit_rate(
-    ticker_analysis: Dict[str, Any], lookback_quarters: int = 12
-) -> Tuple[Optional[float], Dict[str, Any]]:
-    """
-    Uses companyFinancialsByQuarter.sales to compute YoY per quarter (4Q lag)
-    and then the fraction of positive YoY in the last `lookback_quarters`.
-    """
-    q_sales = _as_vals(
-        ticker_analysis.get("companyFinancialsByQuarter", {}).get("sales")
-    )
-    # 5 is the functional minimum: _rolling_yoy_from_quarterly needs a
-    # 4-quarter lag, so 5 raw quarters gives exactly one YoY data point.
-    # Avanza's quarterly financials are often only retained for ~2 years
-    # (7-8 quarters) -- requiring the full 12-quarter lookback discarded
-    # this metric entirely for most companies. Use whatever's available
-    # instead of throwing it away; the hit rate is just thinner with fewer
-    # points.
-    if len(_clean(q_sales)) < 5:
-        return None, {"reason": "not_enough_quarters", "points": len(_clean(q_sales))}
-    yoy = _rolling_yoy_from_quarterly(q_sales)
-    last_window = yoy[-lookback_quarters:] if lookback_quarters > 0 else yoy
-    hit = _hit_rate(last_window)
-    return hit, {
-        "window": lookback_quarters,
-        "positives": (
-            None
-            if hit is None
-            else hit * len([v for v in last_window if v is not None])
-        ),
-    }
-
-
-# ---------- 4) EPS YoY hit-rate (last 12 quarters) ----------
-
-
-def calculate_eps_yoy_hit_rate(
-    ticker_analysis: Dict[str, Any], lookback_quarters: int = 12
-) -> Tuple[Optional[float], Dict[str, Any]]:
-    """
-    Uses companyKeyRatiosByQuarterQuarter.earningsPerShare for quarterly EPS,
-    computes YoY with 4Q lag, then fraction >0 in last `lookback_quarters`.
-    """
-    q_eps = _as_vals(
-        ticker_analysis.get("companyKeyRatiosByQuarterQuarter", {}).get(
-            "earningsPerShare"
-        )
-    )
-    # See calculate_revenue_yoy_hit_rate: 5 is the functional minimum for one
-    # YoY data point. Note this only helps the live path -- the historical
-    # backtest adapter (_build_ticker_dicts) hardcodes this field to an empty
-    # list because quarterly EPS isn't captured in the CSV snapshots at all,
-    # so "eps yoy hit-rate status" will still be empty in the panel/--optimize
-    # path regardless of this floor.
-    if len(_clean(q_eps)) < 5:
-        return None, {"reason": "not_enough_quarters", "points": len(_clean(q_eps))}
-    yoy = _rolling_yoy_from_quarterly(q_eps)
-    last_window = yoy[-lookback_quarters:] if lookback_quarters > 0 else yoy
-    hit = _hit_rate(last_window)
-    return hit, {
-        "window": lookback_quarters,
-        "positives": (
-            None
-            if hit is None
-            else hit * len([v for v in last_window if v is not None])
-        ),
-    }
-
-
-# ---------- 5) Net margin vs y average ----------
+# ---------- 3) Net margin vs multi-year average ----------
 
 
 def calculate_net_margin_vs_avg(
@@ -337,6 +251,31 @@ def calc_sma200_metrics(
     sma200_slope = calculate_slope(sma200_ser.tolist())
 
     return sma200_latest, last_week_avg, float(sma200_slope)
+
+
+def smoothed_close(
+    df_hist: pd.DataFrame, window: int = PRICE_SMOOTHING_WINDOW
+) -> float | None:
+    """Mean close over the last `window` trading days, or None.
+
+    The price used as the *denominator* of a valuation ratio. Spot price made
+    FCF yield and dividend yield the only fast-moving inputs in an otherwise
+    annual score, which churned the bottom of the watchlist weekly on noise.
+
+    Returns None rather than a short-window mean when fewer than `window` rows
+    are available: a "60-day average" computed from 8 days is not the same
+    quantity, and silently substituting it would make a thinly-listed company
+    look differently priced than its peers for a reason unrelated to price.
+    """
+    if df_hist is None or not isinstance(df_hist, pd.DataFrame) or df_hist.empty:
+        return None
+    if "close" not in df_hist.columns:
+        return None
+    closes = pd.to_numeric(df_hist["close"], errors="coerce").dropna()
+    if len(closes) < window:
+        return None
+    mean = float(closes.tail(window).mean())
+    return mean if mean > 0 else None
 
 
 # ----------------------------------------------------------------------
@@ -637,12 +576,11 @@ def calculate_free_cashflow_yield(yahoo_ticker, stock_info, df_hist=None):
             return None, None, None, None
 
         latest_fcf = float(clean.iloc[0])  # most recent year first in yfinance
-        fcf_yield_now = latest_fcf / market_cap
 
-        # --- historical FCF yields (FCF / market_cap at each reporting date) ---
-        fcf_yield_hist = {}
-        fcf_hist_dict = {}
-
+        # Shares outstanding is the stable half of Avanza's market cap; the
+        # price half is what moved weekly. Back the share count out of the
+        # quoted market cap, then re-price it on the smoothed close so the
+        # yield reflects a quarter's valuation rather than Friday's.
         shares_outstanding = None
         if df_hist is not None and isinstance(df_hist, pd.DataFrame) and not df_hist.empty:
             try:
@@ -651,6 +589,21 @@ def calculate_free_cashflow_yield(yahoo_ticker, stock_info, df_hist=None):
                     shares_outstanding = market_cap / last_close
             except Exception:
                 pass
+
+        smoothed_market_cap = None
+        if shares_outstanding is not None:
+            avg_close = smoothed_close(df_hist)
+            if avg_close is not None:
+                smoothed_market_cap = avg_close * shares_outstanding
+
+        # Falls back to the quoted market cap when there is no usable price
+        # history -- an unsmoothed yield beats no yield, and the metric is
+        # cross-sectionally ranked, so one company on spot is a small error.
+        fcf_yield_now = latest_fcf / (smoothed_market_cap or market_cap)
+
+        # --- historical FCF yields (FCF / market_cap at each reporting date) ---
+        fcf_yield_hist = {}
+        fcf_hist_dict = {}
 
         if shares_outstanding is None:
             try:
@@ -670,7 +623,15 @@ def calculate_free_cashflow_yield(yahoo_ticker, stock_info, df_hist=None):
                 try:
                     df_tmp = df_hist.copy()
                     df_tmp.index = pd.to_datetime(df_tmp.index)
-                    close_price = float(df_tmp.loc[:pd.to_datetime(dt)]["close"].iloc[-1])
+                    upto = df_tmp.loc[:pd.to_datetime(dt)]
+                    # Smoothed on the same window as the live value above, and
+                    # cut at the reporting date so no post-report price leaks
+                    # in. This dict is what the backtest panel reads as `fcfy`
+                    # -- computing it on a spot close while live runs on a
+                    # 60-day mean would validate a metric the screener does
+                    # not actually use. Spot close only when the window is
+                    # short, mirroring smoothed_close's own fallback.
+                    close_price = smoothed_close(upto) or float(upto["close"].iloc[-1])
                     mc_hist = close_price * shares_outstanding
                     if mc_hist > 0:
                         fcf_yield_hist[dt_str] = float(fcf_val) / mc_hist
@@ -813,26 +774,6 @@ def calculate_gross_margin_stability(
     return float(cv)
 
 
-def calculate_dividend_yield(ticker_info: Dict[str, Any]) -> Optional[float]:
-    """
-    Extract current dividend yield from ticker_info.keyIndicators.directYield.
-    Returns yield as a fraction (e.g. 0.035 for 3.5%).
-    Returns 0.0 (not None) when no dividend data exists, so the scoring
-    system correctly penalizes non-dividend payers instead of skipping them.
-    """
-    try:
-        dy = ticker_info.get("keyIndicators", {}).get("directYield")
-        if dy is None:
-            return 0.0
-        dy = float(dy)
-        # Avanza stores as percentage (e.g. 3.5), normalize to fraction
-        if dy > 1:
-            dy = dy / 100.0
-        return dy
-    except Exception:
-        return 0.0
-
-
 def calculate_piotroski_f_score(
     ticker_analysis: Dict[str, Any],
     ticker_info: Dict[str, Any],
@@ -951,35 +892,6 @@ def calculate_piotroski_f_score(
             score += 1
 
     return score
-
-
-def calculate_earnings_quality(
-    ticker_info: Dict[str, Any],
-    ticker_analysis: Dict[str, Any],
-) -> Optional[float]:
-    """
-    Accruals quality: operating cash flow / net income.
-    Values > 1.0 mean cash earnings exceed accounting earnings (good).
-    """
-    op_cf = None
-    op_cf_raw = ticker_info.get("keyIndicators", {}).get("operatingCashFlow")
-    if op_cf_raw is not None:
-        try:
-            if isinstance(op_cf_raw, dict):
-                op_cf = float(op_cf_raw.get("value", 0))
-            else:
-                op_cf = float(op_cf_raw)
-        except (TypeError, ValueError):
-            pass
-
-    net_profit = _as_vals(
-        ticker_analysis.get("companyFinancialsByYear", {}).get("netProfit")
-    )
-    np_clean = _clean(net_profit)
-
-    if op_cf is not None and np_clean and np_clean[-1] != 0:
-        return op_cf / abs(np_clean[-1])
-    return None
 
 
 def calculate_dividend_growth(ticker_analysis: Dict[str, Any], years: int = 3) -> Optional[float]:

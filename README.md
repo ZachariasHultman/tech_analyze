@@ -50,27 +50,67 @@ None of these are ever committed (`*.json`/`*.csv` are blanket-ignored, and `met
 
 ## How it scores stocks
 
-Each stock is scored on metrics like Piotroski F-Score, earnings quality (OCF/net income), revenue CAGR, ROE/PE ratio, net debt/EBITDA, price momentum, and dividend yield.
+Each stock is scored on metrics like Piotroski F-Score, revenue and EPS CAGR, ROE/PE ratio, net debt/EBITDA, gross-margin stability, dividend growth, and price momentum.
 
 Scoring is **cross-sectional** — each metric is ranked relative to all other stocks in the current run (percentile 0–1), so a utility with solid-for-utilities ROE ranks in the top half just like a tech company with high ROE. No sector-specific thresholds needed.
 
-Each metric feeds into two "sleeves" — **quality** (business health: Piotroski F-Score, margin stability, ROE, leverage, momentum, etc.) and **value** (cheapness: P/E, FCF yield, dividend yield). `combined_score = quality_pct × value_pct` is the actual ranking key, favoring stocks that are both good *and* cheap, not just one or the other.
+Each metric feeds into two "sleeves" — **quality** (business health: Piotroski F-Score, margin stability, ROE, leverage, etc.) and **value** (cheapness: ROE/PE, CAGR/PE, FCF yield/PE, NAV discount, dividend growth, momentum). `combined_score = quality_pct × value_pct`, and both sleeves must clear `SLEEVE_GATE_MIN` (0.40) for a stock to qualify at all.
+
+The **ranking key within that qualifying set is `blend_score`**: half the stock's price-vs-SMA200 percentile, half its `points` percentile. See "The ranking key" below.
 
 It's a cross-sectional tool — good for ranking a basket of stocks against each other, not for predicting any single stock's outcome.
 
+### The ranking key
+
+```
+blend_score = 0.5 × momentum_pct + 0.5 × fundamental_pct
+```
+
+Both halves are percentile ranks (0–1) within the current cross-section. Ranks rather than raw values because `points` spans roughly −6…+14 while momentum is a fraction in −0.08…+0.24 — averaging the raw numbers would hand the ranking to whichever has the wider numeric spread.
+
+Momentum enters as the **raw** `(price − SMA200) / SMA200`, not as its banded metric score. Ranking on the banded score measures IC +0.092 (p=0.117, positive 5 of 7 years); ranking on the underlying ratio measures +0.112 (p=0.045, 7 of 7). The ok/nok banding discards roughly a fifth of the signal of the strongest single predictor in the system.
+
+The 0.5 is not fitted. With 7 annual observations any fitted split is noise — the weight optimizer has been rejected three times, permutation p climbing 0.199 → 0.408 → 0.512. Equal weight between two comparably predictive, weakly correlated (~0.29) signals is the defensible default.
+
+Momentum also stays inside `points`, so its effective weight is ≈0.52. Stripping it out scored the same on IC but worse on the basket (+4.65 vs +5.90%/yr).
+
+`points` is unchanged and still drives the sell-signal deterioration check.
+
 ### What is and isn't established
 
-Measured on 7 fiscal years (2019–2025, 813 company-years, dividend-inclusive returns):
+Measured on 7 fiscal years (2019–2025, 814 company-years, dividend-inclusive returns in SEK):
 
 | Claim | Evidence |
 |---|---|
-| The ranking beats chance | **Yes.** IC +0.041, t=+3.29, p=0.017, positive in 6 of 7 years |
-| The concentrated pick beats the universe | **Not established.** Top-10 excess return +0.45%/yr, t=0.12, p=0.91 |
-| Optimized weights beat equal weight | **No.** Rejected twice; permutation p=0.41, and optimized OOS IC is negative in 5 of 7 years. The system runs equal weights |
+| The ranking beats chance | **Yes.** `blend_score` IC +0.108, p=0.047, positive in **7 of 7** years. Fama-MacBeth coef +0.1532, t=+2.84, **p=0.029** |
+| The blend beats ranking on `points` alone | **Yes, on the measured window.** Top-25 basket +6.35%/yr excess (p=0.086, 6 of 7) vs +2.62%/yr (p=0.408, 4 of 7) |
+| The concentrated pick beats the universe | **Still not significant.** p=0.086 is suggestive, not established |
+| Optimized weights beat equal weight | **No.** Rejected three times; permutation p up to 0.51. The system runs equal weights |
 
-Those first two are not in tension: IC measures the whole ordering, the pick measures only the tail. A 10-stock bucket at ~36% cross-sectional return dispersion has a standard error of ~11.5%/yr — **a 2%/yr edge there would take ~208 years to detect**. That is a permanent consequence of universe size, not a data gap to be closed, which is why `--push-top` defaults to a quintile: information ratio scales as IC × √breadth, so breadth is how a weak-but-real ranking signal is actually harvested.
+IC measures the whole ordering; the basket measures only the tail. A 10-stock bucket at ~36% cross-sectional return dispersion has a standard error of ~11.5%/yr — **a 2%/yr edge there would take ~208 years to detect**. That is a permanent consequence of universe size, not a data gap to be closed, which is why `--push-top` defaults to a quintile: information ratio scales as IC × √breadth.
 
-Survivorship bias is not corrected for (Avanza exposes no point-in-time index membership) and inflates all of the above.
+**Survivorship bias is not corrected for** (Avanza exposes no point-in-time index membership) and inflates all of the above — *and it inflates momentum more than any other metric here*, because the universe is today's list applied backwards and survivors are precisely the stocks that trended up. That is the main reason the ranking key is a blend rather than pure momentum, despite momentum alone measuring higher (+6.82%/yr, but only 5 of 7 years positive).
+
+### Metrics that were removed
+
+Four metrics were deleted from scoring outright rather than down-weighted:
+
+| Metric | Why |
+|---|---|
+| `dividend yield status` | Measured IC **−0.026** (p=0.76) — nothing, even after its look-ahead leak was fixed. Note the forward target already includes dividends, so this says *yield doesn't predict total return*, not that dividends don't matter |
+| `earnings quality status` | Avanza exposes no historical OCF series, so the column was permanently all-NaN in the panel |
+| `revenue yoy hit-rate status` | 0% coverage in the panel |
+| `eps yoy hit-rate status` | 0% coverage in the panel |
+
+The last three are the important case. All were ~100% populated **live**, so they were shifting the live ranking while contributing exactly nothing to the backtest that validated it. Removing them makes the running system the one that was actually measured, rather than a superset of it.
+
+Still present and measuring *negative*, though none significantly so: `eps y cagr` (−0.071), `revenue trend year` (−0.055), `dividend growth` (−0.042). Left in — removing metrics because they measure mildly negative on 7 observations is fitting to noise.
+
+### Known gap: investment companies aren't backtested
+
+Öresund, Investor, Industrivärden, Kinnevik, Latour and Lundbergföretagen appear in the live watchlist but contribute **zero rows to the panel**. Their snapshots don't carry a `revenue_year` column, and that's what report dates are derived from. So every number in the tables above describes the other 127 companies only — an investment company's placement in the list is unvalidated.
+
+Fixing it needs a dated fallback for report dates plus a decision about whether partial-coverage companies belong in the same cross-section. Not attempted.
 
 (An earlier per-company/per-sector "reliability" score, tracking whether an individual company's own score history predicted its own returns, was tried and dropped — the data doesn't have enough depth per company to support it, see git history if curious.)
 
@@ -215,6 +255,10 @@ Add this line (runs at 08:00 every Monday; matches the schedule documented at th
 ```
 0 8 * * 1 /home/pi/tech_analyze/cron_pi.sh >> /home/pi/tech_analyze/logs/cron.log 2>&1
 ```
+
+The cron job runs — and rebalances — weekly.
+
+Turnover was measured at ~16% of the list per week, but 7 of the 8 removals across three consecutive runs were names still inside rank 35, i.e. boundary noise rather than signal. That churn came mostly from the two inputs that tracked spot price; both now divide by a 60-day mean close, and the ranking key is half an SMA200 comparison, so it is damped at the source rather than by rebalancing less often.
 
 ### Workflow between Mac and Pi
 

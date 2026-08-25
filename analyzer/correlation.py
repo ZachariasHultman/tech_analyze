@@ -35,6 +35,7 @@ from analyzer.metrics import (
     LOW_WEIGHT_METRICS,
     get_metrics_threshold,
 )
+from analyzer.config import MIN_CROSS_SECTION
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -53,14 +54,6 @@ MOMENTUM_WEIGHT_CAP = 1.0
 # adapter, but are well-established in research.
 WEIGHT_FLOORS = {
     "piotroski f-score status": 0.5,
-    "dividend yield status": 0.25,
-    # OCF is populated live for Nordic stocks but Avanza exposes no
-    # historical OCF series, so the backtest/optimizer can never compute a
-    # real correlation for this metric -- its weight comes entirely from
-    # this floor. See HIGH_WEIGHT_METRICS in metrics.py for why it's not in
-    # HIGHEST (would permanently block the bonus/malus check for non-Nordic
-    # holdings, where operatingCashFlow is always None).
-    "earnings quality status": 0.5,
 }
 
 # ======================================================================
@@ -773,6 +766,69 @@ def build_validation_summary(gate_result):
     }
 
 
+def blend_key_summary(panel_df=None, top_n=25, key="blend_score",
+                      target="fwd_excess_return_1y",
+                      scores_path="data/panel_scores.csv"):
+    """Out-of-sample numbers for the key the watchlist is actually ranked on.
+
+    The gate's own IC/spread describe its objective, which is built from the
+    `points` composite. Since the watchlist ranks on `blend_score`, reporting
+    only the gate's figures would put numbers in the email that describe an
+    ordering the screener no longer uses.
+
+    Reads `data/panel_scores.csv` itself by default. It deliberately does NOT
+    take `load_gate_panel`'s output: that function merges the *fundamentals*
+    panel with only `fwd_excess_return_1y` from the scores panel, so the scored
+    columns -- `blend_score` among them -- are not in it.
+
+    Returns None when the panel predates the blend (no column) so the caller
+    can omit the section rather than print zeros.
+    """
+    if panel_df is None or key not in getattr(panel_df, "columns", []):
+        try:
+            panel_df = pd.read_csv(scores_path)
+            panel_df.columns = panel_df.columns.str.strip()
+        except (OSError, ValueError):
+            return None
+    if key not in panel_df.columns or target not in panel_df.columns:
+        return None
+
+    df = panel_df.dropna(subset=[target])
+    per_year, basket = [], []
+    for year, g in df.groupby("fiscal_year"):
+        g2 = g[[key, target]].dropna()
+        if len(g2) < MIN_CROSS_SECTION or g2[key].nunique() < 3:
+            continue
+        ic = sp_stats.spearmanr(g2[key], g2[target]).correlation
+        top = g2.nlargest(min(top_n, len(g2)), key)[target].mean()
+        if np.isnan(ic):
+            continue
+        per_year.append({"fiscal_year": int(year), "ic": float(ic),
+                         "top_n_excess": float(top)})
+        basket.append(float(top))
+
+    if len(per_year) < 2:
+        return None
+
+    ics = [r["ic"] for r in per_year]
+    t_ic, p_ic = sp_stats.ttest_1samp(ics, popmean=0.0)
+    t_b, p_b = sp_stats.ttest_1samp(basket, popmean=0.0)
+    return {
+        "key": key,
+        "top_n": top_n,
+        "per_year": per_year,
+        "mean_ic": float(np.mean(ics)),
+        "ic_t_stat": float(t_ic),
+        "ic_p_value": float(p_ic),
+        "years_ic_positive": int(sum(1 for v in ics if v > 0)),
+        "mean_top_n_excess": float(np.mean(basket)),
+        "top_n_t_stat": float(t_b),
+        "top_n_p_value": float(p_b),
+        "years_top_n_positive": int(sum(1 for v in basket if v > 0)),
+        "n_periods": len(per_year),
+    }
+
+
 def save_panel_optimization_results(gate_result, out_path="optimization_results_panel.json"):
     """Persist gate_optimized_weights' verdict so live scoring can load it via
     _load_optimized_params("panel") (analyzer/main.py). Always writes, on
@@ -794,6 +850,11 @@ def save_panel_optimization_results(gate_result, out_path="optimization_results_
         "mean_equal_spread": gate_result["mean_equal_spread"],
         "validation": build_validation_summary(gate_result),
     }
+    # The ranking key's own out-of-sample record, alongside the gate's. Omitted
+    # rather than zero-filled when the panel predates the blend.
+    ranking = blend_key_summary()
+    if ranking is not None:
+        result["ranking_key"] = ranking
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2, default=str)
     print(f"Saved panel optimization results to {out_path}")

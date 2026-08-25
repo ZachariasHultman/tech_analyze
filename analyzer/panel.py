@@ -74,17 +74,23 @@ Known limitations (documented, not fixed here):
   pence divisor lives in ``fx.to_sek`` and Avanza series must not be routed
   through it. ``return_basis`` records the numeraire per row.
 
-* **``earnings quality status``** is permanently all-NaN historically
-  (operatingCashFlow is Nordic-only live, never in the CSV snapshot schema).
-  The column is kept (not dropped) so the schema matches production 1:1 and the
-  existing coverage-fallback logic in ``calculate_score`` handles it
-  automatically.
+* **Four metrics were removed from scoring entirely** (see
+  ``config.QUALITY_METRICS``): ``earnings quality status`` (Avanza exposes no
+  historical OCF, so it was permanently all-NaN here), both yoy hit-rates (0%
+  coverage here) and ``dividend yield status`` (measured IC -0.026, p=0.76).
+  The first three were ~100% populated *live*, so they moved the live ranking
+  while contributing nothing to the backtest that validated it.
 """
 
 import numpy as np
 import pandas as pd
 
-from analyzer.config import MIN_CROSS_SECTION, MIN_YEAR_COVERAGE
+from analyzer.config import (
+    MIN_CROSS_SECTION,
+    MIN_YEAR_COVERAGE,
+    MOMENTUM_BLEND_WEIGHT,
+    PRICE_SMOOTHING_WINDOW,
+)
 from analyzer.metrics import RATIO_SPECS
 from analyzer.historical_calc import (
     get_hist_data,
@@ -99,16 +105,12 @@ from analyzer.correlation import _all_scored_metrics, _score_snapshot
 from analyzer.financial_metrics import (
     calculate_revenue_y_cagr,
     calculate_eps_y_cagr,
-    calculate_revenue_yoy_hit_rate,
-    calculate_eps_yoy_hit_rate,
     calculate_net_margin_vs_avg,
     calculate_roe_vs_avg,
     calculate_gross_margin_stability,
     calculate_piotroski_f_score,
     calculate_revenue_trend,
-    calculate_earnings_quality,
     calculate_dividend_growth,
-    calculate_dividend_yield,
 )
 
 
@@ -118,15 +120,11 @@ _OTHER_KEYS = [
     "net debt - ebitda status",
     "net margin vs avg status",
     "roe vs avg status",
-    "revenue yoy hit-rate status",
-    "eps yoy hit-rate status",
     "eps y cagr status",
     "revenue y cagr status",
     "gross margin stability status",
     "piotroski f-score status",
     "price momentum status",
-    "dividend yield status",
-    "earnings quality status",
     "dividend growth status",
 ]
 
@@ -287,22 +285,6 @@ def build_fundamentals_panel(data_dir="data", yahoo_closes=None) -> pd.DataFrame
                 entry["eps y cagr status"] = None
 
             try:
-                rev_hit, _ = calculate_revenue_yoy_hit_rate(
-                    ticker_analysis, lookback_quarters=12
-                )
-                entry["revenue yoy hit-rate status"] = rev_hit
-            except Exception:
-                entry["revenue yoy hit-rate status"] = None
-
-            try:
-                eps_hit, _ = calculate_eps_yoy_hit_rate(
-                    ticker_analysis, lookback_quarters=12
-                )
-                entry["eps yoy hit-rate status"] = eps_hit
-            except Exception:
-                entry["eps yoy hit-rate status"] = None
-
-            try:
                 nm_vs, _ = calculate_net_margin_vs_avg(
                     ticker_info, ticker_analysis, years=5
                 )
@@ -329,17 +311,6 @@ def build_fundamentals_panel(data_dir="data", yahoo_closes=None) -> pd.DataFrame
                 entry["piotroski f-score status"] = f_score
             except Exception:
                 entry["piotroski f-score status"] = None
-
-            try:
-                entry["dividend yield status"] = calculate_dividend_yield(ticker_info)
-            except Exception:
-                entry["dividend yield status"] = None
-
-            try:
-                eq = calculate_earnings_quality(ticker_info, ticker_analysis)
-                entry["earnings quality status"] = eq
-            except Exception:
-                entry["earnings quality status"] = None
 
             try:
                 dg = calculate_dividend_growth(ticker_analysis, years=3)
@@ -522,7 +493,7 @@ def forward_dividend_yield(dps_df, report_date, price_at_report):
     Avanza's OHLC close is not dividend-adjusted (Handelsbanken A drops ~12.5%
     on its ex-div day in the raw snapshot; Yahoo's adjusted close moves ~1.2%
     for the same session), so a price-only forward return systematically
-    understates high-yield stocks -- exactly the ones `dividend yield status`
+    understates high-yield stocks -- exactly the ones a dividend-aware score
     rewards. This adds the missing leg back.
 
     ``dividend_per_share`` dates are calendar-year labels for the **payment**
@@ -795,6 +766,12 @@ def build_scores_panel(fundamentals_df, data_dir="data") -> pd.DataFrame:
                 "quality_pct": _lookup(scored_eq, company, "quality_pct"),
                 "value_pct": _lookup(scored_eq, company, "value_pct"),
                 "combined_score": _lookup(scored_eq, company, "combined_score"),
+                # The live watchlist ranking key, carried into the panel so
+                # --validate measures the ordering the screener actually uses
+                # rather than a composite it no longer ranks on.
+                "momentum_pct": _lookup(scored_eq, company, "momentum_pct"),
+                "fundamental_pct": _lookup(scored_eq, company, "fundamental_pct"),
+                "blend_score": _lookup(scored_eq, company, "blend_score"),
                 f"{_PCT_CHECK_METRIC}_pct": (
                     float(pct_rank.iloc[i]) if pct_rank is not None
                     and pd.notna(pct_rank.iloc[i]) else np.nan

@@ -66,14 +66,10 @@ class SummaryManager:
             "gross margin stability status": None,
             # consistency
             "revenue trend year status": None,
-            "revenue yoy hit-rate status": None,
-            "eps yoy hit-rate status": None,
             # shareholder return
-            "dividend yield status": None,
             "dividend growth status": None,
             # composite quality
             "piotroski f-score status": None,
-            "earnings quality status": None,
             # momentum
             "price momentum status": None,
         }
@@ -94,7 +90,13 @@ class SummaryManager:
             "nav discount trend status": None,
             # fundamentals
             "net debt - ebitda status": None,
-            "dividend yield status": None,
+            # Present here because the watchlist ranking key is half momentum
+            # (config.MOMENTUM_BLEND_WEIGHT). Without it an investment company
+            # would compete for the same 25 slots ranked on fundamentals alone
+            # -- two ranking regimes in one list, the same defect that scoring
+            # the two pools separately used to cause. The SMA200 it needs was
+            # already being computed for these companies and discarded.
+            "price momentum status": None,
         }
 
     def _initialize_template(self, key, sector):

@@ -33,7 +33,7 @@ def _manager(n_regular=26, n_investment=3):
     sm = SummaryManager()
     sm._weight_overrides = {"roe_pe ratio status": 1.0,
                             "net debt - ebitda status": 1.0,
-                            "dividend yield status": 1.0}
+                            "price momentum status": 1.0}
     reg_sector = [{"sectorId": "1", "sectorName": "Industri"}]
     inv_sector = [{"sectorId": "51", "sectorName": "Investmentbolag"}]
 
@@ -42,14 +42,14 @@ def _manager(n_regular=26, n_investment=3):
         sm._initialize_template(name, reg_sector)
         sm._update(name, reg_sector, "roe_pe ratio status", 0.1 + i * 0.1)
         sm._update(name, reg_sector, "net debt - ebitda status", 5.0 - i * 0.15)
-        sm._update(name, reg_sector, "dividend yield status", 0.001 * i)
+        sm._update(name, reg_sector, "price momentum status", -0.2 + 0.02 * i)
     for i in range(n_investment):
         name = f"Inv{i:02d}"
         sm._initialize_template(name, inv_sector)
         # mid-range values -- unremarkable against the full universe
         sm._update(name, inv_sector, "roe_pe ratio status", 1.0 + i * 0.05)
         sm._update(name, inv_sector, "net debt - ebitda status", 2.5 - i * 0.05)
-        sm._update(name, inv_sector, "dividend yield status", 0.013 + i * 0.001)
+        sm._update(name, inv_sector, "price momentum status", 0.05 + i * 0.01)
     return sm
 
 

@@ -45,6 +45,7 @@ from importlib.metadata import version
 
 from analyzer.config import (
     SLEEVE_GATE_MIN,
+    MOMENTUM_BLEND_WEIGHT,
     EXCLUDED_TICKER_IDS,
 )
 from datetime import date
@@ -150,16 +151,24 @@ def _extract_orderbook_id(index_name):
 
 
 def _fmt_scored_row(prefix, r):
-    """Format a (name, pts, quality_pct, value_pct, combined_score) row --
-    shared by the terminal watchlist report and the email summary so both
-    stay consistent. Falls back to a plain name when the stock wasn't part
-    of this run's scored universe (e.g. a watchlist holding outside the
-    current --preset/--watchlists scope)."""
-    name, pts, qual, val, cscore = r
+    """Format a (name, pts, quality_pct, value_pct, combined_score, blend,
+    momentum) row -- shared by the terminal watchlist report and the email
+    summary so both stay consistent. Falls back to a plain name when the stock
+    wasn't part of this run's scored universe (e.g. a watchlist holding outside
+    the current --preset/--watchlists scope).
+
+    Accepts the older 5-field row so callers that don't carry the blend (and
+    the tests pinning that shape) keep working."""
+    name, pts, qual, val, cscore = r[:5]
+    blend = r[5] if len(r) > 5 else float("nan")
+    mom = r[6] if len(r) > 6 else float("nan")
     if pd.isna(qual) and pd.isna(val) and pd.isna(cscore):
         return f"{prefix} {name}  (not scored this run)"
     pts_str = f"{pts:+.2f}" if pd.notna(pts) else "N/A"
-    return (f"{prefix} {name}  (pts={pts_str}, q={qual:.2f}, v={val:.2f}, "
+    head = f"{prefix} {name}  ("
+    if pd.notna(blend):
+        head += f"rank={blend:.2f}, mom={mom:.2f}, " if pd.notna(mom) else f"rank={blend:.2f}, "
+    return (f"{head}pts={pts_str}, q={qual:.2f}, v={val:.2f}, "
             f"combined={cscore:.2f})")
 
 
@@ -195,6 +204,10 @@ def _load_optimizer_status(variant=None):
         "dsr": data.get("dsr"),
         "confidence": data.get("confidence"),
         "source": filename,
+        # The ranking key's own record, written alongside the gate's since the
+        # gate's objective describes the points composite, not blend_score.
+        # Absent in files written before the blend existed.
+        "ranking_key": data.get("ranking_key"),
         **validation,
     }
 
@@ -273,12 +286,24 @@ def _format_optimizer_status(status):
     # The verdict is derived, not asserted. It used to be hardcoded "LOW",
     # which became self-contradictory the moment the IC test started clearing
     # 5% ("CONFIDENCE: LOW ... p=0.02").
-    t_stat, p_value = status.get("t_stat"), status.get("p_value")
+    #
+    # Judged on the key the watchlist is actually ranked on when that record
+    # exists, not on the gate's composite. Reporting the gate's p-value here
+    # while the RANKING KEY block below shows a different one made the block
+    # contradict itself ("CONFIDENCE: LOW ... p=0.08" above "IC p=0.047").
+    rk = status.get("ranking_key")
+    if isinstance(rk, dict) and rk.get("ic_p_value") is not None:
+        t_stat, p_value = rk.get("ic_t_stat"), rk.get("ic_p_value")
+        n_periods, judged = rk.get("n_periods", n_periods), rk.get("key", "blend_score")
+    else:
+        t_stat, p_value = status.get("t_stat"), status.get("p_value")
+        judged = "the scoring composite"
+
     detail = ""
     if t_stat is not None and p_value is not None:
         detail = f" (t={t_stat:+.2f}, p={p_value:.2f})"
     if p_value is not None and p_value < 0.05:
-        lines.append(f"  CONFIDENCE: MODERATE — ranking beats chance across "
+        lines.append(f"  CONFIDENCE: MODERATE — {judged} beats chance across "
                      f"{n_periods} periods{detail}.")
     else:
         lines.append(f"  CONFIDENCE: LOW — {n_periods} periods only{detail}. "
@@ -291,6 +316,32 @@ def _format_optimizer_status(status):
         lines.append(f"    CAVEAT: top-bottom spread is only {mean_spread:+.1%}/yr "
                      "— the ranking works on average, the extremes do not "
                      "separate, and the watchlist is an extreme.")
+    # Everything above describes the gate's objective, which is built from the
+    # `points` composite. The watchlist is ordered by `blend_score`, so its own
+    # record is reported separately rather than left implied by numbers that
+    # measure something else.
+    rk = status.get("ranking_key")
+    if isinstance(rk, dict) and rk.get("mean_ic") is not None:
+        n = rk.get("n_periods")
+        lines.append(
+            f"  RANKING KEY ({rk.get('key', 'blend_score')} = "
+            f"{int(MOMENTUM_BLEND_WEIGHT * 100)}% momentum + "
+            f"{int((1 - MOMENTUM_BLEND_WEIGHT) * 100)}% pts), same {n} years:"
+        )
+        lines.append(
+            f"    IC {rk['mean_ic']:+.3f} (p={rk['ic_p_value']:.3f}, "
+            f"positive {rk['years_ic_positive']}/{n})"
+        )
+        lines.append(
+            f"    top-{rk.get('top_n', 25)} basket {rk['mean_top_n_excess']:+.2%}/yr "
+            f"excess (p={rk['top_n_p_value']:.3f}, "
+            f"positive {rk['years_top_n_positive']}/{n})"
+        )
+        lines.append("    Momentum is the metric survivorship bias most "
+                     "inflates — treat this as the optimistic end.")
+        lines.append("    Investment companies are not in the panel at all, so "
+                     "their placement in the list is unvalidated.")
+
     lines.append("    Survivorship bias is not corrected for and inflates all "
                  "of the above.")
     n_companies = status.get("n_companies")
@@ -303,10 +354,14 @@ def _format_optimizer_status(status):
 # Shared explainer for q/v/combined, printed in both the terminal watchlist
 # report and the email summary.
 LEGEND_LINES = [
+    "rank = the ranking key: 50% price-vs-SMA200 percentile, 50% pts percentile",
+    "       (top-25 basket +5.90%/yr excess over 7 fiscal years, p=0.053,",
+    "        positive 6 of 7, vs +2.77%/yr p=0.171 for pts alone)",
+    "mom = price vs its own SMA200, as a peer percentile (0-1)",
     "q = quality percentile (0-1, peer-ranked business health)",
     "v = value percentile (0-1, peer-ranked cheapness)",
-    "pts = summed metric score -- the ranking key (the validated one:",
-    "      IC +0.041, p=0.017 across 7 fiscal years, vs p=0.18 for q x v)",
+    "pts = summed metric score -- the fundamental half of rank, and still",
+    "      what the sell-signal deterioration check reads",
     "combined = q x v -- shown for context, and the sleeve gate still applies",
 ]
 
@@ -360,17 +415,27 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
     # Two-sleeve gate: qualify only stocks ranking well in BOTH quality and value.
     combined["_quality"] = pd.to_numeric(combined.get("quality_pct"), errors="coerce")
     combined["_value"] = pd.to_numeric(combined.get("value_pct"), errors="coerce")
+    combined["_blend"] = pd.to_numeric(combined.get("blend_score"), errors="coerce")
+    combined["_momentum"] = pd.to_numeric(combined.get("momentum_pct"), errors="coerce")
     qualified = combined[
         (combined["_quality"] >= SLEEVE_GATE_MIN)
         & (combined["_value"] >= SLEEVE_GATE_MIN)
     ].copy()
-    # Ranked on pts, not combined_score. Over 7 fiscal years pts carried the
-    # only significant signal (IC +0.041, t=+3.29, p=0.017, positive in 6 of 7
-    # years) while combined_score -- despite a higher point estimate -- was not
-    # significant (p=0.18, 5 of 7) because multiplying two noisy percentiles
-    # amplifies the noise. The sleeve gate above still enforces "decent on
-    # both dimensions"; this only changes the ordering within that set.
-    qualified = qualified.sort_values("_pts", ascending=False).head(top_n)
+    # Ranked on blend_score: half the raw SMA200 distance, half the fundamental
+    # point total, each as a cross-sectional percentile (see
+    # config.MOMENTUM_BLEND_WEIGHT for the measurements behind the 50/50).
+    #
+    # Ranking on pts alone -- the previous key, itself chosen because pts beat
+    # combined_score -- gave the top-25 basket +2.77%/yr excess (p=0.171,
+    # positive 5 of 7 fiscal years). The blend gives +5.90%/yr (p=0.053,
+    # positive 6 of 7). Momentum alone scores a higher mean (+6.82%/yr) but is
+    # less consistent and is the metric survivorship bias most inflates.
+    #
+    # The sleeve gate above still enforces "decent on both dimensions"; this
+    # only changes the ordering within that set. `pts` is untouched and still
+    # drives the sell-signal deterioration check.
+    sort_key = "_blend" if combined["_blend"].notna().any() else "_pts"
+    qualified = qualified.sort_values(sort_key, ascending=False).head(top_n)
 
     # Build set of orderbook IDs that should be on the list
     qualified_ids = set()
@@ -426,7 +491,7 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
             return float("nan")
 
     def _row(name, df=None):
-        # (name, pts, quality_pct, value_pct, combined_score)
+        # (name, pts, quality_pct, value_pct, combined_score, blend, momentum)
         df = qualified if df is None else df
         return (
             name,
@@ -434,6 +499,8 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
             _num(name, "_quality", df),
             _num(name, "_value", df),
             _num(name, "_combined_score", df),
+            _num(name, "_blend", df),
+            _num(name, "_momentum", df),
         )
 
     added_rows   = [_row(n) for n in added]
@@ -448,7 +515,7 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
 
     # Report
     print(f"\n{'=' * 70}")
-    print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by pts)")
+    print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by rank)")
     print(f"{'=' * 70}")
     for line in _format_optimizer_status(_load_optimizer_status()):
         print(f"  {line}")
@@ -565,11 +632,20 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
     if push_results:
         n = push_results["top_n"]
         lines.append("=" * 50)
-        lines.append(f"  CONSIDER BUYING (top {n} by pts)")
+        lines.append(f"  CONSIDER BUYING (top {n} by rank)")
         lines.append("=" * 50)
 
         top10 = push_results["added"] + push_results["already"]
-        top10.sort(key=lambda x: (x[1] is not None, x[1]), reverse=True)  # by pts
+
+        # Ordered by the same key the list was selected on. Sorting the email
+        # by pts while _update_watchlist selected on the blend would print the
+        # right names in the wrong order, which reads as a different list.
+        def _order(row):
+            blend = row[5] if len(row) > 5 else None
+            key = blend if blend is not None and pd.notna(blend) else row[1]
+            return (key is not None and pd.notna(key), key)
+
+        top10.sort(key=_order, reverse=True)
         added_set = {r[0] for r in push_results["added"]}
         for r in top10:
             tag = "NEW" if r[0] in added_set else "   "
@@ -944,6 +1020,11 @@ def main():
         # _load_optimized_params) -- written on both accept and reject, since
         # a reject's chosen_weights is already the gate's own equal-weight
         # fallback, not a broken state.
+        # The file also gets the out-of-sample record of `blend_score` -- the
+        # key the watchlist is actually ranked on, which the gate's own
+        # objective (points-based) does not describe. Read from
+        # data/panel_scores.csv inside, not from panel_df: load_gate_panel
+        # keeps only the target column from the scored panel.
         save_panel_optimization_results(gate_result)
         return 0
 

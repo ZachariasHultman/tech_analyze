@@ -22,7 +22,15 @@ echo "=== $(date) ==="
 # Pull latest code from git (optimized weights are SCP'd separately from Mac)
 git pull --ff-only
 
-# Score, push to Avanza, check sells, send email
+# Score, push to Avanza, check sells, send email.
+#
+# Rebalances weekly by choice. The turnover that motivated a monthly cadence was
+# ~16% of the list per week, with 7 of 8 removals being names still inside rank
+# 35 -- boundary noise, since ranks 19-25 sit within 0.65 points. Most of that
+# came from the two inputs that moved with spot price, and both now divide by a
+# 60-day mean close (config.PRICE_SMOOTHING_WINDOW), with the ranking key half
+# an SMA200 comparison. The churn is damped at its source rather than by
+# visiting the list less often.
 uv run python3 main.py \
   --preset omxs30 omxs-mid \
   --watchlists Test Utdelare Äger Berkshire \

@@ -97,3 +97,56 @@ def test_push_top_defaults_to_a_quintile_not_a_handful():
     import inspect
     sig = inspect.signature(main_mod._update_watchlist)
     assert sig.parameters["top_n"].default == 25
+
+
+def test_ranks_by_blend_when_present(capsys):
+    """With blend_score present it, not pts, decides the order.
+
+    Measured on the panel: the top-25 basket ranked on pts returned +2.77%/yr
+    excess (p=0.171, positive 5 of 7 fiscal years); ranked on the 50/50
+    momentum blend, +5.90%/yr (p=0.053, 6 of 7).
+    """
+    manager = SummaryManager()
+    manager.summary = pd.DataFrame(
+        {
+            # Alpha wins on pts, Beta wins on the blend -- Beta must come first.
+            "points": [9.0, 2.0],
+            "quality_pct": [0.8, 0.6],
+            "value_pct": [0.7, 0.6],
+            "combined_score": [0.56, 0.36],
+            "momentum_pct": [0.10, 0.95],
+            "fundamental_pct": [0.95, 0.40],
+            "blend_score": [0.525, 0.675],
+        },
+        index=["Alpha AB 111", "Beta AB 222"],
+    )
+    manager.summary_investment = pd.DataFrame()
+
+    avanza = _FakeAvanza(watchlist_orderbook_ids=[])
+    result = main._update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa")
+
+    assert [r[0] for r in result["added"]] == ["Beta AB 222", "Alpha AB 111"]
+    out = capsys.readouterr().out
+    assert "rank=0.68" in out and "mom=0.95" in out
+    # pts is still reported -- it just no longer decides the order
+    assert "pts=+2.00" in out
+
+
+def test_falls_back_to_pts_when_no_blend_column():
+    """A summary built before the blend existed (or by a caller that doesn't
+    produce it) must still rank rather than collapse to an arbitrary order."""
+    manager = SummaryManager()
+    manager.summary = pd.DataFrame(
+        {
+            "points": [1.0, 3.0],
+            "quality_pct": [0.8, 0.9],
+            "value_pct": [0.7, 0.7],
+            "combined_score": [0.56, 0.63],
+        },
+        index=["Alpha AB 111", "Beta AB 222"],
+    )
+    manager.summary_investment = pd.DataFrame()
+
+    avanza = _FakeAvanza(watchlist_orderbook_ids=[])
+    result = main._update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa")
+    assert [r[0] for r in result["added"]] == ["Beta AB 222", "Alpha AB 111"]
