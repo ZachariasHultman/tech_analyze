@@ -872,29 +872,42 @@ def calculate_roe(ticker_analysis, ticker_id=None):
         for e in ticker_analysis["companyFinancialsByYear"]["netProfit"]
         if e.get("reportType") == "FULL_YEAR" and "date" in e and "value" in e
     ]
-    total_assets = [
-        e["value"]
+    # Keyed by date rather than list position. The three blocks are independent
+    # series and do not always cover the same years -- observed live on two US
+    # names, where totalAssets and totalLiabilities carry one report more than
+    # netProfit. Zipping by index paired whatever happened to sit at the same
+    # offset, so a single gap in either balance-sheet series shifted every
+    # earlier year's equity by one and filed the result under the *profit's*
+    # date. Nothing raised and nothing was logged; the metric just quietly
+    # described a different year.
+    #
+    # On today's snapshots the two agree for all 134 companies with complete
+    # series (the extra years are trailing, so the offsets happen to line up),
+    # which is why this fix moves no score and invalidates no panel row. It
+    # removes the trap, not a live error.
+    total_assets = {
+        e["date"]: e["value"]
         for e in ticker_analysis["companyFinancialsByYear"]["totalAssets"]
         if e.get("reportType") == "FULL_YEAR" and "date" in e and "value" in e
-    ]
-    total_liab = [
-        e["value"]
+    }
+    total_liab = {
+        e["date"]: e["value"]
         for e in ticker_analysis["companyFinancialsByYear"]["totalLiabilities"]
         if e.get("reportType") == "FULL_YEAR" and "date" in e and "value" in e
-    ]
+    }
 
     if not (net_profit and total_assets and total_liab):
         return None, None  # missing data somewhere
 
     # --- calculate ROE year-by-year ----------------------------------------
     roe_series = []
-    for i, np_entry in enumerate(net_profit):
-        try:
-            equity = total_assets[i] - total_liab[i]
-            roe_val = np_entry["value"] / equity if equity else None
-        except IndexError:  # unequal list lengths → skip
-            continue
-        roe_series.append({"date": np_entry["date"], "value": roe_val})
+    for np_entry in net_profit:
+        date = np_entry["date"]
+        if date not in total_assets or date not in total_liab:
+            continue  # no balance sheet that year -> no ROE, never a mispairing
+        equity = total_assets[date] - total_liab[date]
+        roe_val = np_entry["value"] / equity if equity else None
+        roe_series.append({"date": date, "value": roe_val})
 
     if not roe_series:
         return None, None

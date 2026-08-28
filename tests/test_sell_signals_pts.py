@@ -57,3 +57,23 @@ def test_sorted_worst_first_by_pts():
     signals = main._compute_sell_signals(avanza, manager, "Äger")
 
     assert [s["name"] for s in signals] == ["Beta AB 222", "Alpha AB 111"]
+
+
+def test_missing_points_column_skips_instead_of_raising(capsys):
+    """`points` is the only key the deterioration check has, but its absence is
+    a skipped check, not a crash.
+
+    `_compute_sell_signals` concats through `dropna(axis=1, how="all")`, so an
+    all-NaN `points` column is dropped before the direct index reads it -- the
+    same unguarded-index shape that made `_update_watchlist` push an empty
+    watchlist, here landing as a KeyError that would take down the whole
+    weekly run mid-report.
+    """
+    avanza = _FakeAvanza(watchlist_orderbook_ids=["111"])
+    manager = SummaryManager()
+    manager.summary = pd.DataFrame(
+        {"quality_pct": [0.9], "value_pct": [0.9]},
+        index=["Alpha AB 111"],
+    )
+    assert main._compute_sell_signals(avanza, manager, "Äger") == []
+    assert "skipping sell check" in capsys.readouterr().out

@@ -20,6 +20,43 @@ _RANK_OK = 0.65
 # base fields needed to compute ratios (always accepted by _update)
 REQUIRED_BASE_COLS = {"roe", "pe", "cagr", "fcfy", "de"}
 
+# Ranking columns in fallback order. Both sort sites -- the printed/exported
+# table (SummaryManager._display) and the pushed watchlist
+# (main._update_watchlist) -- walk this one list, so they cannot drift apart.
+RANK_COLUMNS = ("blend_score", "points", "combined_score")
+
+
+def rank_key(df):
+    """Sort key: blend_score, falling back to points, then combined_score.
+
+    Returns None when the frame carries none of RANK_COLUMNS with a usable
+    value, so callers can tell "nothing to rank on" apart from "everything
+    ties at zero" -- _update_watchlist must not push an arbitrary order.
+
+    This is the single implementation behind both sort sites. It used to be a
+    closure inside _display, duplicated by hand in main._update_watchlist, and
+    the two drifted twice: first when the ranking key moved from `points` to
+    `blend_score` and only the watchlist side was updated, then again on the
+    third rung, where _update_watchlist's intake filter dropped any summary
+    without a `points` column outright -- so a combined_score-only
+    cross-section printed a full table and pushed an empty watchlist. Keeping
+    one function is what makes that class of drift unrepresentable rather than
+    merely tested for.
+
+    On why blend_score is the key at all, see config.MOMENTUM_BLEND_WEIGHT:
+    over 7 fiscal years it carries the best ordering signal in the system
+    (IC +0.118, positive 7 of 7, p=0.052) against points' +0.081 and
+    combined_score's, which multiplies two noisy percentiles and amplifies the
+    noise.
+    """
+    for col in RANK_COLUMNS:
+        if col not in df.columns:
+            continue
+        base = pd.to_numeric(df[col], errors="coerce")
+        if base.notna().any():
+            return base.fillna(float("-inf"))
+    return None
+
 
 def _is_nan(x):
     try:
@@ -39,6 +76,205 @@ def _safe_div(a, b):
         return a / b
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Display helpers.
+#
+# These were seven closures nested inside SummaryManager._display, which made
+# that one method 191 lines of which 177 were function definitions. Six of the
+# seven captured nothing from the enclosing scope and the seventh captured only
+# `save_df`, now an explicit parameter -- so nesting them bought no state, only
+# invisibility: a closure is not a node any static tool can see, which is
+# exactly how the duplicated ranking logic in the old `_rank_key` drifted twice
+# without anything noticing. Hoisted, each one is independently testable and
+# shows up in the call graph.
+# ---------------------------------------------------------------------------
+
+def _unwrap_deep(v):
+    while isinstance(v, (list, tuple)) and len(v) == 1:
+        v = v[0]
+    try:
+        import numpy as np
+
+        if isinstance(v, np.generic):
+            v = v.item()
+    except Exception:
+        pass
+    return v
+
+def _fmt2(v):
+    if v is None:
+        return v
+    try:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return f"{v:.2f}"
+    except Exception:
+        pass
+    return v
+
+def _colorize_row(row, template):
+    colored = row.copy()
+    for col in template:
+        score_col = col + "_score"
+        if score_col in row:
+            v = row[col]
+            uv = _unwrap_deep(v)
+            if isinstance(uv, (int, float)) and uv is not None:
+                if row[score_col] > 0:
+                    colored[col] = f"\033[92m{uv:.2f}\033[0m"
+                elif row[score_col] < 0:
+                    colored[col] = f"\033[91m{uv:.2f}\033[0m"
+                else:
+                    colored[col] = f"{uv:.2f}"
+            else:
+                colored[col] = v
+    return colored
+
+def _build_export(df, template):
+    """
+    Build a CSV-friendly DataFrame:
+    - unwrap lists/tuples
+    - add '<metric> (flag)' columns using *_score (GREEN/RED/NEUTRAL)
+    - drop *_score, sector, and base fields
+    - round numeric to 2 decimals (leave flags as text)
+    """
+    import pandas as pd
+
+    if df.empty:
+        return df
+
+    df2 = df.map(_unwrap_deep)
+
+    # Create flags from *_score while we still have them
+    def _flags_row(row):
+        out = {}
+        for col in template:
+            sc = col + "_score"
+            if sc in row:
+                s = row[sc]
+                flag = "GREEN" if s > 0 else ("RED" if s < 0 else "NEUTRAL")
+                out[f"{col} (flag)"] = flag
+        return pd.Series(out)
+
+    flags = df2.apply(_flags_row, axis=1)
+    export = pd.concat([df2, flags], axis=1)
+
+    # Drop helper/base columns. combined_score is kept explicitly —
+    # it ends in "_score" but is a headline sleeve output, not a
+    # per-metric score column.
+    drop_cols = [
+        c
+        for c in export.columns
+        if c != "combined_score"
+        and (
+            str(c).endswith("_score")
+            or c == "sector"
+            or str(c).strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
+        )
+    ]
+    export = export.drop(columns=drop_cols, errors="ignore")
+
+    # Round numeric to 2 dp (keep flags and strings as-is)
+    def _round2(x):
+        return round(x, 2) if isinstance(x, (int, float)) else x
+
+    export = export.map(_round2)
+
+    # Nice NA
+    export = export.where(export.notna(), other="N/A")
+    return export
+
+def _process_dataframe(df, template):
+    """For terminal view (with ANSI colors)."""
+    if df.empty:
+        return df
+    df2 = df.map(_unwrap_deep)
+    df2 = df2.apply(_colorize_row, axis=1, args=(template,))
+
+    def _fmt_cell(x):
+        if isinstance(x, str):  # leave colored strings
+            return x
+        return _fmt2(x)
+
+    df2 = df2.map(_fmt_cell)
+
+    drop_cols = [
+        c
+        for c in df2.columns
+        if c != "combined_score"
+        and (
+            str(c).endswith("_score")
+            or c == "sector"
+            or str(c).strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
+        )
+    ]
+    df2 = df2.drop(columns=drop_cols, errors="ignore")
+
+    if "points" in df2.columns:
+        import pandas as pd
+
+        df2["points"] = pd.to_numeric(df2["points"], errors="coerce")
+
+    df2 = df2.where(df2.notna(), other="N/A")
+    return df2
+
+def _reorder_columns(df, weight_of):
+    """Reorder metric columns by weight (highest first)."""
+    # Separate special cols from metric cols
+    metric_cols = [
+        c for c in df.columns
+        if c.endswith(" status") and not c.endswith("_score")
+    ]
+    other_cols = [c for c in df.columns if c not in metric_cols]
+
+    # Sort metric columns by weight descending, then alphabetical
+    metric_cols.sort(key=lambda m: (-weight_of(m), m))
+
+    # Build final order: points, then the sleeve columns, then metrics,
+    # then rest.
+    ordered = []
+    if "points" in other_cols:
+        ordered.append("points")
+        other_cols.remove("points")
+    for sleeve in ("quality_pct", "value_pct", "combined_score"):
+        if sleeve in other_cols:
+            ordered.append(sleeve)
+            other_cols.remove(sleeve)
+    ordered.extend(metric_cols)
+    ordered.extend(other_cols)
+
+    # Only keep columns that exist
+    ordered = [c for c in ordered if c in df.columns]
+    return df[ordered]
+
+
+def _sort_and_print(df, csv_name, save_df=False, *, template, weight_of):
+    if df.empty:
+        return
+
+    # rank_key returns None when the frame carries no ranking column;
+    # the table is still worth printing, just in its incoming order.
+    key = rank_key(df)
+    order = df.index if key is None else key.sort_values(ascending=False).index
+
+    # CSV export first (clean + flags)
+    if save_df:
+        export_df = _build_export(df, template)
+        export_df = _reorder_columns(export_df, weight_of)
+        export_df = export_df.reindex(order)
+        export_df.to_csv(csv_name)
+
+    # Terminal view (colored)
+    proc = _process_dataframe(df, template)
+    proc = proc.reindex(order)
+    proc = _reorder_columns(proc, weight_of)
+
+    from tabulate import tabulate
+
+    print(tabulate(proc, headers="keys", tablefmt="fancy_grid", showindex=True))
 
 
 class SummaryManager:
@@ -289,222 +525,9 @@ class SummaryManager:
 
     def _display(self, save_df=False):
         """Displays DataFrame with tabulate formatting for a cleaner output."""
-
-        # --- helpers ---
-        def _unwrap_deep(v):
-            while isinstance(v, (list, tuple)) and len(v) == 1:
-                v = v[0]
-            try:
-                import numpy as np
-
-                if isinstance(v, np.generic):
-                    v = v.item()
-            except Exception:
-                pass
-            return v
-
-        def _fmt2(v):
-            if v is None:
-                return v
-            try:
-                if isinstance(v, bool):
-                    return v
-                if isinstance(v, (int, float)):
-                    return f"{v:.2f}"
-            except Exception:
-                pass
-            return v
-
-        def _colorize_row(row):
-            colored = row.copy()
-            for col in self.template:
-                score_col = col + "_score"
-                if score_col in row:
-                    v = row[col]
-                    uv = _unwrap_deep(v)
-                    if isinstance(uv, (int, float)) and uv is not None:
-                        if row[score_col] > 0:
-                            colored[col] = f"\033[92m{uv:.2f}\033[0m"
-                        elif row[score_col] < 0:
-                            colored[col] = f"\033[91m{uv:.2f}\033[0m"
-                        else:
-                            colored[col] = f"{uv:.2f}"
-                    else:
-                        colored[col] = v
-            return colored
-
-        def _build_export(df):
-            """
-            Build a CSV-friendly DataFrame:
-            - unwrap lists/tuples
-            - add '<metric> (flag)' columns using *_score (GREEN/RED/NEUTRAL)
-            - drop *_score, sector, and base fields
-            - round numeric to 2 decimals (leave flags as text)
-            """
-            import pandas as pd
-
-            if df.empty:
-                return df
-
-            df2 = df.map(_unwrap_deep)
-
-            # Create flags from *_score while we still have them
-            def _flags_row(row):
-                out = {}
-                for col in self.template:
-                    sc = col + "_score"
-                    if sc in row:
-                        s = row[sc]
-                        flag = "GREEN" if s > 0 else ("RED" if s < 0 else "NEUTRAL")
-                        out[f"{col} (flag)"] = flag
-                return pd.Series(out)
-
-            flags = df2.apply(_flags_row, axis=1)
-            export = pd.concat([df2, flags], axis=1)
-
-            # Drop helper/base columns. combined_score is kept explicitly —
-            # it ends in "_score" but is a headline sleeve output, not a
-            # per-metric score column.
-            drop_cols = [
-                c
-                for c in export.columns
-                if c != "combined_score"
-                and (
-                    str(c).endswith("_score")
-                    or c == "sector"
-                    or str(c).strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
-                )
-            ]
-            export = export.drop(columns=drop_cols, errors="ignore")
-
-            # Round numeric to 2 dp (keep flags and strings as-is)
-            def _round2(x):
-                return round(x, 2) if isinstance(x, (int, float)) else x
-
-            export = export.map(_round2)
-
-            # Nice NA
-            export = export.where(export.notna(), other="N/A")
-            return export
-
-        def _process_dataframe(df):
-            """For terminal view (with ANSI colors)."""
-            if df.empty:
-                return df
-            df2 = df.map(_unwrap_deep)
-            df2 = df2.apply(_colorize_row, axis=1)
-
-            def _fmt_cell(x):
-                if isinstance(x, str):  # leave colored strings
-                    return x
-                return _fmt2(x)
-
-            df2 = df2.map(_fmt_cell)
-
-            drop_cols = [
-                c
-                for c in df2.columns
-                if c != "combined_score"
-                and (
-                    str(c).endswith("_score")
-                    or c == "sector"
-                    or str(c).strip().lower() in {"pe", "cagr", "fcfy", "de", "roe"}
-                )
-            ]
-            df2 = df2.drop(columns=drop_cols, errors="ignore")
-
-            if "points" in df2.columns:
-                import pandas as pd
-
-                df2["points"] = pd.to_numeric(df2["points"], errors="coerce")
-
-            df2 = df2.where(df2.notna(), other="N/A")
-            return df2
-
-        def _reorder_columns(df):
-            """Reorder metric columns by weight (highest first)."""
-            # Separate special cols from metric cols
-            metric_cols = [
-                c for c in df.columns
-                if c.endswith(" status") and not c.endswith("_score")
-            ]
-            other_cols = [c for c in df.columns if c not in metric_cols]
-
-            # Sort metric columns by weight descending, then alphabetical
-            metric_cols.sort(key=lambda m: (-self._assign_weight(m), m))
-
-            # Build final order: points, then the sleeve columns, then metrics,
-            # then rest.
-            ordered = []
-            if "points" in other_cols:
-                ordered.append("points")
-                other_cols.remove("points")
-            for sleeve in ("quality_pct", "value_pct", "combined_score"):
-                if sleeve in other_cols:
-                    ordered.append(sleeve)
-                    other_cols.remove(sleeve)
-            ordered.extend(metric_cols)
-            ordered.extend(other_cols)
-
-            # Only keep columns that exist
-            ordered = [c for c in ordered if c in df.columns]
-            return df[ordered]
-
-        def _rank_key(df):
-            """Sort key: blend_score, falling back to points, then combined_score.
-
-            This chain must stay identical to `main._update_watchlist`'s, which
-            sorts on `_blend` and falls back to `_pts`. Keeping the display
-            order consistent with the watchlist order matters: they used to
-            disagree, so the top of the printed table was not the set being
-            pushed -- and they silently disagreed again for a while after the
-            ranking key moved from `points` to `blend_score` and only the
-            watchlist side was updated. tests/test_display_order_matches_
-            watchlist.py pins both sides against each other.
-
-            On why blend_score is the key at all, see config.MOMENTUM_BLEND_
-            WEIGHT: over 7 fiscal years it carries the best ordering signal in
-            the system (IC +0.118, positive 7 of 7, p=0.052) against points'
-            +0.081 and combined_score's, which multiplies two noisy percentiles
-            and amplifies the noise.
-            """
-            if "blend_score" in df.columns:
-                base = pd.to_numeric(df["blend_score"], errors="coerce")
-                if base.notna().any():
-                    return base.fillna(float("-inf"))
-            if "points" in df.columns:
-                base = pd.to_numeric(df["points"], errors="coerce")
-            elif "combined_score" in df.columns:
-                base = pd.to_numeric(df["combined_score"], errors="coerce")
-            else:
-                base = pd.Series(0.0, index=df.index)
-            return base.fillna(float("-inf"))
-
-        def _sort_and_print(df, csv_name):
-            if df.empty:
-                return
-
-            order = _rank_key(df).sort_values(ascending=False).index
-
-            # CSV export first (clean + flags)
-            if save_df:
-                export_df = _build_export(df)
-                export_df = _reorder_columns(export_df)
-                export_df = export_df.reindex(order)
-                export_df.to_csv(csv_name)
-
-            # Terminal view (colored)
-            proc = _process_dataframe(df)
-            proc = proc.reindex(order)
-            proc = _reorder_columns(proc)
-
-            from tabulate import tabulate
-
-            print(tabulate(proc, headers="keys", tablefmt="fancy_grid", showindex=True))
-
-        # summaries
         if not self.summary.empty:
-            _sort_and_print(self.summary, "summary.csv")
+            _sort_and_print(self.summary, "summary.csv", save_df=save_df,
+                            template=self.template, weight_of=self._assign_weight)
 
     def process_historical(
         self, historical_df, metrics_to_use, thresholds=None, sector_column="sector"

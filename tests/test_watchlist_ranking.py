@@ -151,3 +151,61 @@ def test_falls_back_to_pts_when_no_blend_column():
     avanza = _FakeAvanza(watchlist_orderbook_ids=[])
     result = main._update_watchlist(avanza, manager, top_n=10, target_name="Bör köpa")
     assert [r[0] for r in result["added"]] == ["Beta AB 222", "Alpha AB 111"]
+
+
+# ---------------------------------------------------------------------------
+# _gate_and_rank in isolation.
+#
+# The gate-and-rank step decides *what gets bought*; the Avanza calls around it
+# only carry out that decision. It used to be ~50 lines in the middle of a
+# 190-line _update_watchlist, reachable only through a fake broker, so every
+# test of the actual selection rule had to stand up a watchlist first. Now it
+# takes a DataFrame and returns one.
+# ---------------------------------------------------------------------------
+from analyzer.main import _gate_and_rank
+
+
+def _gate_frame():
+    """Delta fails the value sleeve; the other three clear both."""
+    return pd.DataFrame(
+        {
+            "points": [1.0, 5.0, 9.0, 9.0],
+            "blend_score": [0.9, 0.5, 0.1, 0.99],
+            "quality_pct": [0.9, 0.9, 0.9, 0.9],
+            "value_pct": [0.9, 0.9, 0.9, 0.1],
+        },
+        index=["Alpha AB 111", "Beta AB 222", "Gamma AB 333", "Delta AB 444"],
+    )
+
+
+def _gate_manager(df):
+    manager = SummaryManager()
+    manager.summary = df
+    return manager
+
+
+def test_gate_and_rank_drops_the_sleeve_failure():
+    combined, qualified = _gate_and_rank(_gate_manager(_gate_frame()), top_n=25)
+    assert "Delta AB 444" not in qualified.index
+    # `combined` keeps every scored row -- removals are looked up in it.
+    assert "Delta AB 444" in combined.index
+
+
+def test_gate_and_rank_orders_by_blend_score():
+    _, qualified = _gate_and_rank(_gate_manager(_gate_frame()), top_n=25)
+    assert list(qualified.index) == ["Alpha AB 111", "Beta AB 222", "Gamma AB 333"]
+
+
+def test_gate_and_rank_applies_top_n_after_ranking():
+    """top_n cuts the ranked order, not the pre-sort order."""
+    _, qualified = _gate_and_rank(_gate_manager(_gate_frame()), top_n=2)
+    assert list(qualified.index) == ["Alpha AB 111", "Beta AB 222"]
+
+
+def test_gate_and_rank_returns_none_without_a_ranking_column():
+    df = _gate_frame().drop(columns=["blend_score", "points"])
+    assert _gate_and_rank(_gate_manager(df), top_n=25) is None
+
+
+def test_gate_and_rank_returns_none_on_an_empty_summary():
+    assert _gate_and_rank(_gate_manager(pd.DataFrame()), top_n=25) is None

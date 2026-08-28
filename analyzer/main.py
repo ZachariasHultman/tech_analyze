@@ -39,7 +39,7 @@ from avanza.models import *
 import os
 import pandas as pd
 from analyzer.helper import *
-from analyzer.summary_manager import SummaryManager
+from analyzer.summary_manager import SummaryManager, RANK_COLUMNS, rank_key
 from analyzer.data_processing import *
 from importlib.metadata import version
 
@@ -389,41 +389,51 @@ def _wl_attr(wl, key):
     return getattr(wl, key, None)
 
 
-def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
-    """Add top-scoring stocks to the target watchlist.
+def _resolve_target_watchlist(avanza, target_name):
+    """Find the named watchlist and return (watchlist_id, existing_orderbook_ids).
 
-    - Filters by the two-sleeve gate (quality_pct and value_pct both above
-      SLEEVE_GATE_MIN), ranks the rest by combined_score
-    - Adds qualified stocks that aren't already on the list
-    - Removes stocks from the list that no longer qualify
+    Returns None when it does not exist -- the caller must not create it, since
+    a typo'd name would otherwise silently produce a second list that the
+    weekly run then starts pushing to.
     """
     watchlists = avanza.get_watchlists()
-
     target = next(
         (wl for wl in watchlists if _wl_attr(wl, "name") == target_name), None
     )
-
     if target is None:
         print(f"\n[WARN] Watchlist '{target_name}' not found on Avanza.")
         print("  Please create it manually in Avanza first, then re-run.")
-        return
+        return None
 
     watchlist_id = _wl_attr(target, "watchListId") or _wl_attr(target, "id")
     existing_ids = set(str(oid) for oid in (_wl_attr(target, "orderbookIds") or []))
+    return watchlist_id, existing_ids
 
-    # Collect all scored stocks from both summaries
+
+def _gate_and_rank(manager, top_n):
+    """Apply the two-sleeve gate, rank, and cut to the top N.
+
+    Returns (combined, qualified) or None when there is nothing rankable.
+    Split out of _update_watchlist because this -- not the Avanza calls around
+    it -- is the part that decides *what gets bought*, and it is testable with
+    a bare DataFrame and no fake broker at all.
+    """
+    # Admitted on any of summary_manager.RANK_COLUMNS, not on `points` alone:
+    # gating the intake on one rung of the fallback chain silently defeated the
+    # other two. A combined_score-only cross-section used to be dropped here,
+    # so `_display` printed a full table while this pushed an empty watchlist.
     frames = []
     for summary in [manager.summary]:
         if summary is not None and isinstance(summary, pd.DataFrame) and not summary.empty:
-            if "points" in summary.columns:
+            if any(col in summary.columns for col in RANK_COLUMNS):
                 frames.append(summary)
 
     if not frames:
         print("\n[WARN] No scored stocks to add to watchlist.")
-        return
+        return None
 
     combined = pd.concat(frames)
-    combined["_pts"] = pd.to_numeric(combined["points"], errors="coerce")
+    combined["_pts"] = pd.to_numeric(combined.get("points"), errors="coerce")
     combined["_combined_score"] = pd.to_numeric(
         combined.get("combined_score"), errors="coerce"
     )
@@ -437,6 +447,7 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
         (combined["_quality"] >= SLEEVE_GATE_MIN)
         & (combined["_value"] >= SLEEVE_GATE_MIN)
     ].copy()
+
     # Ranked on blend_score: half the raw SMA200 distance, half the fundamental
     # point total, each as a cross-sectional percentile (see
     # config.MOMENTUM_BLEND_WEIGHT for the measurements behind the 50/50).
@@ -454,39 +465,47 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
     # The sleeve gate above still enforces "decent on both dimensions"; this
     # only changes the ordering within that set. `pts` is untouched and still
     # drives the sell-signal deterioration check.
-    sort_key = "_blend" if combined["_blend"].notna().any() else "_pts"
-    qualified = qualified.sort_values(sort_key, ascending=False).head(top_n)
+    #
+    # One shared implementation with SummaryManager._display -- see
+    # summary_manager.rank_key for why the chain lives in exactly one place.
+    key = rank_key(qualified)
+    if key is None:
+        print("\n[WARN] No ranking column (blend_score/points/combined_score) "
+              "on the scored stocks; refusing to push an arbitrary order.")
+        return None
+    qualified = qualified.loc[key.sort_values(ascending=False).index].head(top_n)
+    return combined, qualified
 
-    # Build set of orderbook IDs that should be on the list
+
+def _sync_watchlist(avanza, watchlist_id, combined, qualified, existing_ids):
+    """Add what qualifies, remove what no longer does.
+
+    Returns (added, already, failed, removed) as lists of index labels; every
+    Avanza call is individually guarded so one rejected symbol cannot abort the
+    weekly run partway through the list.
+    """
     qualified_ids = set()
     for idx in qualified.index:
         oid = _extract_orderbook_id(idx)
         if oid:
             qualified_ids.add(oid)
 
-    added = []
-    already = []
-    failed = []
-    removed = []
+    added, already, failed, removed = [], [], [], []
 
-    # Add qualified stocks not yet on list
     for idx in qualified.index:
         orderbook_id = _extract_orderbook_id(idx)
         if not orderbook_id:
             failed.append((idx, "could not extract orderbookId"))
             continue
-
         if orderbook_id in existing_ids:
             already.append(idx)
             continue
-
         try:
             avanza.add_to_watchlist(orderbook_id, watchlist_id)
             added.append(idx)
         except Exception as e:
             failed.append((idx, str(e)))
 
-    # Remove stocks from watchlist that no longer qualify
     id_to_name = {}
     for idx in combined.index:
         oid = _extract_orderbook_id(idx)
@@ -502,38 +521,29 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
             except Exception as e:
                 failed.append((name, f"remove failed: {e}"))
 
-    def _num(name, col, df=None):
-        df = qualified if df is None else df
+    return added, already, failed, removed
+
+
+def _scored_rows(names, qualified, df=None):
+    """(name, pts, quality, value, combined_score, blend, momentum) per name."""
+    frame = qualified if df is None else df
+
+    def _num(name, col):
         try:
-            v = df.loc[name, col]
+            v = frame.loc[name, col]
             return float(v) if pd.notna(v) else float("nan")
         except Exception:
             return float("nan")
 
-    def _row(name, df=None):
-        # (name, pts, quality_pct, value_pct, combined_score, blend, momentum)
-        df = qualified if df is None else df
-        return (
-            name,
-            _num(name, "_pts", df),
-            _num(name, "_quality", df),
-            _num(name, "_value", df),
-            _num(name, "_combined_score", df),
-            _num(name, "_blend", df),
-            _num(name, "_momentum", df),
-        )
+    return [
+        (n, _num(n, "_pts"), _num(n, "_quality"), _num(n, "_value"),
+         _num(n, "_combined_score"), _num(n, "_blend"), _num(n, "_momentum"))
+        for n in names
+    ]
 
-    added_rows   = [_row(n) for n in added]
-    already_rows = [_row(n) for n in already]
-    # removed stocks are excluded from `qualified` by definition (that's why
-    # they were removed) -- look their metrics up in `combined` instead,
-    # which still has every scored company's row.
-    removed_rows = [_row(n, df=combined) for n in removed]
 
-    def _fmt_row(marker, r):
-        return f"    {_fmt_scored_row(marker, r)}"
-
-    # Report
+def _print_watchlist_report(target_name, top_n, added_rows, already_rows,
+                            removed_rows, failed):
     print(f"\n{'=' * 70}")
     print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by rank)")
     print(f"{'=' * 70}")
@@ -545,20 +555,53 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
     if added_rows:
         print(f"\n  Added {len(added_rows)} stock(s):")
         for r in added_rows:
-            print(_fmt_row("+", r))
+            print(f"    {_fmt_scored_row('+', r)}")
     if already_rows:
         print(f"\n  Already on list ({len(already_rows)}):")
         for r in already_rows:
-            print(_fmt_row("=", r))
+            print(f"    {_fmt_scored_row('=', r)}")
     if removed_rows:
         print(f"\n  Removed {len(removed_rows)} stock(s) (no longer in top {top_n}):")
         for r in removed_rows:
-            print(_fmt_row("-", r))
+            print(f"    {_fmt_scored_row('-', r)}")
     if failed:
         print(f"\n  Failed ({len(failed)}):")
         for name, err in failed:
             print(f"    ! {name}: {err}")
     print(f"{'=' * 70}\n")
+
+
+def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
+    """Add top-scoring stocks to the target watchlist.
+
+    - Filters by the two-sleeve gate (quality_pct and value_pct both above
+      SLEEVE_GATE_MIN), ranks the rest by summary_manager.rank_key
+    - Adds qualified stocks that aren't already on the list
+    - Removes stocks from the list that no longer qualify
+    """
+    resolved = _resolve_target_watchlist(avanza, target_name)
+    if resolved is None:
+        return
+    watchlist_id, existing_ids = resolved
+
+    ranked = _gate_and_rank(manager, top_n)
+    if ranked is None:
+        return
+    combined, qualified = ranked
+
+    added, already, failed, removed = _sync_watchlist(
+        avanza, watchlist_id, combined, qualified, existing_ids
+    )
+
+    added_rows = _scored_rows(added, qualified)
+    already_rows = _scored_rows(already, qualified)
+    # removed stocks are excluded from `qualified` by definition (that's why
+    # they were removed) -- look their metrics up in `combined` instead,
+    # which still has every scored company's row.
+    removed_rows = _scored_rows(removed, qualified, df=combined)
+
+    _print_watchlist_report(target_name, top_n, added_rows, already_rows,
+                            removed_rows, failed)
 
     return {
         "target_name": target_name,
@@ -592,6 +635,16 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
         return []
 
     combined = pd.concat([f.dropna(axis=1, how="all") for f in frames])
+    # `points` is the only key here by design -- the deterioration check is a
+    # sum-of-scores question, not a ranking one, so there is no fallback chain
+    # to walk (see summary_manager.rank_key for the side that does have one).
+    # It still has to be absent-safe: `dropna(axis=1, how="all")` above drops
+    # an all-NaN `points` column outright, which turned a missing score into a
+    # KeyError instead of a skipped check.
+    if "points" not in combined.columns:
+        print("[WARN] No `points` column on the scored stocks — "
+              "skipping sell check.")
+        return []
     combined["_pts"] = pd.to_numeric(combined["points"], errors="coerce")
 
     scored_ids = {_extract_orderbook_id(i) for i in combined.index}

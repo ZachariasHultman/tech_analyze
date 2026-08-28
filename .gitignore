@@ -46,5 +46,17 @@ logs/
 .venv/
 
 CLAUDE.md
-# Local Claude Code permissions (machine-specific)
+# Local Claude Code permissions (machine-specific) and the timestamped
+# backups Claude Code writes beside them. Shared project config under
+# .claude/ (settings.json, skills, hooks, agents) stays committable.
 .claude/settings.local.json
+.claude/*.bak.*
+.claude/settings.local.json.bak.*
+
+# graphify knowledge graph — regenerable from the corpus via /graphify,
+# ~1 MB of JSON plus an extraction cache. scripts/graph_wiring_edges.py
+# rebuilds the wiring edges on top of a fresh run.
+graphify-out/
+
+# pytest-cov output
+.coverage
