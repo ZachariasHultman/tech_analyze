@@ -14,8 +14,10 @@ return compounded with the USD/SEK move. Converting prices to SEK *before* the
 return is taken removes that shared component.
 
 Rates come from Frankfurter (ECB daily reference rates) -- free, no API key.
-Yahoo's ``USDSEK=X`` symbols raise ``'str' object has no attribute 'name'`` on
-the pinned yfinance 0.2.54 regardless of session; do not swap this back.
+Yahoo's ``USDSEK=X`` once raised ``'str' object has no attribute 'name'`` --
+which turned out to be yfinance 0.2.54 failing on *every* symbol under
+curl_cffi 0.16, fixed by the 1.7.0 pin. Frankfurter stays regardless: ECB
+reference rates are the cleaner source for a SEK numeraire.
 
 The cache is a manual, Mac-only step exactly like ``--backfill-prices``: when
 ``data/fx_sek.csv`` is absent (fresh clone, Pi, offline) every caller must go
