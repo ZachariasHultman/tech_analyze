@@ -10,6 +10,7 @@ from analyzer.metrics import (
 from analyzer.data_processing import _to_pct, _unwrap
 from tabulate import tabulate
 import math
+import re
 import pandas as pd
 
 # Cross-sectional rank thresholds used by _assign_points_rank.
@@ -24,6 +25,39 @@ REQUIRED_BASE_COLS = {"roe", "pe", "cagr", "fcfy", "de"}
 # table (SummaryManager._display) and the pushed watchlist
 # (main._update_watchlist) -- walk this one list, so they cannot drift apart.
 RANK_COLUMNS = ("blend_score", "points", "combined_score")
+
+
+# Trailing share-class markers on Avanza names, after the orderbook id is
+# stripped: "Handelsbanken A" / "Handelsbanken B", "SEB C", "Autoliv SDB",
+# "Shell ADR", "Alphabet Class C", "Volvo ser. B", "Pref" shares.
+_SHARE_CLASS_RE = re.compile(
+    r"\s+(?:class\s+[a-z]|ser\.?\s*[a-z]|[a-z]|sdb|adr|pref)$", re.IGNORECASE)
+_ORDERBOOK_ID_RE = re.compile(r"\s+\d+$")
+
+
+def company_key(name):
+    """The issuer behind a listing, so share classes count as one company:
+    ``"Handelsbanken B 5265"`` -> ``"handelsbanken"``.
+
+    Name-based, so it only catches classes that share a base name; an ADR
+    listed under a different name than the local share (``"Novo Nordisk ADR"``
+    vs ``"Novo Nordisk B"`` *does* match, ``"Autoliv SDB"`` vs ``"Autoliv Inc"``
+    would not) slips through.
+    """
+    base = _ORDERBOOK_ID_RE.sub("", str(name)).strip()
+    base = _SHARE_CLASS_RE.sub("", base).strip()
+    return re.sub(r"\s+", " ", base).lower()
+
+
+def one_per_company(ranked):
+    """Keep the first (best-ranked) listing of each company in an already
+    sorted frame. Applied before the top-N cut, so the slot a dropped share
+    class would have taken goes to the next company rather than vanishing --
+    two classes of one issuer are one bet, and counting them twice doubled
+    its weight past the per-stock cap (seen: Handelsbanken A and B at 15%
+    each in the min-variance portfolio)."""
+    keys = pd.Series([company_key(i) for i in ranked.index], index=ranked.index)
+    return ranked[~keys.duplicated(keep="first")]
 
 
 def rank_key(df):

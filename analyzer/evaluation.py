@@ -39,6 +39,7 @@ from scipy import stats as sp_stats
 
 from analyzer.benchmarks import load_benchmarks, load_core, window_return
 from analyzer.config import CORE_MIX, SATELLITE_SHARE, SLEEVE_GATE_MIN
+from analyzer.summary_manager import one_per_company
 from analyzer.frontier import (
     CORE_KEY, WEIGHT_CAP, _solve, common_weekly_returns, grinold_alpha, ledoit_wolf,
 )
@@ -80,7 +81,10 @@ def basket(g, key, top_n=TOP_N):
     """The rows live would push: sleeve gate, then the top N on ``key``."""
     gated = g[(g["quality_pct"] >= SLEEVE_GATE_MIN)
               & (g["value_pct"] >= SLEEVE_GATE_MIN)]
-    return gated.dropna(subset=[key]).nlargest(top_n, key)
+    ranked = gated.dropna(subset=[key]).sort_values(key, ascending=False)
+    # One listing per company, exactly as main._gate_and_rank does live.
+    ranked = one_per_company(ranked.set_index("company_id", drop=False))
+    return ranked.head(top_n).reset_index(drop=True)
 
 
 def _row_vs_bench(rows, bench):

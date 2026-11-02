@@ -40,7 +40,9 @@ from avanza.models import *
 import os
 import pandas as pd
 from analyzer.helper import *
-from analyzer.summary_manager import SummaryManager, RANK_COLUMNS, rank_key
+from analyzer.summary_manager import (
+    SummaryManager, RANK_COLUMNS, one_per_company, rank_key,
+)
 from analyzer.data_processing import *
 from importlib.metadata import version
 
@@ -284,7 +286,8 @@ def _gate_and_rank(manager, top_n):
         print("\n[WARN] No ranking column (blend_score/points/combined_score) "
               "on the scored stocks; refusing to push an arbitrary order.")
         return None
-    qualified = qualified.loc[key.sort_values(ascending=False).index].head(top_n)
+    qualified = one_per_company(
+        qualified.loc[key.sort_values(ascending=False).index]).head(top_n)
     return combined, qualified
 
 
