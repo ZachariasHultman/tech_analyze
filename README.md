@@ -327,7 +327,7 @@ uv run python3 main.py --watchlists Äger --push --sell-from Äger --email
 
 Sends a plain-text email with the watchlist update and any sell signals. Requires `EMAIL_*` vars in `.env` (see Setup).
 
-The **portfolio weights** section treats the pushed stocks as a 20% satellite next to your index funds (`CORE_MIX` in `analyzer/config.py`: 70% Avanza Global + 30% OMXSGI, fetched from Avanza on every run). A (min-variance) picks the satellite that makes the *whole* portfolio calmest, so stocks that move like your funds get little weight; B (max-Sharpe) adds the score as expected return. The same names are mirrored to the `min-var` and `max-sharpe` Avanza watchlists — satellite only, never the funds.
+The **portfolio weights** section treats the pushed stocks as a 30% satellite next to your index funds (`CORE_MIX` in `analyzer/config.py`: 70% Avanza Global + 30% OMXSGI, fetched from Avanza on every run). A (min-variance) picks the satellite that makes the *whole* portfolio calmest, so stocks that move like your funds get little weight; B (max-Sharpe) adds the score as expected return. The same names are mirrored to the `min-var` and `max-sharpe` Avanza watchlists — satellite only, never the funds.
 
 Every email opens with a **system status block** saying whether the score has earned its keep:
 

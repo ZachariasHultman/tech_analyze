@@ -146,4 +146,4 @@ EXCLUDED_SECTORS = {"Investmentbolag"}
 # standing in for broad Swedish equity funds).
 CORE_MIX = {"878733": 0.7, "633079": 0.3}
 CORE_LABEL = "70% Avanza Global + 30% OMXSGI"
-SATELLITE_SHARE = 0.20
+SATELLITE_SHARE = 0.30
