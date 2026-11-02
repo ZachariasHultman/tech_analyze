@@ -212,7 +212,14 @@ def build_portfolios(price_hist, currencies, blend, names, rates, cap=WEIGHT_CAP
 
 TITLE = "PORTFOLIO WEIGHTS (how much of each pushed stock)"
 NOT_COMPUTED = "Not computed: too little common price history."
-_ZERO = 0.005  # below half a percent reads as 0% at the displayed precision
+# Below half a percent reads as 0% at the displayed precision; also the bar
+# for being put on the min-var / max-sharpe Avanza watchlists.
+MIN_WEIGHT = 0.005
+
+
+def held_names(weights):
+    """Names a portfolio actually holds -- the ones shown with a weight."""
+    return [n for n, w in weights.items() if w >= MIN_WEIGHT]
 
 
 def display_name(name):
@@ -247,17 +254,17 @@ def _weight_rows(p):
     order = (wa + wb).sort_values(ascending=False).index
     rows, zero = [], []
     for name in order:
-        if wa[name] < _ZERO and wb[name] < _ZERO:
+        if wa[name] < MIN_WEIGHT and wb[name] < MIN_WEIGHT:
             zero.append(display_name(name))
             continue
-        a = _pct(wa[name]) if wa[name] >= _ZERO else "–"
-        b = (_pct(wb[name]) if wb[name] >= _ZERO else "–") if ms else "-"
+        a = _pct(wa[name]) if wa[name] >= MIN_WEIGHT else "–"
+        b = (_pct(wb[name]) if wb[name] >= MIN_WEIGHT else "–") if ms else "-"
         rows.append((display_name(name), a, b))
     return rows, zero
 
 
-def _footnotes(p):
-    notes = [
+def _footnotes(p, sync_notes=()):
+    notes = list(sync_notes) + [
         f"Cap {p['cap'] * 100:.0f}% per stock. {p['weeks']} weeks of Avanza closes "
         f"{p['start']}..{p['end']}, in SEK, Ledoit-Wolf shrinkage {p['delta']:.2f}.",
         f"Exp. return = IC {ASSUMED_IC} x vol x score z-score, i.e. excess vs the "
@@ -274,7 +281,7 @@ def _footnotes(p):
     return notes
 
 
-def format_portfolios(p):
+def format_portfolios(p, sync_notes=()):
     """Plain-text block for the terminal and the email's text part."""
     bar = "=" * 50
     lines = [bar, f"  {TITLE}", bar]
@@ -305,7 +312,7 @@ def format_portfolios(p):
     if zero:
         lines.append(f"  0% in both ({len(zero)}): {', '.join(zero)}")
     lines.append("")
-    lines += [f"  {n}" for n in _footnotes(p)]
+    lines += [f"  {n}" for n in _footnotes(p, sync_notes)]
     return lines
 
 
@@ -314,7 +321,7 @@ _TD = "padding:4px 10px;text-align:right;font-variant-numeric:tabular-nums;"
 _TDL = "padding:4px 10px;text-align:left;"
 
 
-def format_portfolios_html(p):
+def format_portfolios_html(p, sync_notes=()):
     """The same content as an HTML table, for the email's HTML part.
 
     Inline styles only -- Gmail strips <style> blocks.
@@ -354,5 +361,5 @@ def format_portfolios_html(p):
     small = 'style="font-family:sans-serif;font-size:12px;color:#666;margin:6px 0"'
     if zero:
         out.append(f"<p {small}>0% in both ({len(zero)}): {e(', '.join(zero))}</p>")
-    out.append(f"<p {small}>" + "<br>".join(e(n) for n in _footnotes(p)) + "</p>")
+    out.append(f"<p {small}>" + "<br>".join(e(n) for n in _footnotes(p, sync_notes)) + "</p>")
     return "\n".join(out)

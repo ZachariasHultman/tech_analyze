@@ -688,9 +688,49 @@ def _listing_currency(ticker_info, yahoo_symbol):
     return str(ccy).upper() if ccy else currency_for_symbol(yahoo_symbol)
 
 
-def _portfolio_section(manager, push_results):
+# Portfolio -> Avanza watchlist it is mirrored to. Created by hand in Avanza,
+# like the push target: _resolve_target_watchlist refuses to create lists.
+PORTFOLIO_WATCHLISTS = {"minvar": "min-var", "maxsharpe": "max-sharpe"}
+
+
+def _sync_portfolio_watchlists(avanza, p, known_names):
+    """Mirror each portfolio's held names onto its Avanza watchlist.
+
+    Returns one note per list for the email. A list that is missing, or a
+    portfolio that was not computed, is left untouched -- emptying a list
+    because a computation failed would read as "sell everything".
+    """
+    from analyzer.frontier import held_names
+    notes = []
+    for key, wl_name in PORTFOLIO_WATCHLISTS.items():
+        port = p.get(key) if p else None
+        if port is None:
+            continue
+        try:
+            resolved = _resolve_target_watchlist(avanza, wl_name)
+            if resolved is None:
+                notes.append(f"Avanza '{wl_name}': list not found, not updated.")
+                continue
+            wl_id, existing = resolved
+            held = held_names(port["weights"])
+            added, _, failed, removed = _sync_watchlist(
+                avanza, wl_id, pd.DataFrame(index=list(known_names)),
+                pd.DataFrame(index=held), existing)
+            note = (f"Avanza '{wl_name}': {len(held)} stocks "
+                    f"(+{len(added)} added, -{len(removed)} removed)")
+            if failed:
+                note += f", {len(failed)} failed: " + "; ".join(
+                    f"{n}: {err}" for n, err in failed)
+        except Exception as e:
+            note = f"Avanza '{wl_name}': sync failed ({type(e).__name__}: {e})"
+        notes.append(note)
+    return notes
+
+
+def _portfolio_section(manager, push_results, avanza=None):
     """Min-variance and max-Sharpe weights over the pushed names, as
-    ``(text_lines, html)``.
+    ``(text_lines, html)``, mirrored onto the min-var / max-sharpe watchlists
+    when an Avanza client is given.
 
     Never raises: a failure here must not cost the weekly email its buy/sell
     sections, so it degrades to a one-line note.
@@ -713,9 +753,14 @@ def _portfolio_section(manager, push_results):
             except Exception as e:
                 print(f"[WARN] FX fetch failed ({e}); using cached rates if any.")
                 rates = fx.load_sek_rates(os.path.join(project_root, fx.FX_CACHE_PATH))
-        p = frontier.build_portfolios(hist, ccys, push_results.get("blend_all"),
-                                      names, rates)
-        return frontier.format_portfolios(p), frontier.format_portfolios_html(p)
+        blend_all = push_results.get("blend_all")
+        p = frontier.build_portfolios(hist, ccys, blend_all, names, rates)
+        notes = []
+        if avanza is not None:
+            known = set(names) | set(getattr(blend_all, "index", []))
+            notes = _sync_portfolio_watchlists(avanza, p, known)
+        return (frontier.format_portfolios(p, notes),
+                frontier.format_portfolios_html(p, notes))
     except Exception as e:
         msg = f"Not computed: {type(e).__name__}: {e}"
         return (["=" * 50, "  PORTFOLIO WEIGHTS", "=" * 50, f"  {msg}"],
@@ -1484,9 +1529,12 @@ def main():
             print(f"\n✓ No sell signals in '{args.sell_from}'.\n")
 
     # Always alongside --push + --email: weights for the list just pushed.
+    # Every --push: weights for the list just pushed, mirrored onto the
+    # min-var / max-sharpe watchlists, and shown in the email when sent.
     portfolio_lines = portfolio_html = None
-    if args.email and push_results:
-        portfolio_lines, portfolio_html = _portfolio_section(manager, push_results)
+    if push_results:
+        portfolio_lines, portfolio_html = _portfolio_section(
+            manager, push_results, avanza)
         print("\n".join(portfolio_lines) + "\n")
 
     if args.email:

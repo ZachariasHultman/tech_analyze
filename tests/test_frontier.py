@@ -117,7 +117,7 @@ def test_format_names_both_portfolios_explicitly():
     text = "\n".join(format_portfolios(
         build_portfolios(hist, ccy, blend, list(hist), None)))
     assert "A = MIN-VARIANCE (robust)" in text
-    assert "B = MAX-SHARPE (uses rank)" in text
+    assert "B = MAX-SHARPE (uses score)" in text
     assert "A min-var" in text and "B max-Sharpe" in text
 
 
@@ -155,7 +155,7 @@ def test_html_is_a_table_with_both_portfolios_and_clean_names():
         [n for n in hist if p["minvar"]["weights"][n] >= 0.005
          or p["maxsharpe"]["weights"][n] >= 0.005])
     assert "Min-variance" in out and "Max-Sharpe" in out
-    assert "robust" in out and "uses rank" in out
+    assert "robust" in out and "uses score" in out
     assert "1234" not in out
     assert "<style" not in out  # Gmail strips style blocks
 
@@ -174,3 +174,70 @@ def test_weight_below_half_percent_shows_dash():
     p["minvar"]["weights"][:] = [0.996, 0.004, 0.0, 0.0, 0.0]
     text = "\n".join(format_portfolios(p))
     assert "0% in both (4)" in text
+
+
+class _WatchlistAvanza:
+    """Records add/remove calls per watchlist id."""
+
+    def __init__(self, lists):
+        # lists: {name: (id, [orderbook ids])}
+        self.lists = lists
+        self.calls = []
+
+    def get_watchlists(self):
+        return [{"name": n, "watchListId": i, "orderbookIds": ids}
+                for n, (i, ids) in self.lists.items()]
+
+    def add_to_watchlist(self, oid, wl_id):
+        self.calls.append(("add", wl_id, oid))
+
+    def remove_from_watchlist(self, oid, wl_id):
+        self.calls.append(("remove", wl_id, oid))
+
+
+def _portfolio(minvar, maxsharpe):
+    return {"minvar": {"weights": pd.Series(minvar)},
+            "maxsharpe": {"weights": pd.Series(maxsharpe)} if maxsharpe else None}
+
+
+def test_watchlists_mirror_held_names_and_drop_the_rest():
+    av = _WatchlistAvanza({"min-var": ("10", ["111", "999"]),
+                           "max-sharpe": ("20", [])})
+    p = _portfolio({"A 111": 0.6, "B 222": 0.4, "C 333": 0.004},
+                   {"A 111": 0.1, "C 333": 0.9})
+    known = ["A 111", "B 222", "C 333", "Old 999"]
+    notes = main_mod._sync_portfolio_watchlists(av, p, known)
+
+    assert set(av.calls) == {
+        ("add", "10", "222"),        # B held, not yet on list
+        ("remove", "10", "999"),     # Old no longer held
+        ("add", "20", "111"), ("add", "20", "333"),
+    }
+    # C at 0.4% is below the display bar: not pushed to min-var
+    assert ("add", "10", "333") not in av.calls
+    assert notes[0].startswith("Avanza 'min-var': 2 stocks (+1 added, -1 removed)")
+    assert notes[1].startswith("Avanza 'max-sharpe': 2 stocks (+2 added, -0 removed)")
+
+
+def test_missing_watchlist_warns_and_leaves_the_other_alone():
+    av = _WatchlistAvanza({"min-var": ("10", [])})
+    p = _portfolio({"A 111": 1.0}, {"A 111": 1.0})
+    notes = main_mod._sync_portfolio_watchlists(av, p, ["A 111"])
+    assert av.calls == [("add", "10", "111")]
+    assert "max-sharpe': list not found" in notes[1]
+
+
+def test_uncomputed_portfolio_never_empties_a_list():
+    av = _WatchlistAvanza({"min-var": ("10", ["111"]), "max-sharpe": ("20", ["111"])})
+    assert main_mod._sync_portfolio_watchlists(av, None, ["A 111"]) == []
+    # B missing (no usable score): max-sharpe untouched, min-var still synced
+    main_mod._sync_portfolio_watchlists(av, _portfolio({"A 111": 1.0}, None), ["A 111"])
+    assert av.calls == []
+
+
+def test_sync_notes_reach_text_and_html():
+    hist, ccy = _universe(n=4)
+    p = build_portfolios(hist, ccy, None, list(hist), None)
+    note = "Avanza 'min-var': 4 stocks (+4 added, -0 removed)"
+    assert note in "\n".join(format_portfolios(p, [note]))
+    assert note.replace("'", "&#x27;") in format_portfolios_html(p, [note])
