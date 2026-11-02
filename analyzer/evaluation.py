@@ -37,10 +37,10 @@ import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
 
-from analyzer.benchmarks import load_benchmarks, window_return
-from analyzer.config import SLEEVE_GATE_MIN
+from analyzer.benchmarks import load_benchmarks, load_core, window_return
+from analyzer.config import CORE_MIX, SATELLITE_SHARE, SLEEVE_GATE_MIN
 from analyzer.frontier import (
-    WEIGHT_CAP, _solve, common_weekly_returns, grinold_alpha, ledoit_wolf,
+    CORE_KEY, WEIGHT_CAP, _solve, common_weekly_returns, grinold_alpha, ledoit_wolf,
 )
 
 TARGET = "fwd_excess_return_1y"   # total return, SEK, demeaned within year
@@ -60,7 +60,9 @@ VARIANTS = [
     ("momentum only", "momentum_pct"),
 ]
 PORTFOLIOS = [("equal", "equal stock weight"), ("minvar", "A min-var"),
-              ("maxsharpe", "B max-Sharpe")]
+              ("maxsharpe", "B max-Sharpe"),
+              ("minvar_core", "A min-var, core-aware"),
+              ("maxsharpe_core", "B max-Sharpe, core-aware")]
 
 
 def load_panel(scores_path="data/panel_scores.csv"):
@@ -174,7 +176,30 @@ def _path_stats(weekly, w):
     return vol, dd
 
 
-def weighting_backtest(df, closes_sek, benches, top_n=TOP_N, cap=WEIGHT_CAP):
+def _core_aware_weights(hist, kept, core_close, decision, lookback, alpha_src, cap):
+    """A and B optimised for core + satellite, on the same ``kept`` names, or
+    {} when the core's history does not cover the window. Kept separate from
+    the satellite-alone fit so adding the core can never change which names
+    the equal / A / B comparison runs on."""
+    if core_close is None:
+        return {}
+    c = core_close[(core_close.index >= lookback) & (core_close.index < decision)]
+    rets, _ = common_weekly_returns({**{k: hist[k] for k in kept}, CORE_KEY: c})
+    if CORE_KEY not in rets.columns or any(k not in rets.columns for k in kept):
+        return {}
+    S_full, _ = ledoit_wolf(rets[kept + [CORE_KEY]].to_numpy())
+    n = len(kept)
+    S = S_full[:n, :n]
+    core = (S_full[:n, n], float(S_full[n, n]), 1.0 - SATELLITE_SHARE, SATELLITE_SHARE)
+    out = {"minvar_core": _solve(S, cap, core=core)}
+    alpha = grinold_alpha(alpha_src, np.sqrt(np.diag(S) * WEEKS_PER_YEAR), kept)
+    if alpha is not None and np.any(alpha > 0):
+        out["maxsharpe_core"] = _solve(S, cap, alpha, core=core)
+    return out
+
+
+def weighting_backtest(df, closes_sek, benches, top_n=TOP_N, cap=WEIGHT_CAP,
+                       core_close=None):
     """Layer 3: the live basket as equal / min-variance / max-Sharpe.
 
     All three run on the same subset -- basket names with enough verified
@@ -206,6 +231,9 @@ def weighting_backtest(df, closes_sek, benches, top_n=TOP_N, cap=WEIGHT_CAP):
                    "minvar": _solve(S, cap)}
         if alpha is not None and np.any(alpha > 0):
             weights["maxsharpe"] = _solve(S, cap, alpha)
+        weights.update(_core_aware_weights(
+            hist, kept, core_close, decision, lookback,
+            g.set_index("company_id")[LIVE_KEY], cap))
 
         # Realised path over the median row's window -- an approximation,
         # since each row's own window is staggered around it.
@@ -264,6 +292,7 @@ def run_evaluation(scores_path="data/panel_scores.csv", out_path=RESULTS_PATH,
     benches = load_benchmarks()
     closes, symbols = load_verified_yahoo_closes(data_dir)
     closes_sek, _ = convert_closes_to_sek(closes, symbols)
+    core = load_core(CORE_MIX)
 
     result = {
         "evaluated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
@@ -274,7 +303,8 @@ def run_evaluation(scores_path="data/panel_scores.csv", out_path=RESULTS_PATH,
                        for k, v in benches.items()},
         "return_basis": "total return in SEK; excess = vs universe mean that year",
         **score_usefulness(df, benches, top_n),
-        "weighting": weighting_backtest(df, closes_sek, benches, top_n),
+        "weighting": weighting_backtest(df, closes_sek, benches, top_n,
+                                        core_close=core),
     }
     print("\n".join(format_report(result)))
     with open(out_path, "w") as f:
@@ -332,7 +362,7 @@ def format_report(result):
 
     w = result["weighting"]
     out += ["", f"  WEIGHTING  (live score's basket, names with >=2y verified prices)"]
-    out.append(f"  {'portfolio':<20}{'excess/yr':>10}{'>0':>6}{'>equal':>8}"
+    out.append(f"  {'portfolio':<26}{'excess/yr':>10}{'>0':>6}{'>equal':>8}"
                f"{'vol':>8}{'worst DD':>10}" + "".join(f"{b:>18}" for b in benches))
     for key, label in PORTFOLIOS:
         s = w["summary"].get(key)
@@ -340,7 +370,7 @@ def format_report(result):
             continue
         beq = "-" if s["years_beating_equal"] is None else \
             f"{s['years_beating_equal']}/{s['n_years']}"
-        out.append(f"  {label:<20}{_p(s['mean_excess']):>10}"
+        out.append(f"  {label:<26}{_p(s['mean_excess']):>10}"
                    f"{s['years_excess_positive']:>4}/{s['n_years']}{beq:>8}"
                    f"{_p(s['mean_vol'], False):>8}{_p(s['worst_dd']):>10}"
                    + "".join(f"{_vs_cell(s['vs'].get(b)):>18}" for b in benches))

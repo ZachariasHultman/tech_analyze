@@ -33,14 +33,13 @@ OMXS30_LABEL = "OMXS30 GI"
 WORLD_LABEL = "World (URTH)"
 
 
-def fetch_omxs30gi(avanza, path=OMXS30GI_PATH):
-    """Fetch Avanza's 5-year daily OMXS30 GI and merge it into the cache.
-
-    Returns the merged series. Fresh values win on overlapping dates.
-    """
+def fetch_avanza_series(avanza, orderbook_id, path=None, label=None):
+    """Avanza's 5-year daily close for an index or fund, merged into ``path``
+    when given (fresh values win on overlapping dates). Works for funds too:
+    Avanza Global's chart comes back from the same endpoint."""
     from avanza.avanza import Resolution, TimePeriod
 
-    raw = avanza.get_chart_data(order_book_id=OMXS30GI_ID,
+    raw = avanza.get_chart_data(order_book_id=orderbook_id,
                                 period=TimePeriod.FIVE_YEARS,
                                 resolution=Resolution.DAY)["ohlc"]
     fresh = pd.Series(
@@ -49,13 +48,43 @@ def fetch_omxs30gi(avanza, path=OMXS30GI_PATH):
         name="close",
     ).sort_index()
     fresh = fresh[~fresh.index.duplicated(keep="last")]
+    if path is None:
+        return fresh
     cached = _load_series(path)
     merged = fresh.combine_first(cached) if cached is not None else fresh
     os.makedirs(os.path.dirname(path), exist_ok=True)
     merged.rename_axis("date").to_frame("close").to_csv(path)
-    print(f"[bench] {OMXS30_LABEL}: {len(merged)} days "
+    print(f"[bench] {label or orderbook_id}: {len(merged)} days "
           f"{merged.index.min().date()}..{merged.index.max().date()} -> {path}")
     return merged
+
+
+def fetch_omxs30gi(avanza, path=OMXS30GI_PATH):
+    """OMXS30 GI, merged into its cache."""
+    return fetch_avanza_series(avanza, OMXS30GI_ID, path, OMXS30_LABEL)
+
+
+def core_path(orderbook_id):
+    return os.path.join(BENCH_DIR, f"{orderbook_id}.csv")
+
+
+def core_close(series_by_id, mix):
+    """One SEK price series for the core: the mix's daily returns, rebalanced
+    daily to ``mix``, over the dates every component trades. None when any
+    component is missing."""
+    if any(series_by_id.get(k) is None for k in mix):
+        return None
+    df = pd.concat({k: series_by_id[k] for k in mix}, axis=1).dropna()
+    if len(df) < 2:
+        return None
+    rets = df.pct_change().iloc[1:]
+    mixed = sum(rets[k] * w for k, w in mix.items()) / sum(mix.values())
+    return 100.0 * (1.0 + mixed).cumprod()
+
+
+def load_core(mix):
+    """The core from the evaluation's caches (``--evaluate`` fills them)."""
+    return core_close({k: _load_series(core_path(k)) for k in mix}, mix)
 
 
 def _load_series(path):

@@ -137,3 +137,13 @@ EXCLUDED_TICKER_IDS = {"1640718"}
 # netDebtEbitdaRatio -- they would score on a handful of metrics and go on
 # competing, which is the same defect wearing a quieter hat.
 EXCLUDED_SECTORS = {"Investmentbolag"}
+
+# Core-satellite. The screener's stocks are a satellite next to index funds,
+# and frontier.py optimises the satellite for the *total* portfolio, so a stock
+# that moves like the funds earns little weight however good it looks alone.
+# Avanza orderbook id -> share of the core: Avanza Global (accumulating, so its
+# NAV is already total return in SEK) and OMXSGI (the gross all-share index,
+# standing in for broad Swedish equity funds).
+CORE_MIX = {"878733": 0.7, "633079": 0.3}
+CORE_LABEL = "70% Avanza Global + 30% OMXSGI"
+SATELLITE_SHARE = 0.20

@@ -241,3 +241,123 @@ def test_sync_notes_reach_text_and_html():
     note = "Avanza 'min-var': 4 stocks (+4 added, -0 removed)"
     assert note in "\n".join(format_portfolios(p, [note]))
     assert note.replace("'", "&#x27;") in format_portfolios_html(p, [note])
+
+
+def test_network_error_retries_then_skips_and_cleans_up(monkeypatch):
+    import requests
+    from analyzer.summary_manager import SummaryManager
+    calls = {"n": 0}
+
+    def flaky(ticker_id, ticker_info, manager, *a, **k):
+        calls["n"] += 1
+        manager.summary["X AB 1"] = {"points": [0]}  # half-initialised row
+        manager.price_hist["X AB 1"] = "partial"
+        raise requests.exceptions.ChunkedEncodingError("broken")
+
+    monkeypatch.setattr(main_mod, "get_data", flaky)
+    m, skipped = SummaryManager(), []
+    out = main_mod._get_data_or_skip("1", {"name": "X AB", "orderbookId": 1},
+                                     m, None, None, False, skipped)
+    assert out is None and calls["n"] == 2
+    assert "X AB 1" not in m.summary and "X AB 1" not in m.price_hist
+    assert skipped[0][0] == "1" and "ChunkedEncodingError" in skipped[0][1]
+
+
+def test_network_error_recovers_on_retry(monkeypatch):
+    import requests
+    calls = {"n": 0}
+
+    def once(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.exceptions.ConnectionError("blip")
+        return "X AB 1", None
+
+    monkeypatch.setattr(main_mod, "get_data", once)
+    skipped = []
+    assert main_mod._get_data_or_skip("1", {"name": "X AB", "orderbookId": 1},
+                                      object(), None, None, False, skipped) == ("X AB 1", None)
+    assert skipped == []
+
+
+# --- core-satellite -------------------------------------------------------
+
+from analyzer.benchmarks import core_close
+from analyzer.frontier import _solve
+
+
+def _core_world(seed=4, days=1000):
+    """Core = a market factor; S_CORE tracks it, S_IND is independent."""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2021-01-04", periods=days)
+    mkt = rng.normal(0, 0.008, days)
+    core = pd.Series(100 * np.cumprod(1 + mkt), index=dates)
+    hist = {
+        "S_CORE": _ohlc(mkt + rng.normal(0, 0.002, days)),
+        "S_IND": _ohlc(rng.normal(0, 0.009, days)),
+        "S_MIX": _ohlc(0.5 * mkt + rng.normal(0, 0.007, days)),
+    }
+    return hist, {k: "SEK" for k in hist}, core
+
+
+def test_solver_without_core_is_the_original():
+    S = np.array([[0.04, 0.01], [0.01, 0.09]])
+    a = _solve(S, 1.0)
+    b = _solve(S, 1.0, core=(np.zeros(2), 0.0, 0.0, 1.0))
+    assert a == pytest.approx(b)
+
+
+def test_core_aware_minvar_avoids_what_the_core_already_holds():
+    hist, ccy, core = _core_world()
+    alone = build_portfolios(hist, ccy, None, list(hist), None, cap=1.0)
+    total = build_portfolios(hist, ccy, None, list(hist), None, cap=1.0,
+                             core_close=core, satellite_share=0.2)
+    w = total["minvar"]["weights"]
+    assert w["S_IND"] > w["S_CORE"]
+    assert w["S_IND"] > alone["minvar"]["weights"]["S_IND"] - 1e-9
+    assert total["minvar"]["corr_core"] < alone["minvar"].get("corr_core", 1.0)
+    # the satellite lowers total risk below the core on its own
+    assert total["minvar"]["total_vol"] < total["core"]["vol"]
+    assert total["core"]["share"] == pytest.approx(0.8)
+
+
+def test_short_core_falls_back_with_a_note():
+    hist, ccy, core = _core_world()
+    p = build_portfolios(hist, ccy, None, list(hist), None,
+                         core_close=core.iloc[-60:], satellite_share=0.2)
+    assert p["core"] is None and "core history too short" in p["core_note"]
+    assert "__core__" not in p["minvar"]["weights"].index
+
+
+def test_core_rows_and_note_render():
+    hist, ccy, core = _core_world()
+    blend = pd.Series({"S_CORE": 0.9, "S_IND": 0.8, "S_MIX": 0.7, "X": 0.1, "Y": 0.2})
+    p = build_portfolios(hist, ccy, blend, list(hist), None, core_close=core,
+                         satellite_share=0.2)
+    p["core"]["label"] = "70% A + 30% B"
+    text = "\n".join(format_portfolios(p))
+    assert "Total vol / yr (80% core + 20% these)" in text
+    assert "Correlation with core" in text
+    assert "Core = 70% A + 30% B, 80% of the total" in text
+    assert "WHOLE" in text
+    assert "WHOLE portfolio" in format_portfolios_html(p)
+
+
+def test_core_close_mixes_daily_returns():
+    d = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    a = pd.Series([100.0, 110.0, 110.0], index=d)   # +10%, 0%
+    b = pd.Series([50.0, 50.0, 55.0], index=d)      # 0%, +10%
+    out = core_close({"a": a, "b": b}, {"a": 0.7, "b": 0.3})
+    assert list(out) == pytest.approx([107.0, 107.0 * 1.03])
+    assert core_close({"a": a}, {"a": 0.7, "b": 0.3}) is None
+
+
+def test_fetch_core_degrades_without_raising():
+    assert main_mod._fetch_core(None) == (None, [])
+
+    class _Down:
+        def get_chart_data(self, **_):
+            raise RuntimeError("down")
+
+    core, notes = main_mod._fetch_core(_Down())
+    assert core is None and "satellite optimised on its own" in notes[0]

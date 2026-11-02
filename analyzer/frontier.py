@@ -83,7 +83,7 @@ def avanza_close_to_sek(close, currency, rates):
     return out if not out.empty else None
 
 
-def weekly_returns(price_hist, currencies, rates, names):
+def weekly_returns(price_hist, currencies, rates, names, extra_closes=None):
     """Common-window weekly SEK returns for ``names``.
 
     Returns ``(returns, unconverted, dropped)``: ``unconverted`` lists names
@@ -101,6 +101,7 @@ def weekly_returns(price_hist, currencies, rates, names):
             unconverted.append(name)
             sek = close
         closes[name] = sek
+    closes.update(extra_closes or {})
     common, short = common_weekly_returns(closes)
     return common, unconverted, dropped + short
 
@@ -142,21 +143,37 @@ def ledoit_wolf(X):
     return delta * F + (1 - delta) * S, delta
 
 
-def _solve(S, cap, alpha=None):
-    """Long-only, capped weights: min variance, or max Sharpe given alpha."""
+def _solve(S, cap, alpha=None, core=None):
+    """Long-only, capped satellite weights: min variance, or max Sharpe given
+    alpha -- of the *total* portfolio when ``core`` is given.
+
+    ``core = (c, v_c, k, s)``: each stock's covariance with the core, the
+    core's variance, and the core's and satellite's shares of the total.
+    Total variance is ``k^2 v_c + 2ks w'c + s^2 w'Sw``; without a core it is
+    ``w'Sw`` (k=0, s=1), so the no-core case is exactly the original solver.
+    The core contributes no alpha: it is the market baseline the score's
+    excess is measured against.
+    """
     n = S.shape[0]
     cap = max(cap, 1.0 / n)
     w0 = np.full(n, 1.0 / n)
+    c, v_c, k, sh = core if core is not None else (np.zeros(n), 0.0, 0.0, 1.0)
+
+    def var(w):
+        return k * k * v_c + 2 * k * sh * (w @ c) + sh * sh * (w @ S @ w)
+
+    def dvar(w):
+        return 2 * k * sh * c + 2 * sh * sh * (S @ w)
+
     if alpha is None:
-        fun = lambda w: w @ S @ w
-        jac = lambda w: 2 * S @ w
+        fun, jac = var, dvar
     else:
         def fun(w):
-            return -(w @ alpha) / np.sqrt(w @ S @ w)
+            return -sh * (w @ alpha) / np.sqrt(var(w))
 
         def jac(w):
-            v = w @ S @ w
-            return -(alpha * v - (w @ alpha) * (S @ w)) / v ** 1.5
+            v = var(w)
+            return -(sh * alpha * v - sh * (w @ alpha) * dvar(w) / 2) / v ** 1.5
     res = minimize(fun, w0, jac=jac, method="SLSQP",
                    bounds=[(0.0, cap)] * n,
                    constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1.0}],
@@ -182,25 +199,55 @@ def grinold_alpha(blend, sigma, names, ic=ASSUMED_IC):
     return ic * sigma * z.to_numpy()
 
 
-def _stats(w, S, alpha):
-    return {
+def _stats(w, S, alpha, core=None):
+    out = {
         "vol": float(np.sqrt(w @ S @ w * WEEKS_PER_YEAR)),
         "exp": float(w @ alpha) if alpha is not None else None,
         "eff_n": float(1.0 / np.sum(w ** 2)),
     }
+    if core is not None:
+        c, v_c, k, sh = core
+        total = k * k * v_c + 2 * k * sh * (w @ c) + sh * sh * (w @ S @ w)
+        out["total_vol"] = float(np.sqrt(total * WEEKS_PER_YEAR))
+        out["corr_core"] = float((w @ c) / np.sqrt((w @ S @ w) * v_c))
+    return out
 
 
-def build_portfolios(price_hist, currencies, blend, names, rates, cap=WEIGHT_CAP):
-    """Both portfolios for ``names``, or None when there is too little data."""
-    rets, unconverted, dropped = weekly_returns(price_hist, currencies, rates, names)
-    if rets.shape[1] < 2:
+CORE_KEY = "__core__"
+
+
+def build_portfolios(price_hist, currencies, blend, names, rates, cap=WEIGHT_CAP,
+                     core_close=None, satellite_share=1.0):
+    """Both portfolios for ``names``, or None when there is too little data.
+
+    With ``core_close`` (a SEK price series of the funds the satellite sits
+    next to) and ``satellite_share`` < 1, both portfolios optimise the *total*
+    -- core plus satellite -- so a stock that moves like the core earns little
+    weight in A however calm it is on its own. A core that cannot share the
+    stocks' window is dropped with a note and the satellite is optimised alone.
+    """
+    extra = {CORE_KEY: core_close} if core_close is not None else {}
+    rets, unconverted, dropped = weekly_returns(price_hist, currencies, rates,
+                                                names, extra_closes=extra)
+    core_note = None
+    if core_close is not None and CORE_KEY not in rets.columns:
+        core_note = "core history too short -- satellite optimised on its own"
+        dropped = [d for d in dropped if d != CORE_KEY]
+    has_core = CORE_KEY in rets.columns
+    kept = [c for c in rets.columns if c != CORE_KEY]
+    if len(kept) < 2:
         return None
-    kept = list(rets.columns)
-    S, delta = ledoit_wolf(rets.to_numpy())
+    S_full, delta = ledoit_wolf(rets[kept + ([CORE_KEY] if has_core else [])].to_numpy())
+    n = len(kept)
+    S = S_full[:n, :n]
     sigma = np.sqrt(np.diag(S) * WEEKS_PER_YEAR)
     alpha = grinold_alpha(blend, sigma, kept)
+    core = None
+    if has_core and satellite_share < 1.0:
+        core = (S_full[:n, n], float(S_full[n, n]), 1.0 - satellite_share,
+                satellite_share)
 
-    w_mv = _solve(S, cap)
+    w_mv = _solve(S, cap, core=core)
     out = {
         "names": kept,
         "weeks": len(rets),
@@ -211,12 +258,18 @@ def build_portfolios(price_hist, currencies, blend, names, rates, cap=WEIGHT_CAP
         "unconverted": unconverted,
         "dropped": dropped,
         "equal_vol": _stats(np.full(len(kept), 1.0 / len(kept)), S, None)["vol"],
-        "minvar": {"weights": pd.Series(w_mv, kept), **_stats(w_mv, S, alpha)},
+        "minvar": {"weights": pd.Series(w_mv, kept), **_stats(w_mv, S, alpha, core)},
         "maxsharpe": None,
+        "core": None,
+        "core_note": core_note,
     }
+    if core is not None:
+        out["core"] = {"share": 1.0 - satellite_share,
+                       "vol": float(np.sqrt(core[1] * WEEKS_PER_YEAR))}
     if alpha is not None and np.any(alpha > 0):
-        w_ms = _solve(S, cap, alpha)
-        out["maxsharpe"] = {"weights": pd.Series(w_ms, kept), **_stats(w_ms, S, alpha)}
+        w_ms = _solve(S, cap, alpha, core=core)
+        out["maxsharpe"] = {"weights": pd.Series(w_ms, kept),
+                            **_stats(w_ms, S, alpha, core)}
     return out
 
 
@@ -246,8 +299,19 @@ def _pct(x, signed=False):
 def _summary_rows(p):
     """(label, A, B) for the headline stats -- shared by text and HTML."""
     mv, ms = p["minvar"], p["maxsharpe"]
-    return [
-        ("Volatility / yr", _pct(mv["vol"]), _pct(ms["vol"]) if ms else "-"),
+    rows = []
+    core = p.get("core")
+    if core:
+        share = f"{core['share'] * 100:.0f}% core + {(1 - core['share']) * 100:.0f}% these"
+        rows += [
+            (f"Total vol / yr ({share})", _pct(mv["total_vol"]),
+             _pct(ms["total_vol"]) if ms else "-"),
+            ("Correlation with core", f"{mv['corr_core']:.2f}",
+             f"{ms['corr_core']:.2f}" if ms else "-"),
+        ]
+    return rows + [
+        ("Volatility / yr" + (" (these alone)" if core else ""),
+         _pct(mv["vol"]), _pct(ms["vol"]) if ms else "-"),
         ("Exp. excess return / yr", _pct(mv["exp"], True),
          _pct(ms["exp"], True) if ms else "-"),
         ("Effective no. of stocks", f"{mv['eff_n']:.1f}",
@@ -274,7 +338,14 @@ def _weight_rows(p):
 
 
 def _footnotes(p, sync_notes=()):
-    notes = list(sync_notes) + [
+    core = p.get("core")
+    notes = list(sync_notes)
+    if core:
+        notes.append(f"Core = {core.get('label', 'your funds')}, "
+                     f"{core['share'] * 100:.0f}% of the total, vol "
+                     f"{_pct(core['vol'])} / yr on its own. Weights above are "
+                     "shares of the satellite.")
+    notes += [
         f"Cap {p['cap'] * 100:.0f}% per stock. {p['weeks']} weeks of Avanza closes "
         f"{p['start']}..{p['end']}, in SEK, Ledoit-Wolf shrinkage {p['delta']:.2f}.",
         f"Exp. return = IC {ASSUMED_IC} x vol x score z-score, i.e. excess vs the "
@@ -291,6 +362,30 @@ def _footnotes(p, sync_notes=()):
     return notes
 
 
+def _explain_pair(p):
+    if p.get("core"):
+        return ("the stocks that make your WHOLE portfolio (funds + these) as calm "
+                "as possible -- favours stocks that move unlike your funds. Ignores "
+                "the screener score.",
+                "best expected return per unit of WHOLE-portfolio risk, with the "
+                "screener score as expected return. Less robust: leans on the score "
+                "being right.")
+    return ("lowest-risk mix. Uses only how the stocks have moved together -- "
+            "ignores the screener score.",
+            "best expected return per unit of risk, with the screener score as "
+            "expected return. Less robust: leans on the score being right.")
+
+
+def _explain(p):
+    import textwrap
+    a, b = _explain_pair(p)
+    out = []
+    for head, body in (("A = MIN-VARIANCE (robust): ", a), ("B = MAX-SHARPE (uses score): ", b)):
+        wrapped = textwrap.wrap(head + body, 66)
+        out += [wrapped[0]] + [f"    {w}" for w in wrapped[1:]]
+    return out
+
+
 def format_portfolios(p, sync_notes=()):
     """Plain-text block for the terminal and the email's text part."""
     bar = "=" * 50
@@ -298,14 +393,7 @@ def format_portfolios(p, sync_notes=()):
     if p is None:
         return lines + [f"  {NOT_COMPUTED}"]
 
-    lines += [
-        "  A = MIN-VARIANCE (robust): lowest-risk mix. Uses only how the",
-        "      stocks have moved together -- ignores the screener score.",
-        "  B = MAX-SHARPE (uses score): best expected return per unit of",
-        "      risk, with the screener score as expected return. Less robust:",
-        "      leans on the score being right.",
-        "",
-    ]
+    lines += [f"  {line}" for line in _explain(p)] + [""]
     rows, zero = _weight_rows(p)
     w = max([28] + [len(r[0]) for r in rows])
 
@@ -341,13 +429,11 @@ def format_portfolios_html(p, sync_notes=()):
     if p is None:
         return "\n".join(out + [f'<p style="font-family:sans-serif">{e(NOT_COMPUTED)}</p>'])
 
+    a, b = _explain_pair(p)
     out.append(
         '<p style="font-family:sans-serif;font-size:13px;margin:0 0 10px;line-height:1.5">'
-        "<b>A = Min-variance (robust)</b>: lowest-risk mix. Uses only how the stocks "
-        "have moved together &mdash; ignores the screener score.<br>"
-        "<b>B = Max-Sharpe (uses score)</b>: best expected return per unit of risk, with "
-        "the screener score as expected return. Less robust: leans on the score being right."
-        "</p>")
+        f"<b>A = Min-variance (robust)</b>: {e(a)}<br>"
+        f"<b>B = Max-Sharpe (uses score)</b>: {e(b)}</p>")
     t = ['<table style="border-collapse:collapse;font-family:sans-serif;font-size:13px">',
          "<tr>"
          f'<th style="{_TH}text-align:left"></th>'

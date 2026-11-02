@@ -49,6 +49,9 @@ from analyzer.config import (
     MOMENTUM_BLEND_WEIGHT,
     EXCLUDED_TICKER_IDS,
     EXCLUDED_SECTORS,
+    CORE_MIX,
+    CORE_LABEL,
+    SATELLITE_SHARE,
 )
 from datetime import date
 import argparse
@@ -480,6 +483,32 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
     return sorted(signals, key=lambda x: x["pts"])
 
 
+def _get_data_or_skip(ticker_id, ticker_info, manager, avanza, yahoo,
+                      save_data, skipped, retries=1):
+    """``get_data`` with one retry on a network error, else skip the ticker.
+
+    A single dropped connection (seen live: ChunkedEncodingError from
+    Avanza's chart endpoint) used to abort the whole run -- the weekly Pi job
+    included. A ticker that still fails is removed from the summary, since
+    get_data initialises its row before fetching and a half-filled row would
+    otherwise be scored on whatever metrics happened to land.
+    """
+    import requests
+    name = f'{ticker_info.get("name")} {ticker_info.get("orderbookId")}'
+    for attempt in range(retries + 1):
+        try:
+            return get_data(ticker_id, ticker_info, manager, avanza, yahoo,
+                            get_hist=save_data)
+        except requests.exceptions.RequestException as e:
+            if attempt < retries:
+                continue
+            if isinstance(manager.summary, dict):
+                manager.summary.pop(name, None)
+            manager.price_hist.pop(name, None)
+            skipped.append((ticker_id, f"{type(e).__name__}: {e}"))
+            return None
+
+
 def _listing_currency(ticker_info, yahoo_symbol):
     """The currency Avanza quotes this listing in, or None.
 
@@ -532,6 +561,25 @@ def _sync_portfolio_watchlists(avanza, p, known_names):
     return notes
 
 
+def _fetch_core(avanza):
+    """The core funds' combined SEK price series from Avanza, or None with a
+    note. Fetched live every run (two chart calls), so the Pi needs no cache;
+    a failure degrades to optimising the satellite on its own."""
+    if avanza is None:
+        return None, []
+    from analyzer.benchmarks import core_close, fetch_avanza_series
+    try:
+        series = {oid: fetch_avanza_series(avanza, oid) for oid in CORE_MIX}
+        core = core_close(series, CORE_MIX)
+        if core is None:
+            return None, ["Core funds returned no overlapping history: "
+                          "satellite optimised on its own."]
+        return core, []
+    except Exception as e:
+        return None, [f"Core funds unavailable ({type(e).__name__}): "
+                      "satellite optimised on its own."]
+
+
 def _portfolio_section(manager, push_results, avanza=None):
     """Min-variance and max-Sharpe weights over the pushed names, as
     ``(text_lines, html)``, mirrored onto the min-var / max-sharpe watchlists
@@ -559,11 +607,17 @@ def _portfolio_section(manager, push_results, avanza=None):
                 print(f"[WARN] FX fetch failed ({e}); using cached rates if any.")
                 rates = fx.load_sek_rates(os.path.join(project_root, fx.FX_CACHE_PATH))
         blend_all = push_results.get("blend_all")
-        p = frontier.build_portfolios(hist, ccys, blend_all, names, rates)
-        notes = []
+        core, notes = _fetch_core(avanza)
+        p = frontier.build_portfolios(
+            hist, ccys, blend_all, names, rates, core_close=core,
+            satellite_share=SATELLITE_SHARE if core is not None else 1.0)
+        if p is not None and p.get("core"):
+            p["core"]["label"] = CORE_LABEL
         if avanza is not None:
             known = set(names) | set(getattr(blend_all, "index", []))
-            notes = _sync_portfolio_watchlists(avanza, p, known)
+            notes += _sync_portfolio_watchlists(avanza, p, known)
+        if p is not None and p.get("core_note"):
+            notes.append(p["core_note"])
         return (frontier.format_portfolios(p, notes),
                 frontier.format_portfolios_html(p, notes))
     except Exception as e:
@@ -1029,10 +1083,14 @@ def main():
         from analyzer.yahoo_prices import backfill_prices
         # Index caches first. Either failing leaves the cached copy (or n/a)
         # in place rather than stopping the evaluation.
+        from analyzer.benchmarks import core_path, fetch_avanza_series
         try:
-            fetch_omxs30gi(setup_env())
+            av = setup_env()
+            fetch_omxs30gi(av)
+            for oid in CORE_MIX:
+                fetch_avanza_series(av, oid, core_path(oid), f"core {oid}")
         except Exception as exc:
-            print(f"[bench] OMXS30 GI refresh failed ({exc}); using cache if any.")
+            print(f"[bench] Avanza index refresh failed ({exc}); using cache if any.")
         try:
             backfill_prices([WORLD_SYMBOL], start=args.prices_from,
                             refresh_after_days=args.prices_refresh_after)
@@ -1216,14 +1274,11 @@ def main():
             yahoo = (yf.Ticker(yahoo_symbol, session=yf_session)
                      if yf_session is not None else yf.Ticker(yahoo_symbol))
 
-        ticker_name, hist = get_data(
-            ticker_id,
-            ticker_info,
-            manager,
-            avanza,
-            yahoo,
-            get_hist=save_data,
-        )
+        fetched = _get_data_or_skip(ticker_id, ticker_info, manager, avanza,
+                                    yahoo, save_data, skipped)
+        if fetched is None:
+            continue
+        ticker_name, hist = fetched
         manager.price_ccy[ticker_name] = _listing_currency(ticker_info, yahoo_symbol)
         if save_data:
             save_snapshot(

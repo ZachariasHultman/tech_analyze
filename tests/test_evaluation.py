@@ -150,3 +150,19 @@ def test_omxs30gi_cache_merges_and_fresh_values_win(tmp_path):
         _Av(_ohlc(["2021-11-02", "2021-11-03"], [502, 503])), path)
     assert list(merged.index.strftime("%Y-%m-%d")) == ["2021-11-01", "2021-11-02", "2021-11-03"]
     assert list(merged) == [500, 502, 503]
+
+
+def test_core_aware_variants_need_core_history_and_keep_the_same_names():
+    df = _panel(n=30, years=(2022,))
+    names = [f"C{i}" for i in range(30)]
+    closes = _closes(names)
+    days = closes["C0"].index
+    core = pd.Series(100 * np.cumprod(1 + np.random.default_rng(3).normal(0, 0.007, len(days))),
+                     index=days)
+    rec = weighting_backtest(df, closes, {}, core_close=core)["per_year"][0]
+    assert set(rec["minvar_core"]["weights"]) == set(rec["minvar"]["weights"])
+    # a core that starts after the decision date cannot be used
+    late = core[core.index > df["report_date"].min()]
+    rec2 = weighting_backtest(df, closes, {}, core_close=late)["per_year"][0]
+    assert "minvar_core" not in rec2
+    assert rec2["minvar"]["weights"] == pytest.approx(rec["minvar"]["weights"])
