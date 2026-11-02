@@ -94,9 +94,11 @@ def to_yahoo_symbol(ticker_info) -> str | None:
     NYSE/NASDAQ-listed stocks already matches the bare Yahoo symbol
     (verified against live data, e.g. "GM", "KR", "DIS") — this mirrors the
     pre-fix fallthrough behavior, which happened to be correct for US.
-    Other unmapped countries (e.g. FI) are NOT a safe passthrough — Yahoo
-    requires an exchange suffix there (e.g. "UPM" resolves nothing, only
-    "UPM.HE" does) — so they still return None rather than guessing.
+    FI takes ".HE" with spaces as hyphens, like the other Nordic venues
+    (verified on Yahoo: NOKIA.HE, KNEBV.HE, WRT1V.HE, NDA-FI.HE). Other
+    unmapped countries are NOT a safe passthrough -- Yahoo needs an exchange
+    suffix -- so they still return None rather than guessing; a wrong guess
+    is caught later by yahoo_prices.verify_symbol, but FCFY would read it live.
     """
     listing = ticker_info.get("listing", {}) if isinstance(ticker_info, dict) else {}
     symbol = listing.get("tickerSymbol")
@@ -110,6 +112,8 @@ def to_yahoo_symbol(ticker_info) -> str | None:
         return symbol.replace(" ", "-") + ".CO"
     if country == "NO":
         return symbol.replace(" ", "-") + ".OL"
+    if country == "FI":
+        return symbol.replace(" ", "-") + ".HE"
     if country == "DE":
         m = re.match(r"^[A-Z]+", symbol)
         return m.group() + ".DE" if m else None

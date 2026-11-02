@@ -40,11 +40,18 @@ def test_to_yahoo_symbol_us_passthrough():
     assert to_yahoo_symbol(_info("GM", "US")) == "GM"
 
 
+def test_to_yahoo_symbol_helsinki():
+    # Verified on Yahoo: the bare symbol resolves nothing, ".HE" does, and
+    # a space becomes a hyphen as on the other Nordic venues.
+    assert to_yahoo_symbol(_info("UPM", "FI")) == "UPM.HE"
+    assert to_yahoo_symbol(_info("NDA FI", "FI")) == "NDA-FI.HE"
+
+
 def test_to_yahoo_symbol_unknown_country_returns_none():
-    # Genuinely unmapped exchange (e.g. Finland) — NOT a safe passthrough:
-    # Yahoo requires a ".HE" suffix there, so guessing the bare symbol
-    # would silently resolve to nothing. Skip rather than guess.
-    assert to_yahoo_symbol(_info("UPM", "FI")) is None
+    # Genuinely unmapped exchange — NOT a safe passthrough: Yahoo requires
+    # an exchange suffix, so guessing the bare symbol would silently resolve
+    # to nothing. Skip rather than guess.
+    assert to_yahoo_symbol(_info("BHP", "AU")) is None
 
 
 def test_to_yahoo_symbol_missing_fields_returns_none():
