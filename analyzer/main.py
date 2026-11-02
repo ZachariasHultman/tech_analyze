@@ -610,6 +610,10 @@ def _update_watchlist(avanza, manager, top_n=25, target_name="Bör köpa"):
         "already": already_rows,
         "removed": removed_rows,
         "failed": failed,
+        # For analyzer/frontier.py: the pushed names, and the blend over the
+        # whole scored universe (alpha's z-score is standardised there).
+        "qualified_names": list(qualified.index),
+        "blend_all": combined["_blend"].dropna(),
     }
 
 
@@ -668,7 +672,53 @@ def _compute_sell_signals(avanza, manager, portfolio_watchlist: str) -> list[dic
     return sorted(signals, key=lambda x: x["pts"])
 
 
-def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
+def _listing_currency(ticker_info, yahoo_symbol):
+    """The currency Avanza quotes this listing in, or None.
+
+    Avanza's own field first; the Yahoo suffix map as fallback (same listing,
+    so same currency -- only the GBP minor unit differs, which
+    frontier.avanza_close_to_sek deliberately does not apply).
+    """
+    from analyzer.fx import currency_for_symbol
+    listing = ticker_info.get("listing", {}) if isinstance(ticker_info, dict) else {}
+    ccy = listing.get("currency") if isinstance(listing, dict) else None
+    return str(ccy).upper() if ccy else currency_for_symbol(yahoo_symbol)
+
+
+def _portfolio_lines(manager, push_results):
+    """Min-variance and max-Sharpe weights over the pushed names.
+
+    Never raises: a failure here must not cost the weekly email its buy/sell
+    sections, so it degrades to a one-line note.
+    """
+    from analyzer import frontier, fx
+    try:
+        names = push_results.get("qualified_names") or []
+        hist = {n: manager.price_hist.get(n) for n in names}
+        ccys = {n: manager.price_ccy.get(n) for n in names}
+        rates = None
+        if any(c and c != "SEK" for c in ccys.values()):
+            today = pd.Timestamp(date.today())
+            try:
+                rates = fx.fetch_sek_rates(
+                    (today - pd.DateOffset(years=6)).date().isoformat(),
+                    today.date().isoformat(),
+                    path=os.path.join(project_root, fx.FX_CACHE_PATH),
+                    currencies=sorted({c for c in ccys.values() if c and c != "SEK"}),
+                )
+            except Exception as e:
+                print(f"[WARN] FX fetch failed ({e}); using cached rates if any.")
+                rates = fx.load_sek_rates(os.path.join(project_root, fx.FX_CACHE_PATH))
+        p = frontier.build_portfolios(hist, ccys, push_results.get("blend_all"),
+                                      names, rates)
+        return frontier.format_portfolios(p)
+    except Exception as e:
+        return ["=" * 50, "  PORTFOLIO WEIGHTS", "=" * 50,
+                f"  Not computed: {type(e).__name__}: {e}"]
+
+
+def _send_email(push_results: dict | None, sell_signals: list[dict],
+                portfolio_lines: list[str] | None = None) -> None:
     """Send a plain-text email summary via Gmail SMTP (STARTTLS, port 587).
 
     Requires in .env (same vars as stryket):
@@ -728,6 +778,10 @@ def _send_email(push_results: dict | None, sell_signals: list[dict]) -> None:
             lines.append(f"\nRemoved from list ({len(push_results['removed'])}):")
             for r in push_results["removed"]:
                 lines.append(f"  {_fmt_scored_row('-', r)}")
+
+    if portfolio_lines:
+        lines.append("")
+        lines.extend(portfolio_lines)
 
     if sell_signals:
         lines.append("\n" + "=" * 50)
@@ -1306,6 +1360,7 @@ def main():
             yahoo,
             get_hist=save_data,
         )
+        manager.price_ccy[ticker_name] = _listing_currency(ticker_info, yahoo_symbol)
         if save_data:
             save_snapshot(
                 hist,
@@ -1354,8 +1409,14 @@ def main():
         else:
             print(f"\n✓ No sell signals in '{args.sell_from}'.\n")
 
+    # Always alongside --push + --email: weights for the list just pushed.
+    portfolio_lines = None
+    if args.email and push_results:
+        portfolio_lines = _portfolio_lines(manager, push_results)
+        print("\n".join(portfolio_lines) + "\n")
+
     if args.email:
-        _send_email(push_results, sell_signals)
+        _send_email(push_results, sell_signals, portfolio_lines)
 
     return 0
 

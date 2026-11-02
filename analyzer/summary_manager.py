@@ -282,6 +282,10 @@ class SummaryManager:
         # Initialize the attributes
         self.summary = {}
         self._threshold_overrides = {}  # dict to hold custom thresholds
+        # Live-path daily closes and listing currency per company, kept for
+        # analyzer/frontier.py's portfolio weights. Not scored, not saved.
+        self.price_hist = {}
+        self.price_ccy = {}
 
         # ---- STANDARD TEMPLATE (sector-agnostic) ----
         self.template = {

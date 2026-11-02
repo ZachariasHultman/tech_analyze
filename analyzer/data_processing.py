@@ -142,6 +142,7 @@ def get_data(
     sma200, weekly_average_close, sma200_slope, closing_hist_data = (
         calculate_sma200(avanza, ticker_id)
     )
+    manager.price_hist[ticker_name] = closing_hist_data
 
     # --- revenue trend (year only, quarterly removed as too noisy) ---
     rev_trend_year, rev_trend_quarter, rev_year_hist, rev_quarter_hist = (

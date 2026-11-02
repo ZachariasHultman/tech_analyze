@@ -152,3 +152,15 @@ def test_sell_signals_still_render_alongside_the_block(sent_email):
     assert "SYSTEM STATUS" in body
     assert "CONSIDER SELLING" in body
     assert "Intrum" in body
+
+
+def test_portfolio_weights_sit_between_buy_and_sell(sent_email):
+    captured, tmp_path = sent_email
+    _write_weights(tmp_path)
+    block = ["=" * 50, "  PORTFOLIO WEIGHTS (how much of each pushed stock)",
+             "  A = MIN-VARIANCE (robust): lowest-risk mix."]
+    main_mod._send_email(_PUSH, [{"name": "X", "pts": 1.0, "reasons": "r"}], block)
+    body = captured["raw"]
+    assert "A = MIN-VARIANCE (robust)" in body
+    assert (body.index("CONSIDER BUYING") < body.index("PORTFOLIO WEIGHTS")
+            < body.index("CONSIDER SELLING"))
