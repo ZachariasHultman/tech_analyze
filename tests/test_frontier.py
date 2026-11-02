@@ -7,8 +7,8 @@ import pytest
 import analyzer.main as main_mod
 from analyzer import frontier
 from analyzer.frontier import (
-    avanza_close_to_sek, build_portfolios, format_portfolios, ledoit_wolf,
-    weekly_returns,
+    avanza_close_to_sek, build_portfolios, display_name, format_portfolios,
+    format_portfolios_html, ledoit_wolf, weekly_returns,
 )
 
 
@@ -126,11 +126,51 @@ def test_portfolio_lines_never_raise(monkeypatch):
         price_hist = None  # .get on None raises inside
         price_ccy = None
 
-    lines = main_mod._portfolio_lines(_Broken(), {"qualified_names": ["X"]})
+    lines, html_part = main_mod._portfolio_section(_Broken(), {"qualified_names": ["X"]})
     assert any("Not computed" in line for line in lines)
+    assert "Not computed" in html_part
 
 
 def test_listing_currency_prefers_avanza_then_suffix():
     assert main_mod._listing_currency({"listing": {"currency": "nok"}}, "X.ST") == "NOK"
     assert main_mod._listing_currency({"listing": {}}, "GLEN.L") == "GBP"
     assert main_mod._listing_currency({}, None) is None
+
+
+def test_display_name_strips_avanza_id_only():
+    assert display_name("Veidekke 52602") == "Veidekke"
+    assert display_name("Münchener Rückversicherungs-Gesellschaft 123") == \
+        "Münchener Rückversicherungs-Gesellschaft"
+    assert display_name("3M") == "3M"
+
+
+def test_html_is_a_table_with_both_portfolios_and_clean_names():
+    hist, ccy = _universe(n=6)
+    hist = {f"{k} 1234": v for k, v in hist.items()}
+    ccy = {f"{k} 1234": v for k, v in ccy.items()}
+    blend = pd.Series(np.linspace(0.2, 0.9, 6), index=list(hist))
+    p = build_portfolios(hist, ccy, blend, list(hist), None)
+    out = format_portfolios_html(p)
+    assert "<table" in out and out.count("<tr") == 1 + 3 + 1 + len(
+        [n for n in hist if p["minvar"]["weights"][n] >= 0.005
+         or p["maxsharpe"]["weights"][n] >= 0.005])
+    assert "Min-variance" in out and "Max-Sharpe" in out
+    assert "robust" in out and "uses rank" in out
+    assert "1234" not in out
+    assert "<style" not in out  # Gmail strips style blocks
+
+
+def test_html_escapes_names():
+    hist, ccy = _universe(n=3)
+    hist = {"A&B <x>" if k == "S0" else k: v for k, v in hist.items()}
+    ccy = {k: "SEK" for k in hist}
+    out = format_portfolios_html(build_portfolios(hist, ccy, None, list(hist), None))
+    assert "A&amp;B &lt;x&gt;" in out
+
+
+def test_weight_below_half_percent_shows_dash():
+    hist, ccy = _universe(n=5, vols=[0.005, 0.03, 0.03, 0.03, 0.03])
+    p = build_portfolios(hist, ccy, None, list(hist), None, cap=1.0)
+    p["minvar"]["weights"][:] = [0.996, 0.004, 0.0, 0.0, 0.0]
+    text = "\n".join(format_portfolios(p))
+    assert "0% in both (4)" in text

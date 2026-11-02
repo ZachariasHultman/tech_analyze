@@ -164,3 +164,20 @@ def test_portfolio_weights_sit_between_buy_and_sell(sent_email):
     assert "A = MIN-VARIANCE (robust)" in body
     assert (body.index("CONSIDER BUYING") < body.index("PORTFOLIO WEIGHTS")
             < body.index("CONSIDER SELLING"))
+
+
+def test_email_has_html_part_with_table_in_the_same_place(sent_email):
+    import email as email_mod
+    captured, tmp_path = sent_email
+    _write_weights(tmp_path)
+    main_mod._send_email(_PUSH, [{"name": "X", "pts": 1.0, "reasons": "r"}],
+                         ["  PORTFOLIO WEIGHTS"], "<h3>PORTFOLIO WEIGHTS</h3><table></table>")
+    parsed = email_mod.message_from_string(captured["mime"])
+    assert parsed.get_content_type() == "multipart/alternative"
+    types = [p.get_content_type() for p in parsed.walk() if not p.is_multipart()]
+    assert types == ["text/plain", "text/html"]  # HTML last = preferred
+    part = [p for p in parsed.walk() if p.get_content_type() == "text/html"][0]
+    html_body = part.get_payload(decode=True).decode("utf-8")
+    assert (html_body.index("CONSIDER BUYING") < html_body.index("<table>")
+            < html_body.index("CONSIDER SELLING"))
+    assert "<pre" in html_body

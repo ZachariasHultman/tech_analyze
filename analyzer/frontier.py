@@ -34,6 +34,9 @@ its own multiply and must not be routed through ``fx.to_sek`` (which divides
 GBP by 100 for the Yahoo leg). Nothing here may raise into the live path.
 """
 
+import html
+import re
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
@@ -207,14 +210,77 @@ def build_portfolios(price_hist, currencies, blend, names, rates, cap=WEIGHT_CAP
     return out
 
 
-def format_portfolios(p):
-    """Plain-text block for the email and terminal; names each portfolio."""
-    bar = "=" * 50
-    lines = [bar, "  PORTFOLIO WEIGHTS (how much of each pushed stock)", bar]
-    if p is None:
-        return lines + ["  Not computed: too little common price history."]
+TITLE = "PORTFOLIO WEIGHTS (how much of each pushed stock)"
+NOT_COMPUTED = "Not computed: too little common price history."
+_ZERO = 0.005  # below half a percent reads as 0% at the displayed precision
 
+
+def display_name(name):
+    """``"Veidekke 52602"`` -> ``"Veidekke"``: the Avanza id is noise to a reader."""
+    return re.sub(r"\s+\d+$", "", str(name))
+
+
+def _pct(x, signed=False):
+    if x is None:
+        return "-"
+    return f"{x * 100:+.1f}%" if signed else f"{x * 100:.1f}%"
+
+
+def _summary_rows(p):
+    """(label, A, B) for the headline stats -- shared by text and HTML."""
+    mv, ms = p["minvar"], p["maxsharpe"]
+    return [
+        ("Volatility / yr", _pct(mv["vol"]), _pct(ms["vol"]) if ms else "-"),
+        ("Exp. excess return / yr", _pct(mv["exp"], True),
+         _pct(ms["exp"], True) if ms else "-"),
+        ("Effective no. of stocks", f"{mv['eff_n']:.1f}",
+         f"{ms['eff_n']:.1f}" if ms else "-"),
+    ]
+
+
+def _weight_rows(p):
+    """``(rows, zero_names)``: per-stock (name, A, B) sorted by combined
+    weight, with names at ~0% in both portfolios split out."""
     ms = p["maxsharpe"]
+    wa = p["minvar"]["weights"]
+    wb = ms["weights"] if ms else pd.Series(0.0, index=wa.index)
+    order = (wa + wb).sort_values(ascending=False).index
+    rows, zero = [], []
+    for name in order:
+        if wa[name] < _ZERO and wb[name] < _ZERO:
+            zero.append(display_name(name))
+            continue
+        a = _pct(wa[name]) if wa[name] >= _ZERO else "–"
+        b = (_pct(wb[name]) if wb[name] >= _ZERO else "–") if ms else "-"
+        rows.append((display_name(name), a, b))
+    return rows, zero
+
+
+def _footnotes(p):
+    notes = [
+        f"Cap {p['cap'] * 100:.0f}% per stock. {p['weeks']} weeks of Avanza closes "
+        f"{p['start']}..{p['end']}, in SEK, Ledoit-Wolf shrinkage {p['delta']:.2f}.",
+        f"Exp. return = IC {ASSUMED_IC} x vol x rank z-score, i.e. excess vs the "
+        "average scored stock, not a forecast of the market.",
+    ]
+    if not p["maxsharpe"]:
+        notes.append("B not computed: no usable rank for these stocks.")
+    if p["unconverted"]:
+        notes.append("[!] No FX rate, left in listing currency: "
+                     + ", ".join(map(display_name, p["unconverted"])))
+    if p["dropped"]:
+        notes.append("[!] Too little price history, left out: "
+                     + ", ".join(map(display_name, p["dropped"])))
+    return notes
+
+
+def format_portfolios(p):
+    """Plain-text block for the terminal and the email's text part."""
+    bar = "=" * 50
+    lines = [bar, f"  {TITLE}", bar]
+    if p is None:
+        return lines + [f"  {NOT_COMPUTED}"]
+
     lines += [
         "  A = MIN-VARIANCE (robust): lowest-risk mix. Uses only how the",
         "      stocks have moved together -- ignores the screener rank.",
@@ -222,50 +288,71 @@ def format_portfolios(p):
         "      risk, with the screener rank as expected return. Less robust:",
         "      leans on the rank being right.",
         "",
-        f"  {'':<28}{'A min-var':>11}{'B max-Sharpe':>14}",
     ]
+    rows, zero = _weight_rows(p)
+    w = max([28] + [len(r[0]) for r in rows])
 
     def _row(label, a, b):
-        lines.append(f"  {label:<28}{a:>11}{b:>14}")
+        lines.append(f"  {label:<{w}}{a:>11}{b:>14}")
 
-    def _pct(x, signed=False):
-        if x is None:
-            return "-"
-        return f"{x * 100:+.1f}%" if signed else f"{x * 100:.1f}%"
-
-    mv = p["minvar"]
-    _row("Volatility/yr", _pct(mv["vol"]), _pct(ms["vol"]) if ms else "-")
-    _row("Exp. excess return/yr", _pct(mv["exp"], True),
-         _pct(ms["exp"], True) if ms else "-")
-    _row("Effective no. of stocks", f"{mv['eff_n']:.1f}",
-         f"{ms['eff_n']:.1f}" if ms else "-")
-    lines.append(f"  (equal weight: volatility {_pct(p['equal_vol'])}/yr)")
+    _row("", "A min-var", "B max-Sharpe")
+    for r in _summary_rows(p):
+        _row(*r)
+    lines.append(f"  (equal weight: volatility {_pct(p['equal_vol'])} / yr)")
     lines.append("")
-
-    wa = mv["weights"]
-    wb = ms["weights"] if ms else pd.Series(0.0, index=wa.index)
-    order = (wa + wb).sort_values(ascending=False).index
-    zero = []
-    for name in order:
-        if wa[name] < 0.005 and wb[name] < 0.005:
-            zero.append(name)
-            continue
-        _row(str(name)[:28], _pct(wa[name]), _pct(wb[name]) if ms else "-")
+    for r in rows:
+        _row(*r)
     if zero:
-        lines.append(f"  0% in both ({len(zero)}): {', '.join(map(str, zero))}")
-
+        lines.append(f"  0% in both ({len(zero)}): {', '.join(zero)}")
     lines.append("")
-    lines.append(f"  Cap {p['cap'] * 100:.0f}% per stock. {p['weeks']} weeks of Avanza "
-                 f"closes {p['start']}..{p['end']},")
-    lines.append(f"  in SEK, Ledoit-Wolf shrinkage {p['delta']:.2f}. Exp. return = "
-                 f"IC {ASSUMED_IC} x vol x rank z-score,")
-    lines.append("  i.e. excess vs the average scored stock, not a forecast of the market.")
-    if not ms:
-        lines.append("  B not computed: no usable rank for these stocks.")
-    if p["unconverted"]:
-        lines.append(f"  [!] No FX rate, left in listing currency: "
-                     f"{', '.join(map(str, p['unconverted']))}")
-    if p["dropped"]:
-        lines.append(f"  [!] Too little price history, left out: "
-                     f"{', '.join(map(str, p['dropped']))}")
+    lines += [f"  {n}" for n in _footnotes(p)]
     return lines
+
+
+_TH = "padding:6px 10px;text-align:right;border-bottom:2px solid #444;"
+_TD = "padding:4px 10px;text-align:right;font-variant-numeric:tabular-nums;"
+_TDL = "padding:4px 10px;text-align:left;"
+
+
+def format_portfolios_html(p):
+    """The same content as an HTML table, for the email's HTML part.
+
+    Inline styles only -- Gmail strips <style> blocks.
+    """
+    e = html.escape
+    out = [f'<h3 style="margin:24px 0 6px;font-family:sans-serif">{e(TITLE)}</h3>']
+    if p is None:
+        return "\n".join(out + [f'<p style="font-family:sans-serif">{e(NOT_COMPUTED)}</p>'])
+
+    out.append(
+        '<p style="font-family:sans-serif;font-size:13px;margin:0 0 10px;line-height:1.5">'
+        "<b>A = Min-variance (robust)</b>: lowest-risk mix. Uses only how the stocks "
+        "have moved together &mdash; ignores the screener rank.<br>"
+        "<b>B = Max-Sharpe (uses rank)</b>: best expected return per unit of risk, with "
+        "the screener rank as expected return. Less robust: leans on the rank being right."
+        "</p>")
+    t = ['<table style="border-collapse:collapse;font-family:sans-serif;font-size:13px">',
+         "<tr>"
+         f'<th style="{_TH}text-align:left"></th>'
+         f'<th style="{_TH}">A &nbsp;Min-variance<br><span style="font-weight:normal;'
+         'color:#666">robust</span></th>'
+         f'<th style="{_TH}">B &nbsp;Max-Sharpe<br><span style="font-weight:normal;'
+         'color:#666">uses rank</span></th></tr>']
+    for label, a, b in _summary_rows(p):
+        t.append(f'<tr style="background:#f0f0f0"><td style="{_TDL}"><b>{e(label)}</b></td>'
+                 f'<td style="{_TD}"><b>{e(a)}</b></td><td style="{_TD}"><b>{e(b)}</b></td></tr>')
+    t.append(f'<tr style="background:#f0f0f0"><td style="{_TDL};color:#666" colspan="3">'
+             f"Equal weight: volatility {e(_pct(p['equal_vol']))} / yr</td></tr>")
+    rows, zero = _weight_rows(p)
+    for i, (name, a, b) in enumerate(rows):
+        bg = "#fafafa" if i % 2 else "#ffffff"
+        top = "border-top:2px solid #444;" if i == 0 else ""
+        t.append(f'<tr style="background:{bg}"><td style="{_TDL}{top}">{e(name)}</td>'
+                 f'<td style="{_TD}{top}">{e(a)}</td><td style="{_TD}{top}">{e(b)}</td></tr>')
+    t.append("</table>")
+    out += t
+    small = 'style="font-family:sans-serif;font-size:12px;color:#666;margin:6px 0"'
+    if zero:
+        out.append(f"<p {small}>0% in both ({len(zero)}): {e(', '.join(zero))}</p>")
+    out.append(f"<p {small}>" + "<br>".join(e(n) for n in _footnotes(p)) + "</p>")
+    return "\n".join(out)

@@ -3,6 +3,7 @@ import os
 import yfinance as yf
 from tqdm import tqdm
 import re
+import html
 
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -685,8 +686,9 @@ def _listing_currency(ticker_info, yahoo_symbol):
     return str(ccy).upper() if ccy else currency_for_symbol(yahoo_symbol)
 
 
-def _portfolio_lines(manager, push_results):
-    """Min-variance and max-Sharpe weights over the pushed names.
+def _portfolio_section(manager, push_results):
+    """Min-variance and max-Sharpe weights over the pushed names, as
+    ``(text_lines, html)``.
 
     Never raises: a failure here must not cost the weekly email its buy/sell
     sections, so it degrades to a one-line note.
@@ -711,14 +713,16 @@ def _portfolio_lines(manager, push_results):
                 rates = fx.load_sek_rates(os.path.join(project_root, fx.FX_CACHE_PATH))
         p = frontier.build_portfolios(hist, ccys, push_results.get("blend_all"),
                                       names, rates)
-        return frontier.format_portfolios(p)
+        return frontier.format_portfolios(p), frontier.format_portfolios_html(p)
     except Exception as e:
-        return ["=" * 50, "  PORTFOLIO WEIGHTS", "=" * 50,
-                f"  Not computed: {type(e).__name__}: {e}"]
+        msg = f"Not computed: {type(e).__name__}: {e}"
+        return (["=" * 50, "  PORTFOLIO WEIGHTS", "=" * 50, f"  {msg}"],
+                f"<h3>PORTFOLIO WEIGHTS</h3><p>{html.escape(msg)}</p>")
 
 
 def _send_email(push_results: dict | None, sell_signals: list[dict],
-                portfolio_lines: list[str] | None = None) -> None:
+                portfolio_lines: list[str] | None = None,
+                portfolio_html: str | None = None) -> None:
     """Send a plain-text email summary via Gmail SMTP (STARTTLS, port 587).
 
     Requires in .env (same vars as stryket):
@@ -779,9 +783,11 @@ def _send_email(push_results: dict | None, sell_signals: list[dict],
             for r in push_results["removed"]:
                 lines.append(f"  {_fmt_scored_row('-', r)}")
 
-    if portfolio_lines:
-        lines.append("")
-        lines.extend(portfolio_lines)
+    # Split around the portfolio block: the text part splices its lines in,
+    # the HTML part a real table, with everything else in a monospace <pre>
+    # (Gmail renders text/plain proportionally, which breaks the columns).
+    head = lines
+    lines = []
 
     if sell_signals:
         lines.append("\n" + "=" * 50)
@@ -793,12 +799,25 @@ def _send_email(push_results: dict | None, sell_signals: list[dict],
     else:
         lines.append("\n✓ No sell signals in portfolio.")
 
-    body = "\n".join(lines)
-    msg = MIMEMultipart()
+    tail = lines
+    portfolio_lines = portfolio_lines or []
+    body = "\n".join(head + ([""] + portfolio_lines if portfolio_lines else []) + tail)
+
+    def _pre(block):
+        return ('<pre style="font-family:Menlo,Consolas,monospace;font-size:12px">'
+                + html.escape("\n".join(block)) + "</pre>")
+
+    html_body = ("<html><body>" + _pre(head)
+                 + (portfolio_html or (_pre(portfolio_lines) if portfolio_lines else ""))
+                 + _pre(tail) + "</body></html>")
+
+    msg = MIMEMultipart("alternative")
     msg["From"]    = email_from
     msg["To"]      = email_to
     msg["Subject"] = f"Stock Update {date.today()}"
+    # Order matters: clients show the last part they can render.
     msg.attach(MIMEText(body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
@@ -1410,13 +1429,13 @@ def main():
             print(f"\n✓ No sell signals in '{args.sell_from}'.\n")
 
     # Always alongside --push + --email: weights for the list just pushed.
-    portfolio_lines = None
+    portfolio_lines = portfolio_html = None
     if args.email and push_results:
-        portfolio_lines = _portfolio_lines(manager, push_results)
+        portfolio_lines, portfolio_html = _portfolio_section(manager, push_results)
         print("\n".join(portfolio_lines) + "\n")
 
     if args.email:
-        _send_email(push_results, sell_signals, portfolio_lines)
+        _send_email(push_results, sell_signals, portfolio_lines, portfolio_html)
 
     return 0
 
