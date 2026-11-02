@@ -1,11 +1,10 @@
 """The email the Pi actually sends, rendered end to end.
 
 cron_pi.sh runs `main.py --push --sell-from Äger --email` on the Pi, which
-never runs the optimizer -- it only consumes optimization_results_panel.json
-copied over from the Mac. These tests exercise that consumption path: the
-status block must appear in the sent body, and a Pi holding an older copy of
-the file (or none) must still send a complete email rather than crash the
-weekly run.
+never runs --evaluate -- it only consumes evaluation_results.json copied over
+from the Mac. These tests exercise that consumption path: the status block
+must appear in the sent body, and a Pi holding an old optimizer file (or
+nothing) must still send a complete email rather than crash the weekly run.
 """
 
 import json
@@ -13,7 +12,6 @@ import json
 import pytest
 
 import analyzer.main as main_mod
-from analyzer.correlation import build_validation_summary
 
 
 @pytest.fixture
@@ -57,31 +55,28 @@ def sent_email(monkeypatch, tmp_path):
     return captured, tmp_path
 
 
-def _write_weights(tmp_path, accept=True, fitted_at=None):
-    gate = {
-        "accept": accept,
-        "n_companies": 127,
-        "n_folds_beating_equal": 4,
-        "n_folds": 4,
-        "permutation_p_value": 0.015,
-        "permutation": {"n_permutations": 200},
-        "folds": [
-            {"fiscal_year": y, "optimized_ic": ic, "optimized_spread": sp,
-             "equal_ic": ic - 0.02, "equal_spread": sp - 0.01}
-            for y, ic, sp in [(2022, -0.050, -0.052), (2023, 0.081, -0.019),
-                              (2024, 0.119, 0.100), (2025, 0.136, 0.076)]
-        ],
-    }
-    validation = build_validation_summary(gate)
-    if fitted_at:
-        validation["fitted_at"] = fitted_at
-    (tmp_path / "optimization_results_panel.json").write_text(json.dumps({
-        "optimized_weights": {"roe_pe ratio status": 2.0},
-        "optimized_thresholds": {},
-        "accepted": accept,
-        "dsr": 0.97,
-        "confidence": 0.925,
-        "validation": validation,
+def _write_weights(tmp_path, evaluated_at="2026-11-01T10:00:00"):
+    """A minimal evaluation_results.json, shaped like run_evaluation's."""
+    def _variant(label, key, ic, exc):
+        return {"label": label, "key": key, "n_periods": 7, "per_year": [],
+                "mean_ic": ic, "ic_p_value": 0.05, "years_ic_positive": 7,
+                "mean_excess": exc, "excess_p_value": 0.13,
+                "years_excess_positive": 5,
+                "vs": {"OMXS30 GI": {"mean": 0.02, "years_beating": 3, "n_years": 4}}}
+    (tmp_path / "evaluation_results.json").write_text(json.dumps({
+        "evaluated_at": evaluated_at,
+        "fiscal_years": list(range(2019, 2026)),
+        "n_companies": 127, "top_n": 25,
+        "benchmarks": {"OMXS30 GI": ["2021-11-01", "2026-11-01"]},
+        "variants": [_variant("score (live)", "blend_score", 0.118, 0.061),
+                     _variant("points only", "fundamental_pct", 0.081, 0.027)],
+        "universe": {"vs": {"OMXS30 GI": {"mean": -0.01, "years_beating": 1,
+                                          "n_years": 4}}},
+        "weighting": {"summary": {
+            "equal": {"mean_excess": 0.065, "mean_vol": 0.174,
+                      "years_beating_equal": None, "n_years": 7},
+            "minvar": {"mean_excess": 0.026, "mean_vol": 0.160,
+                       "years_beating_equal": 2, "n_years": 7}}},
     }))
 
 
@@ -100,29 +95,24 @@ def test_status_block_appears_above_the_buy_list(sent_email):
     body = captured["raw"]
 
     assert "SYSTEM STATUS" in body
-    assert "ACCEPTED" in body
+    assert "Is the score useful?" in body
+    assert "score (live)" in body and "beat universe 5/7" in body
+    assert "OMXS30 GI +2.0% 3/4" in body
+    assert "A min-var" in body and "beat equal 2/7" in body
     assert "CONFIDENCE: LOW" in body
-    assert "beat equal weight in 4 of 4" in body
     assert "CONSIDER BUYING" in body
     # provenance leads, recommendations follow
     assert body.index("SYSTEM STATUS") < body.index("CONSIDER BUYING")
 
 
-def test_reject_is_visible_in_the_email(sent_email):
+def test_stale_evaluation_is_flagged(sent_email):
     captured, tmp_path = sent_email
-    _write_weights(tmp_path, accept=False)
-    main_mod._send_email(_PUSH, [])
-    assert "REJECTED" in captured["raw"]
-
-
-def test_stale_weights_are_flagged(sent_email):
-    captured, tmp_path = sent_email
-    _write_weights(tmp_path, fitted_at="2019-01-01T00:00:00")
+    _write_weights(tmp_path, evaluated_at="2019-01-01T00:00:00")
     main_mod._send_email(_PUSH, [])
     assert "STALE" in captured["raw"]
 
 
-def test_pi_without_the_weights_file_still_sends(sent_email):
+def test_pi_without_the_evaluation_file_still_sends(sent_email):
     """The weekly run must not die because the SCP was never done."""
     captured, _ = sent_email
     main_mod._send_email(_PUSH, [])
@@ -132,7 +122,9 @@ def test_pi_without_the_weights_file_still_sends(sent_email):
     assert "Tele2" in body
 
 
-def test_pi_with_a_legacy_weights_file_still_sends(sent_email):
+def test_a_leftover_optimizer_file_is_ignored(sent_email):
+    """A Pi still holding the removed optimizer's JSON reads as unknown, not
+    as a status -- and its weights are never loaded."""
     captured, tmp_path = sent_email
     (tmp_path / "optimization_results_panel.json").write_text(json.dumps({
         "optimized_weights": {"roe_pe ratio status": 2.0},

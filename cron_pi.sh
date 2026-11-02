@@ -19,7 +19,8 @@ LOG_FILE="$REPO_DIR/logs/cron.log"
 
 echo "=== $(date) ==="
 
-# Pull latest code from git (optimized weights are SCP'd separately from Mac)
+# Pull latest code from git (evaluation_results.json, for the email's status
+# block, is SCP'd separately from the Mac)
 git pull --ff-only
 
 # Score, push to Avanza, check sells, send email.

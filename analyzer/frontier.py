@@ -90,7 +90,7 @@ def weekly_returns(price_hist, currencies, rates, names):
     left in listing currency because no rate was available, ``dropped`` names
     with too little history to share a ``MIN_WEEKS`` window with the rest.
     """
-    cols, unconverted, dropped = {}, [], []
+    closes, unconverted, dropped = {}, [], []
     for name in names:
         close = _close_series(price_hist.get(name))
         if close is None:
@@ -100,18 +100,28 @@ def weekly_returns(price_hist, currencies, rates, names):
         if sek is None:
             unconverted.append(name)
             sek = close
-        cols[name] = sek.resample("W-FRI").last().pct_change(fill_method=None)
+        closes[name] = sek
+    common, short = common_weekly_returns(closes)
+    return common, unconverted, dropped + short
 
-    rets = pd.DataFrame(cols).iloc[1:]
-    # Shortest histories go first until the common window is long enough.
+
+def common_weekly_returns(closes, min_weeks=MIN_WEEKS):
+    """``(returns, dropped)``: weekly returns over the longest window all kept
+    names share, dropping the shortest histories until it reaches
+    ``min_weeks``. Shared with analyzer/evaluation.py's backtest."""
+    rets = pd.DataFrame({
+        n: s.resample("W-FRI").last().pct_change(fill_method=None)
+        for n, s in closes.items()
+    }).iloc[1:]
+    dropped = []
     while not rets.empty:
         common = rets.dropna()
-        if len(common) >= MIN_WEEKS:
-            return common, unconverted, dropped
+        if len(common) >= min_weeks:
+            return common, dropped
         shortest = rets.count().idxmin()
         dropped.append(shortest)
         rets = rets.drop(columns=shortest)
-    return pd.DataFrame(), unconverted, dropped
+    return pd.DataFrame(), dropped
 
 
 def ledoit_wolf(X):

@@ -78,37 +78,6 @@ def setup_env():
     return avanza_user
 
 
-def _load_optimized_params(variant=None):
-    """Load optimized weights and thresholds from the panel results file.
-
-    variant: None (default) or "panel" — both read
-    optimization_results_panel.json, the only file the optimizer can produce.
-    Returns (weights_dict, thresholds_dict) — either may be None.
-
-    Written by the challenger gate on both accept and reject, so when it
-    exists it always holds a defensible recommendation. When it doesn't (a
-    fresh clone, or a machine that has never run --backfill-panel +
-    --optimize), scoring falls back to metrics.py's hardcoded defaults.
-    """
-    import json
-    filename = "optimization_results_panel.json"
-
-    weights_path = os.path.join(project_root, filename)
-    if not os.path.exists(weights_path):
-        return None, None
-    try:
-        with open(weights_path) as f:
-            data = json.load(f)
-        weights = data.get("optimized_weights")
-        thresholds = data.get("optimized_thresholds")
-        if weights:
-            print(f"Loaded optimized params from {weights_path}")
-            return weights, thresholds
-    except Exception as e:
-        print(f"Warning: could not load optimized params: {e}")
-    return None, None
-
-
 def to_yahoo_symbol(ticker_info) -> str | None:
     """Map an Avanza ticker_info dict to a Yahoo Finance ticker symbol.
 
@@ -192,181 +161,17 @@ def _fmt_scored_row(prefix, r):
     return f"{head}pts={pts_str}, q={qual:.2f}, v={val:.2f})"
 
 
-# Weights older than this are flagged in the email; the panel only gains a
-# new fiscal year once a year, so this is about noticing neglect, not decay.
-_STALE_AFTER_DAYS = 120
+def _evaluation_status_lines():
+    """The SYSTEM STATUS block from evaluation_results.json (--evaluate).
 
-
-def _load_optimizer_status(variant=None):
-    """Read the `validation` block written by the challenger gate, if present.
-
-    Returns None when the weights file is missing or predates this block (an
-    older SCP, or a machine that has never run the optimizer). Callers render
-    a short "unknown" notice instead -- the Pi must never fail its weekly run
-    because the provenance metadata is stale.
+    Never raises: the Pi must send its weekly email whether or not it has been
+    sent a current evaluation file.
     """
-    import json
-    filename = ("optimization_results_panel.json" if variant in (None, "panel")
-                else f"optimization_results_{variant}.json")
-    path = os.path.join(project_root, filename)
-    if not os.path.exists(path):
-        return None
+    from analyzer.evaluation import RESULTS_PATH, format_status, load_status
     try:
-        with open(path) as f:
-            data = json.load(f)
-    except Exception:
-        return None
-    validation = data.get("validation")
-    if not isinstance(validation, dict):
-        return None
-    return {
-        "accepted": data.get("accepted"),
-        "dsr": data.get("dsr"),
-        "confidence": data.get("confidence"),
-        "source": filename,
-        # The ranking key's own record, written alongside the gate's since the
-        # gate's objective describes the points composite, not blend_score.
-        # Absent in files written before the blend existed.
-        "ranking_key": data.get("ranking_key"),
-        **validation,
-    }
-
-
-def _format_optimizer_status(status):
-    """Render the system-status block shown above the buy/sell lists.
-
-    The point is that a tidy top-10 list implies more confidence than four
-    fiscal years can support, so the confidence verdict is stated on every
-    run rather than left for the reader to remember.
-    """
-    if not status:
-        return [
-            "SYSTEM STATUS: unknown — no validation metadata found.",
-            "  Run the optimizer on the Mac and copy",
-            "  optimization_results_panel.json across.",
-        ]
-
-    lines = []
-    verdict = ("ACCEPTED" if status.get("accepted") else
-               "REJECTED (running equal weight)")
-    fitted = status.get("fitted_at") or "unknown date"
-    stale = ""
-    try:
-        age = (pd.Timestamp.now() - pd.Timestamp(fitted)).days
-        if age >= _STALE_AFTER_DAYS:
-            stale = f"  [STALE — {age} days old, consider re-running]"
-    except Exception:
-        pass
-    lines.append(f"SYSTEM STATUS  (weights fitted {fitted[:10]}, "
-                 f"panel challenger: {verdict}){stale}")
-
-    n_periods = status.get("n_periods") or 0
-    basis = status.get("return_basis", "forward return")
-    years = [r for r in (status.get("per_year") or []) if r.get("ic") is not None]
-    if years:
-        span = f"{years[0]['fiscal_year']}-{years[-1]['fiscal_year']}"
-        lines.append(f"  Out-of-sample, {len(years)} fiscal years ({span}), {basis}:")
-        lines.append("    IC by year:   " + "   ".join(
-            f"{r['fiscal_year']} {r['ic']:+.3f}" for r in years))
-
-    mean_ic, mean_spread = status.get("mean_ic"), status.get("mean_spread")
-    if mean_ic is not None:
-        bits = [f"mean IC {mean_ic:+.3f}"]
-        if mean_spread is not None:
-            bits.append(f"top-bottom spread {mean_spread:+.1%}/yr")
-        lines.append("    " + "  |  ".join(bits))
-
-    n_beat, n_folds = status.get("n_folds_beating_equal"), status.get("n_folds")
-    if n_beat is not None and n_folds:
-        # On a reject the rows above describe equal weight (what is running),
-        # while this count describes the challenger that was turned down --
-        # say which, or the two read as contradicting each other.
-        who = "beat" if status.get("accepted") else "challenger beat"
-        tail = "" if status.get("accepted") else " but missed the significance bar"
-        lines.append(f"    {who} equal weight in {n_beat} of {n_folds} "
-                     f"held-out years{tail}")
-
-    p_perm, n_perm = status.get("permutation_p_value"), status.get("n_permutations")
-    if p_perm is not None and n_perm:
-        lines.append(f"    permutation test ({n_perm} refits on shuffled "
-                     f"targets): p={p_perm:.3f}")
-
-    # The accept/reject above turns on this number, so print it rather than
-    # leaving "missed the significance bar" as an unquantified assertion --
-    # 0.91 against a 0.925 bar and 0.53 against it are very different rejects.
-    dsr, bar = status.get("dsr"), status.get("confidence")
-    try:
-        dsr, bar = float(dsr), float(bar)
-        if dsr == dsr and bar == bar:  # NaN-safe without importing numpy here
-            hit = "cleared" if dsr > bar else "missed"
-            lines.append(f"    deflated Sharpe {dsr:.3f} vs {bar:.3f} bar ({hit})")
-    except (TypeError, ValueError):
-        pass
-
-    # The verdict is derived, not asserted. It used to be hardcoded "LOW",
-    # which became self-contradictory the moment the IC test started clearing
-    # 5% ("CONFIDENCE: LOW ... p=0.02").
-    #
-    # Judged on the key the watchlist is actually ranked on when that record
-    # exists, not on the gate's composite. Reporting the gate's p-value here
-    # while the RANKING KEY block below shows a different one made the block
-    # contradict itself ("CONFIDENCE: LOW ... p=0.08" above "IC p=0.047").
-    rk = status.get("ranking_key")
-    if isinstance(rk, dict) and rk.get("ic_p_value") is not None:
-        t_stat, p_value = rk.get("ic_t_stat"), rk.get("ic_p_value")
-        n_periods, judged = rk.get("n_periods", n_periods), rk.get("key", "blend_score")
-    else:
-        t_stat, p_value = status.get("t_stat"), status.get("p_value")
-        judged = "the scoring composite"
-
-    detail = ""
-    if t_stat is not None and p_value is not None:
-        detail = f" (t={t_stat:+.2f}, p={p_value:.2f})"
-    if p_value is not None and p_value < 0.05:
-        lines.append(f"  CONFIDENCE: MODERATE — {judged} beats chance across "
-                     f"{n_periods} periods{detail}.")
-    else:
-        lines.append(f"  CONFIDENCE: LOW — {n_periods} periods only{detail}. "
-                     "Directional, not proof.")
-
-    # A significant IC and a flat quintile spread are different claims, and
-    # the spread is the one a top-N watchlist actually depends on. Say so
-    # rather than letting a good IC imply the picks are validated.
-    if mean_spread is not None and abs(mean_spread) < 0.02:
-        lines.append(f"    CAVEAT: top-bottom spread is only {mean_spread:+.1%}/yr "
-                     "— the ranking works on average, the extremes do not "
-                     "separate, and the watchlist is an extreme.")
-    # Everything above describes the gate's objective, which is built from the
-    # `points` composite. The watchlist is ordered by `blend_score`, so its own
-    # record is reported separately rather than left implied by numbers that
-    # measure something else.
-    rk = status.get("ranking_key")
-    if isinstance(rk, dict) and rk.get("mean_ic") is not None:
-        n = rk.get("n_periods")
-        lines.append(
-            f"  RANKING KEY ({rk.get('key', 'blend_score')} = "
-            f"{int(MOMENTUM_BLEND_WEIGHT * 100)}% momentum + "
-            f"{int((1 - MOMENTUM_BLEND_WEIGHT) * 100)}% pts), same {n} years:"
-        )
-        lines.append(
-            f"    IC {rk['mean_ic']:+.3f} (p={rk['ic_p_value']:.3f}, "
-            f"positive {rk['years_ic_positive']}/{n})"
-        )
-        lines.append(
-            f"    top-{rk.get('top_n', 25)} basket {rk['mean_top_n_excess']:+.2%}/yr "
-            f"excess (p={rk['top_n_p_value']:.3f}, "
-            f"positive {rk['years_top_n_positive']}/{n})"
-        )
-        lines.append("    Momentum is the metric survivorship bias most "
-                     "inflates — treat this as the optimistic end.")
-
-    lines.append("    Survivorship bias is not corrected for and inflates all "
-                 "of the above.")
-    n_companies = status.get("n_companies")
-    if n_companies:
-        lines.append(f"  Universe: {n_companies} stocks "
-                     "(today's list applied backwards).")
-    return lines
+        return format_status(load_status(os.path.join(project_root, RESULTS_PATH)))
+    except Exception as e:
+        return [f"SYSTEM STATUS: could not render evaluation ({type(e).__name__}: {e})"]
 
 
 # Shared explainer for the row fields, printed in both the terminal watchlist
@@ -550,7 +355,7 @@ def _print_watchlist_report(target_name, top_n, added_rows, already_rows,
     print(f"\n{'=' * 70}")
     print(f"  WATCHLIST UPDATE: '{target_name}' (top {top_n} by rank)")
     print(f"{'=' * 70}")
-    for line in _format_optimizer_status(_load_optimizer_status()):
+    for line in _evaluation_status_lines():
         print(f"  {line}")
     print()
     for line in LEGEND_LINES:
@@ -845,7 +650,7 @@ def _send_email(push_results: dict | None, sell_signals: list[dict],
 
     # Provenance first: a tidy top-10 list reads as more confident than four
     # fiscal years justify, so the evidence for the weights leads the email.
-    lines.extend(_format_optimizer_status(_load_optimizer_status()))
+    lines.extend(_evaluation_status_lines())
     lines.append("")
 
     if push_results or sell_signals:
@@ -1031,19 +836,14 @@ def build_arg_parser():
 --- Data & analysis ---
   python main.py --save                        Save today's snapshot to data/
   python main.py --backfill-panel              Build the fiscal-year panel from data/*.csv
-  python main.py --optimize                    Run the panel challenger gate (do occasionally)
+  python main.py --evaluate                    Is the score useful? Variants, index, weighting
 
 --- Push results to Avanza ---
   python main.py --push                        Push top 10 to 'Bör köpa' (default)
   python main.py --push --push-to "Min lista"  Push to a different watchlist
   python main.py --push --push-top 5           Push top 5 instead of 10
 
---- Weight variants ---
-  (default: uses optimization_results_panel.json when it exists -- run
-  --backfill-panel then --optimize once to create it -- else metrics.py's
-  hardcoded defaults)
-  python main.py --no-opt                      Ignore saved weights, use hardcoded defaults
-  python main.py --use-panel                   Force the panel challenger's result
+Metrics are always weighted equally (correlation.equal_metric_weights).
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1058,23 +858,14 @@ def build_arg_parser():
         help="(deprecated, same as --save)",
     )
     ap.add_argument(
-        "--optimize",
+        "--evaluate", "--optimize",
         action="store_true",
-        help="Run the panel challenger gate against data/panel_scores.csv and "
-             "save optimization_results_panel.json (run --backfill-panel first)",
-    )
-    ap.add_argument(
-        "--no-opt",
-        action="store_true",
-        help="Ignore optimized weights, use hardcoded defaults",
-    )
-    ap.add_argument(
-        "--use-panel",
-        action="store_true",
-        help="Force panel challenger results for live analysis. Not usually "
-             "needed -- panel results are already used by default when "
-             "optimization_results_panel.json exists (run --backfill-panel "
-             "then --optimize once to create it).",
+        dest="evaluate",
+        help="Evaluate the score on data/panel_scores.csv: score variants vs "
+             "the universe, vs OMXS30 GI / MSCI World, and equal vs min-var vs "
+             "max-Sharpe weighting. Refreshes the index caches first (Avanza "
+             "login for OMXS30 GI). Writes evaluation_results.json, which the "
+             "email's status block reads. --optimize is the old name.",
     )
     ap.add_argument(
         "--watchlists", "--watchlist",
@@ -1211,29 +1002,6 @@ def build_arg_parser():
         help="Earliest date for --fetch-fx (default 2015-01-01, matching "
              "--prices-from).",
     )
-    ap.add_argument(
-        "--permutations",
-        type=int,
-        default=200,
-        metavar="N",
-        help="Permutation refits used to measure the challenger gate's null "
-             "distribution (default 200). The target is shuffled within each "
-             "fiscal year and the optimizer refitted, so the DSR's benchmark "
-             "is measured rather than approximated. 0 skips it and falls back "
-             "to the Euler-Mascheroni approximation, whose sigma is grid "
-             "dispersion rather than sampling noise -- faster, but the "
-             "resulting DSR is not meaningful.",
-    )
-    ap.add_argument(
-        "--challenger-confidence",
-        type=float,
-        default=0.925,
-        metavar="X",
-        help="Deflated Sharpe Ratio bar the --optimize panel challenger gate "
-             "must clear to accept optimized weights over equal weight "
-             "(default 0.925). Only matters once data/panel_scores.csv "
-             "exists (run --backfill-panel first).",
-    )
     return ap
 
 
@@ -1248,44 +1016,29 @@ def main():
 
     save_data = args.save or args.get_hist
 
-    def _run_optimize():
-        """The whole of --optimize: the panel challenger gate.
-
-        Errors are NOT swallowed. The gate used to be an optional add-on to
-        the (now removed) rolling-window optimizers, so a failure there still
-        left the command with something to show; it is the only work --optimize
-        does now, and a silent "skipped" would look like a successful run that
-        wrote nothing.
-        """
-        if not (os.path.exists("data/panel_scores.csv")
-                and os.path.exists("data/panel_fundamentals.csv")):
-            print("[optimize] data/panel_scores.csv + data/panel_fundamentals.csv "
-                  "not found — run --backfill-panel first.")
+    def _run_evaluate():
+        """The whole of --evaluate. Errors are NOT swallowed: it is the only
+        work this mode does, and a silent skip would look like a run that
+        wrote nothing."""
+        if not os.path.exists("data/panel_scores.csv"):
+            print("[evaluate] data/panel_scores.csv not found — "
+                  "run --backfill-panel first.")
             return 1
-        from analyzer.panel import load_gate_panel
-        from analyzer.correlation import (
-            gate_optimized_weights,
-            save_panel_optimization_results,
-            optimize_panel_combo,
-            _all_scored_metrics,
-        )
-        panel_df = load_gate_panel()
-        gate_result = gate_optimized_weights(
-            panel_df, _all_scored_metrics(),
-            optimizer_fn=optimize_panel_combo,
-            confidence=args.challenger_confidence,
-            n_permutations=args.permutations,
-        )
-        # Persisted so live scoring can pick it up automatically (see
-        # _load_optimized_params) -- written on both accept and reject, since
-        # a reject's chosen_weights is already the gate's own equal-weight
-        # fallback, not a broken state.
-        # The file also gets the out-of-sample record of `blend_score` -- the
-        # key the watchlist is actually ranked on, which the gate's own
-        # objective (points-based) does not describe. Read from
-        # data/panel_scores.csv inside, not from panel_df: load_gate_panel
-        # keeps only the target column from the scored panel.
-        save_panel_optimization_results(gate_result)
+        from analyzer.benchmarks import WORLD_SYMBOL, fetch_omxs30gi
+        from analyzer.evaluation import run_evaluation
+        from analyzer.yahoo_prices import backfill_prices
+        # Index caches first. Either failing leaves the cached copy (or n/a)
+        # in place rather than stopping the evaluation.
+        try:
+            fetch_omxs30gi(setup_env())
+        except Exception as exc:
+            print(f"[bench] OMXS30 GI refresh failed ({exc}); using cache if any.")
+        try:
+            backfill_prices([WORLD_SYMBOL], start=args.prices_from,
+                            refresh_after_days=args.prices_refresh_after)
+        except Exception as exc:
+            print(f"[bench] {WORLD_SYMBOL} refresh failed ({exc}); using cache if any.")
+        run_evaluation()
         return 0
 
     # --fetch-fx: its own terminal branch, same shape as --backfill-prices --
@@ -1381,26 +1134,18 @@ def main():
             run_validation_battery("data/panel_scores.csv")
         return 0
 
-    # --optimize without --save: runs against the already-built panel, no
-    # live Avanza fetch needed.
-    if args.optimize and not save_data:
-        return _run_optimize()
+    # --evaluate without --save: runs against the already-built panel.
+    if args.evaluate and not save_data:
+        return _run_evaluate()
 
     # --- Live analysis ---
     manager = SummaryManager()
 
-    # Load optimized weights and thresholds unless --no-opt
-    if not args.no_opt:
-        if args.use_panel:
-            opt_weights, opt_thresholds = _load_optimized_params("panel")
-        else:
-            # Reads optimization_results_panel.json when present -- see
-            # _load_optimized_params's docstring.
-            opt_weights, opt_thresholds = _load_optimized_params()
-        if opt_weights:
-            manager._weight_overrides = opt_weights
-        if opt_thresholds:
-            manager._threshold_overrides = opt_thresholds
+    # Equal metric weights and metrics.py's thresholds -- the same scoring the
+    # panel (and so --evaluate) measures. The weight optimizer that used to
+    # override this was removed; its gate never accepted a result.
+    from analyzer.correlation import equal_metric_weights
+    manager._weight_overrides = equal_metric_weights()
 
     avanza = setup_env()
 
@@ -1494,12 +1239,11 @@ def main():
             print(f"    → https://www.avanza.se/aktier/om-aktien.html/{tid}/")
         print()
 
-    # --save combined with --optimize: fresh snapshots were just written
-    # above, so run the gate now. Note the panel itself is NOT rebuilt here --
-    # --backfill-panel is still its own separate invocation.
-    # (Without --save, this was already handled by the early return above.)
-    if args.optimize:
-        return _run_optimize()
+    # --save combined with --evaluate: fresh snapshots were just written
+    # above. Note the panel itself is NOT rebuilt here -- --backfill-panel is
+    # still its own separate invocation.
+    if args.evaluate:
+        return _run_evaluate()
 
     calculate_score(manager)
 

@@ -42,7 +42,7 @@ Cloning the repo alone isn't enough to run it — the following are gitignored a
 |---|---|---|
 | `.env` | Yes | Avanza credentials (see above); nothing runs without it |
 | `analyzer/metrics.py` | Yes | Scoring weights/thresholds — load-bearing, every module imports from it. Doesn't exist in a fresh clone. Either `cp analyzer/metrics.example.py analyzer/metrics.py` to bootstrap with placeholder values, or scp a tuned copy from an existing machine |
-| `optimization_results_panel.json` | Optional | Optimized weights/thresholds loaded at runtime. Used when present, else `metrics.py`'s hardcoded defaults — see "Weight variants" below |
+| `evaluation_results.json` | Optional | Output of `--evaluate`. Only the email's status block reads it; without it the block says "unknown" and everything else runs |
 | `data/yahoo_prices/` + `data/yahoo_symbols.json` | Mac only | Dividend-adjusted daily closes, 2015→today. Rebuildable with `--backfill-prices`, but that's a slow rate-limited run — scp it if you have it. Without it the panel drops from 7 fiscal years to 4 |
 | `data/fx_sek.csv` | Mac only | ECB daily rates, so the panel's forward return is in SEK. Rebuildable in seconds with `--fetch-fx` |
 
@@ -87,7 +87,7 @@ Measured on 7 fiscal years (2019–2025, 811 company-years, dividend-inclusive r
 | The ranking beats chance | **Probably, but it no longer clears p<0.05.** `blend_score` IC +0.118, p=0.052, positive in **7 of 7** years. Fama-MacBeth coef +0.1547, t=+2.32, p=0.059 |
 | The blend beats ranking on `points` alone | **On the measured window, yes.** Top-25 basket +6.36%/yr excess vs +2.59%/yr — but neither is significant (p=0.146 and p=0.495) and both are positive in only 4 of 7 years |
 | The concentrated pick beats the universe | **No.** p=0.146. The consistent result is the *ordering* (7 of 7 years), not the tail |
-| Optimized weights beat equal weight | **No.** Rejected again on 2026-08-25: out-of-sample spread +4.8%/yr against equal weight's +8.1%/yr, so it failed on the spread condition before the DSR (0.943) even mattered. The system runs equal weights |
+| Optimized weights beat equal weight | **No, and the optimizer is gone.** Its gate rejected it on every run (last, 2026-08-25: beat equal weight in 3 of 7 held-out years, permutation p=0.149), so live had been running equal weights all along. Metrics are now always weighted equally |
 
 **The two rows about the basket used to read better than they do now.** Earlier revisions of this table reported the top-25 pick at p=0.086 and 6 of 7 years positive, and Fama-MacBeth at p=0.029. Those came from a shallower, price-only, mixed-currency panel. Rebuilding it on Yahoo adjusted closes converted to SEK raised the mean IC and the mean basket return while *lowering* consistency and significance — a reminder that the tail statistics move a lot on 7 observations, and that the whole-ordering IC is the more stable of the two measurements.
 
@@ -202,30 +202,30 @@ Skipping these does not error — the panel silently falls back to Avanza's own 
 
 Only the *target* is converted to SEK; the predictors stay in listing currency (see the module docstring in `analyzer/panel.py`). The Pi never needs either command — both caches only matter when building the panel.
 
-**Step 3 — Build the panel and optimize metric weights**
+**Step 3 — Build the panel and evaluate the score**
 
 ```bash
 uv run python3 main.py --backfill-panel --validate
-uv run python3 main.py --optimize --challenger-confidence 0.925
+uv run python3 main.py --evaluate
 ```
 
-`--backfill-panel` builds a fiscal-year cross-sectional panel from your saved `data/*.csv` snapshots (`data/panel_fundamentals.csv` + `data/panel_scores.csv`); `--validate` runs a diagnostic battery against it (quintile sorts, Information Coefficient, Fama-MacBeth) — useful for sanity-checking before optimizing, not required for daily use.
+`--backfill-panel` builds a fiscal-year cross-sectional panel from your saved `data/*.csv` snapshots (`data/panel_fundamentals.csv` + `data/panel_scores.csv`); `--validate` runs a diagnostic battery against it (quintile sorts, Information Coefficient, Fama-MacBeth).
 
-`--optimize` runs the challenger gate against that panel: coordinate descent over per-metric weights and thresholds, ranked within each historical fiscal year, with the top-vs-bottom quintile spread compared against equal-weighting via leave-one-fiscal-year-out cross-validation and acceptance gated on a Deflated Sharpe Ratio bar (`--challenger-confidence`, default 0.925). The verdict is written to `optimization_results_panel.json` on **both** accept and reject — on a reject the file holds the gate's own equal-weight fallback, so it is always a defensible recommendation. That file is the weight source for every future run, no flag needed.
+`--evaluate` answers whether the score is worth using, in three layers, each against its own baseline:
 
-> **These are two separate commands, not one.** `--backfill-panel` (and `--validate`) return before the optimizer ever runs, so `main.py --backfill-panel --optimize` silently does only the backfill. Always run them as two invocations, in that order. `--optimize` needs `data/panel_scores.csv` + `data/panel_fundamentals.csv` to exist and exits with an error if they don't.
+1. **Score variants** — the live score and its two halves (points only, momentum only): IC per year, and the top-25 basket after the sleeve gate, equal stock weights, against the universe mean. A basket that loses to the universe means the score adds nothing.
+2. **Benchmarks** — the same baskets and the whole universe against OMXS30 GI (Avanza, total return) and MSCI World (URTH, in SEK), each row over its own report-date window. Universe losing to the index while the basket beats the universe means the score works and the universe is the problem.
+3. **Weighting** — the live basket as equal weight, min-variance and max-Sharpe, using the same code as the weekly email. Covariance is estimated only from prices before the basket's earliest report date.
 
-**`--permutations` (default 200).** The DSR bar needs to know how good a result the search reaches by luck alone. It used to approximate that from the spread of objective values across grid candidates — a number that moves with how the grid was configured rather than with the evidence (the panel search evaluates ~1200 candidates but produces only ~90 distinct values, so duplicates skewed it in both directions at once). Instead the target is now shuffled *within* each fiscal year and the optimizer refitted 200 times, which measures the null directly. Costs a few minutes on a Mac; `--permutations 0` skips it and falls back to the old approximation, which the output then explicitly labels as not meaningful.
+It refreshes the two index caches first (an Avanza login for OMXS30 GI — Avanza serves only ~5 years of index history, so `data/benchmarks/OMXS30GI.csv` is merged on every run and grows forward from 2021-11), then writes `evaluation_results.json`, which the email's status block reads. `--optimize` still works as an alias.
 
-**What the gate prints.** Alongside the DSR you get `beat equal weight in N of M held-out years` and a permutation p-value. At four usable fiscal years no statistic has real power, so that blunt count is often the most informative line in the report.
+It does **not** change any weights. That was the removed optimizer's job, and with 7 fiscal years against ~34 parameters it never beat equal weight out of sample. Use the result for coarse decisions — which weighting to follow, whether to use the score at all — not to tune the score: tuning against 7 observations fits noise, and leaves no independent years to check the tuning on.
 
-> **Note:** two past bugs invalidate older weight files. (1) The backtest had a look-ahead bug — predictors measured across the same window as the return. (2) The forward-return target was price-only, while Avanza's OHLC close is not dividend-adjusted, so every high-yield stock was penalised by roughly its own yield. Both are fixed, but any `optimization_results_*.json` from before must be regenerated — re-run this step at least once after upgrading. The inert `optimization_results_individual.json` / `_combo.json` leftovers have been deleted; nothing reads them.
+> `--backfill-panel` (and `--validate`) return before anything else runs, so run `--evaluate` as its own invocation, after the panel exists.
 
 ---
 
 ### Daily use
-
-Optimized weights are loaded automatically — no extra flags needed.
 
 ```bash
 # Score a watchlist and push top 25 to "Bör köpa"
@@ -242,12 +242,12 @@ uv run python3 main.py --watchlists Äger
 | When | Command |
 |---|---|
 | **After new quarterly earnings** | `uv run python3 main.py --save --preset omxs30 omxs-mid ...` |
-| **After re-saving** | `--backfill-panel --validate`, then `--optimize` |
+| **After re-saving** | `--backfill-panel --validate`, then `--evaluate` |
 | **If you only changed a threshold in code** | `uv run python3 main.py --backfill-panel --validate` (rebuilds the panel and prints the diagnostics, without re-fitting weights) |
-| **If you add new stocks to universe** | `--save`, then `--backfill-prices` (the new names have no Yahoo cache yet), then re-optimize |
+| **If you add new stocks to universe** | `--save`, then `--backfill-prices` (the new names have no Yahoo cache yet), then `--backfill-panel` and `--evaluate` |
 | **Before rebuilding the panel** | `--fetch-fx` then `--backfill-prices` — both skip what's already current, and the second brings stale series forward |
 
-Re-saving quarterly is enough. Re-optimizing is only needed after a re-save or when you've significantly expanded the universe.
+Re-saving quarterly is enough. Re-evaluating is only needed after a re-save or when you've significantly expanded the universe.
 
 **On refreshing the price cache.** `--backfill-prices` used to only download symbols it had no file for, so the cache never moved forward and the panel's most recent fiscal year kept reading a truncated series. It now refetches anything staler than `--prices-refresh-after` days (default 30) and skips the rest.
 
@@ -257,7 +257,7 @@ A refresh **refetches a symbol's whole history and replaces the file** rather th
 
 ## Raspberry Pi deployment
 
-The Pi only runs the weekly scoring job — no `--save`, no `--optimize`. Those stay on your Mac. The optimized weights (`optimization_results_panel.json`) are gitignored (`*.json`/`*.csv` are blanket-ignored) — never committed, so the file must be copied to the Pi manually via `scp` (see below) after each re-optimize.
+The Pi only runs the weekly scoring job — no `--save`, no `--evaluate`. Those stay on your Mac. `evaluation_results.json` is gitignored (`*.json`/`*.csv` are blanket-ignored), so copy it to the Pi via `scp` (see below) after each `--evaluate` if you want the email's status block current. Scoring itself needs nothing from the Mac.
 
 ### First-time Pi setup
 
@@ -270,7 +270,7 @@ uv sync
 
 # Copy credentials and output files from Mac
 scp .env pi@raspberrypi:~/tech_analyze/.env
-scp optimization_results_panel.json pi@raspberrypi:~/tech_analyze/
+scp evaluation_results.json pi@raspberrypi:~/tech_analyze/
 ```
 
 ### Set up the cron job
@@ -293,8 +293,8 @@ Turnover was measured at ~16% of the list per week, but 7 of the 8 removals acro
 
 | Where | When | Action |
 |---|---|---|
-| Mac | After a re-save | `--backfill-panel --validate`, then `--optimize` |
-| Mac | After optimize | `scp optimization_results_panel.json pi@raspberrypi:~/tech_analyze/` |
+| Mac | After a re-save | `--backfill-panel --validate`, then `--evaluate` |
+| Mac | After evaluate | `scp evaluation_results.json pi@raspberrypi:~/tech_analyze/` |
 | Pi | Automatic (cron) | `cron_pi.sh` — pulls code via git, scores, pushes to Avanza, sends email |
 
 ### Manual Pi run (test it first)
@@ -327,42 +327,24 @@ uv run python3 main.py --watchlists Äger --push --sell-from Äger --email
 
 Sends a plain-text email with the watchlist update and any sell signals. Requires `EMAIL_*` vars in `.env` (see Setup).
 
-Every email opens with a **system status block** describing the weights it is recommending with:
+Every email opens with a **system status block** saying whether the score has earned its keep:
 
 ```
-SYSTEM STATUS  (weights fitted 2026-08-25, panel challenger: REJECTED (running equal weight))
-  Out-of-sample, 7 fiscal years (2019-2025), total return (price + dividends), demeaned within year:
-    IC by year:   2019 +0.289   2020 +0.082   2021 +0.025   2022 -0.034   2023 +0.057   2024 +0.067   2025 +0.077
-    mean IC +0.080  |  top-bottom spread +8.1%/yr
-    challenger beat equal weight in 3 of 7 held-out years but missed the significance bar
-    permutation test (200 refits on shuffled targets): p=0.149
-    deflated Sharpe 0.943 vs 0.925 bar (cleared)
-  CONFIDENCE: LOW — 7 periods only (t=+2.42, p=0.05). Directional, not proof.
-  RANKING KEY (blend_score = 50% momentum + 50% pts), same 7 years:
-    IC +0.118 (p=0.052, positive 7/7)
-    top-25 basket +6.36%/yr excess (p=0.146, positive 4/7)
-    Momentum is the metric survivorship bias most inflates — treat this as the optimistic end.
-    Investment companies are not in the panel at all, so their placement in the list is unvalidated.
-    Survivorship bias is not corrected for and inflates all of the above.
-  Universe: 127 stocks (today's list applied backwards).
+SYSTEM STATUS  (evaluated 2026-11-02, equal metric weights)
+  Is the score useful?  FY2019-2025, top 25 vs universe mean (total return, SEK):
+    score (live)    +6.1%/yr, beat universe 5/7 yrs, IC +0.118 (p=0.05)
+    points only     +2.7%/yr, beat universe 4/7 yrs, IC +0.081 (p=0.08)
+    momentum only   +5.6%/yr, beat universe 5/7 yrs, IC +0.112 (p=0.04)
+  Live basket vs index (yrs beating/covered): OMXS30 GI -1.8% 2/4, World (URTH) +7.1% 3/7
+  Whole universe vs index:                   OMXS30 GI -4.4% 2/4, World (URTH) +0.7% 4/7
+  Weighting: equal stock weight +6.5%/yr vol 17.4%
+             A min-var +2.6%/yr vol 16.0%, beat equal 2/7
+             B max-Sharpe +8.5%/yr vol 18.6%, beat equal 4/7
+CONFIDENCE: LOW — 7 years only, IC p=0.05. Directional, not proof.
+  Survivorship bias is not corrected (today's universe applied backwards) and inflates every number above, most of all vs index.
 ```
 
-That is the block as of the last real run, reproduced verbatim. Note the DSR **cleared** its bar (0.943 > 0.925) and the challenger was still rejected: acceptance needs the optimized spread to beat equal weight *as well*, and it didn't (+4.8%/yr against +8.1%/yr). Two conditions, both required.
-
-Read `ACCEPTED` vs `REJECTED` first: on a reject the system silently runs equal weight, and the reported numbers then describe equal weight rather than the challenger that was turned down. The `CONFIDENCE: LOW` line is permanent, not a placeholder — four fiscal years cannot support a significance claim, and a tidy top-10 list otherwise implies more than the data does.
-
-The block is read from the `validation` section of `optimization_results_panel.json`, so the one file you already copy to the Pi carries it. A Pi holding an older file, or none, prints a short "unknown" notice and still sends a complete email.
-
----
-
-## Weight variants
-
-```bash
-uv run python3 main.py --no-opt     # Use hardcoded default weights (ignore optimizer output)
-uv run python3 main.py --use-panel  # Force the panel challenger's out-of-sample-validated weights
-```
-
-Default (no flag): reads `optimization_results_panel.json` when it exists — the out-of-sample, Deflated-Sharpe-Ratio-gated result (run `--backfill-panel` then `--optimize` once, see Workflow above) — falling back to hardcoded `metrics.py` defaults. `--use-panel` is the same thing, stated explicitly.
+That is the block from the first `--evaluate` run. OMXS30 GI only covers 4 of the 7 years, because Avanza serves ~5 years of index history. The `CONFIDENCE: LOW` line is permanent, not a placeholder: seven fiscal years cannot support a significance claim. A Pi without the file, or still holding the old `optimization_results_panel.json`, prints a short "unknown" notice and still sends a complete email.
 
 ---
 
@@ -373,7 +355,7 @@ Default (no flag): reads `optimization_results_panel.json` when it exists — th
 | `--watchlists NAME ...` | Personal Avanza watchlists to analyze |
 | `--preset NAME ...` | Built-in presets: `omxs30`, `omxs-mid` |
 | `--save` | Save today's metric snapshot to `data/` |
-| `--optimize` | Run the panel challenger gate and write `optimization_results_panel.json` (needs `--backfill-panel` first) |
+| `--evaluate` | Is the score useful? Variants vs universe, vs OMXS30 GI / MSCI World, and equal vs min-var vs max-Sharpe; writes `evaluation_results.json` (needs `--backfill-panel` first; `--optimize` is an alias) |
 | `--backfill-panel` | Build the fiscal-year panel from `data/*.csv` (writes `data/panel_fundamentals.csv` + `data/panel_scores.csv`) |
 | `--backfill-prices` | Mac-only one-time step: fetch Yahoo dividend-adjusted closes into `data/yahoo_prices/`, verified against the Avanza prices in your snapshots. Lifts the panel from 4 fiscal years to 7. Resumable |
 | `--prices-from YYYY-MM-DD` | Earliest date for `--backfill-prices` (default `2015-01-01`) |
@@ -383,10 +365,6 @@ Default (no flag): reads `optimization_results_panel.json` when it exists — th
 | `--fetch-fx` | Mac-only manual step: cache ECB daily rates to `data/fx_sek.csv` so forward returns are computed in SEK. Idempotent |
 | `--fx-from YYYY-MM-DD` | Earliest date for `--fetch-fx` (default `2015-01-01`) |
 | `--validate` | Run the cross-sectional validation battery against `data/panel_scores.csv` |
-| `--challenger-confidence X` | Deflated Sharpe Ratio bar the panel challenger must clear to accept optimized weights (default 0.925) |
-| `--permutations N` | Refits on shuffled targets used to measure the gate's null distribution (default 200; 0 skips) |
-| `--no-opt` | Ignore saved weights, use hardcoded defaults |
-| `--use-panel` | Force the panel challenger's out-of-sample-validated weights |
 | `--push` | Push top-scoring stocks to an Avanza watchlist |
 | `--push-to NAME` | Which watchlist to push to (default: `Bör köpa`) |
 | `--push-top N` | How many stocks to push (default: 25 — breadth, see below) |

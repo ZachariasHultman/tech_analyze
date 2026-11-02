@@ -1,19 +1,14 @@
 """Pure statistical helpers for the panel-validation pipeline.
 
 Deliberately decoupled from panel.py / correlation.py / SummaryManager / any
-CSV: Fama-MacBeth (used by validation) and the Deflated Sharpe Ratio (used by
-the optimizer gate) are the same *kind* of code — closed-form / numpy.linalg +
-scipy.stats — so they live together and stay directly testable on hand-computed
-fixtures. No new dependency: numpy + scipy only (both already pinned).
+CSV: Fama-MacBeth (used by validation) is closed-form numpy.linalg +
+scipy.stats, directly testable on hand-computed fixtures. No new dependency:
+numpy + scipy only (both already pinned).
 """
 
 import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
-
-# Euler-Mascheroni constant (Bailey & Lopez de Prado extreme-value approx.)
-_EULER_MASCHERONI = 0.5772156649015329
-
 
 def per_period_ols(X, y, min_obs=None):
     """One cross-section's OLS via numpy.linalg.lstsq (adds its own intercept).
@@ -111,109 +106,4 @@ def fama_macbeth(panel_df, x_cols, y_col, period_col, standardize=True):
         "per_factor": per_factor,
         "n_periods_used": n_used,
         "n_periods_skipped": n_skipped,
-    }
-
-
-def expected_max_sharpe_under_trials(sigma_sr, n_trials):
-    """Expected maximum of ``n_trials`` independent noise Sharpe draws.
-
-    Bailey & Lopez de Prado's Euler-Mascheroni extreme-value approximation::
-
-        E[max] ~ sigma_sr * ((1-g) * Z^-1(1 - 1/N) + g * Z^-1(1 - 1/(N*e)))
-
-    with ``g`` the Euler-Mascheroni constant and ``Z^-1`` the standard-normal
-    ppf. Returns 0.0 for ``n_trials < 2`` (no multiple-testing inflation with a
-    single trial) and clamps a non-positive ``sigma_sr`` to 0.0.
-    """
-    n = int(n_trials)
-    if n < 2 or sigma_sr is None or sigma_sr <= 0:
-        return 0.0
-    g = _EULER_MASCHERONI
-    z1 = sp_stats.norm.ppf(1.0 - 1.0 / n)
-    z2 = sp_stats.norm.ppf(1.0 - 1.0 / (n * np.e))
-    return float(sigma_sr * ((1.0 - g) * z1 + g * z2))
-
-
-def probabilistic_sharpe_ratio(sr_hat, sr_benchmark, t_periods, skew, kurtosis):
-    """Probabilistic Sharpe Ratio: P(true SR > benchmark) given estimation noise.
-
-        PSR = Phi( (SR_hat - SR_bench) * sqrt(T - 1)
-                   / sqrt(1 - skew*SR_hat + ((kurtosis - 1)/4) * SR_hat^2) )
-
-    ``kurtosis`` is the full (non-excess) kurtosis (3 for a normal). Returns NaN
-    if fewer than 2 periods or a non-positive denominator.
-    """
-    if t_periods is None or t_periods < 2:
-        return float("nan")
-    denom_sq = 1.0 - skew * sr_hat + ((kurtosis - 1.0) / 4.0) * sr_hat ** 2
-    if denom_sq <= 0:
-        return float("nan")
-    z = (sr_hat - sr_benchmark) * np.sqrt(t_periods - 1) / np.sqrt(denom_sq)
-    return float(sp_stats.norm.cdf(z))
-
-
-def deflated_sharpe_ratio(trial_objectives, selected_return_series,
-                          sigma_sr_override=None, sr_benchmark_override=None,
-                          n_trials_override=None):
-    """Deflated Sharpe Ratio: PSR with a multiple-testing-corrected benchmark.
-
-    ``trial_objectives`` is every distinct candidate value the grid sweep
-    evaluated — a proxy Sharpe-like statistic, not literal per-trial return
-    series (the optimizer's objective is already a cross-validated scalar). Its
-    count is the "N trials" for the deflation and its dispersion estimates the
-    noise scale; the expected-max-under-N-trials becomes the PSR benchmark.
-    ``selected_return_series`` is the chosen strategy's realized per-period
-    returns, from which SR_hat, skew and kurtosis are measured.
-
-    **The overrides are the honest path.** Derived from ``trial_objectives``,
-    ``sigma_sr`` is the dispersion of the objective across grid *candidates* —
-    not the sampling noise of a Sharpe estimate, which is what the formula
-    wants. It therefore moves with how the search was configured rather than
-    with how much evidence there is: a wider grid inflates it, and duplicate
-    candidates (the panel search produced 90 distinct values out of 1221
-    evaluations) deflate it. ``permutation_benchmark`` measures both
-    quantities directly instead; pass its results through
-    ``sigma_sr_override`` / ``sr_benchmark_override`` / ``n_trials_override``.
-    The approximation is kept for callers with no permutation budget.
-
-    Returns a dict including ``significant_at_95``.
-    """
-    trials = np.asarray(pd.Series(trial_objectives, dtype=float).dropna())
-    n_trials = int(n_trials_override if n_trials_override is not None
-                   else trials.size)
-    if sigma_sr_override is not None:
-        sigma_sr = float(sigma_sr_override)
-    else:
-        sigma_sr = float(np.std(trials, ddof=1)) if trials.size > 1 else 0.0
-    if sr_benchmark_override is not None:
-        sr_benchmark = float(sr_benchmark_override)
-    else:
-        sr_benchmark = expected_max_sharpe_under_trials(sigma_sr, n_trials)
-
-    ret = np.asarray(pd.Series(selected_return_series, dtype=float).dropna())
-    t_periods = int(ret.size)
-    sd = float(np.std(ret, ddof=1)) if t_periods > 1 else 0.0
-    if t_periods < 2 or sd == 0:
-        return {
-            "dsr": float("nan"),
-            "sr_hat": float("nan"),
-            "sr_benchmark": sr_benchmark,
-            "sigma_sr": sigma_sr,
-            "n_trials": n_trials,
-            "t_periods": t_periods,
-            "significant_at_95": False,
-        }
-
-    sr_hat = float(np.mean(ret) / sd)
-    skew = float(sp_stats.skew(ret))
-    kurtosis = float(sp_stats.kurtosis(ret, fisher=False))
-    dsr = probabilistic_sharpe_ratio(sr_hat, sr_benchmark, t_periods, skew, kurtosis)
-    return {
-        "dsr": dsr,
-        "sr_hat": sr_hat,
-        "sr_benchmark": sr_benchmark,
-        "sigma_sr": sigma_sr,
-        "n_trials": n_trials,
-        "t_periods": t_periods,
-        "significant_at_95": bool(dsr > 0.95) if not np.isnan(dsr) else False,
     }

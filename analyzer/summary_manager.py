@@ -356,7 +356,7 @@ class SummaryManager:
         return True
 
     def _assign_weight(self, metric):
-        # Allow optimizer to override weights at runtime
+        # Live and the panel set equal weights here (correlation.equal_metric_weights)
         if hasattr(self, "_weight_overrides") and self._weight_overrides:
             return self._weight_overrides.get(metric, 0)
         if metric in HIGHEST_WEIGHT_METRICS:

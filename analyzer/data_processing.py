@@ -237,7 +237,7 @@ def get_data(
 
 
 # Coverage warnings already emitted this process. Module-level so it survives
-# across the many calculate_score calls one --optimize run makes;
+# across the many calculate_score calls one --backfill-panel run makes;
 # reset_coverage_warnings() exists so tests never leak state into each other.
 _COVERAGE_WARNINGS_SEEN: set = set()
 
@@ -313,9 +313,9 @@ def calculate_score(manager, metrics_to_score=None, use_cross_sectional_ranks=Tr
                     skipped_metrics.append(col)
 
             if skipped_metrics:
-                # Deduped: scoring is re-run once per candidate during
-                # --optimize (folds x permutations x coordinate-descent
-                # steps), and the coverage of a given cross-section never
+                # Deduped: scoring is re-run many times over the same
+                # cross-sections (the panel scores each year twice, and the
+                # removed optimizer did so per candidate), and coverage never
                 # changes between those calls, so the undeduped line printed
                 # the same fact hundreds of times and buried the gate result.
                 msg = (

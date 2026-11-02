@@ -101,7 +101,7 @@ from analyzer.historical_calc import (
     _to_pct,
     _build_ticker_dicts,
 )
-from analyzer.correlation import _all_scored_metrics, _score_snapshot
+from analyzer.correlation import _all_scored_metrics, _score_snapshot, equal_metric_weights
 from analyzer.financial_metrics import (
     calculate_revenue_y_cagr,
     calculate_eps_y_cagr,
@@ -460,33 +460,6 @@ def drop_thin_years(df, return_col, min_n=MIN_CROSS_SECTION,
     return df[df["fiscal_year"].isin(keep)].copy()
 
 
-def load_gate_panel(scores_path="data/panel_scores.csv",
-                    fundamentals_path="data/panel_fundamentals.csv"):
-    """Merge the raw-metric fundamentals panel with the scored panel's forward
-    excess return, keyed on (company_id, fiscal_year), keeping only rows with a
-    real 1-year forward excess return.
-
-    The result carries the raw metric/base columns (so the optimizer can
-    re-score with candidate weights via _score_with_weights) plus
-    fwd_excess_return_1y (the target) and a "company" column for the scorer's
-    index. Used only by the panel challenger gate in correlation.py.
-    """
-    fundamentals = pd.read_csv(fundamentals_path)
-    fundamentals.columns = fundamentals.columns.str.strip()
-    scores = pd.read_csv(scores_path)
-    scores.columns = scores.columns.str.strip()
-    ret = scores[["company_id", "fiscal_year", "fwd_excess_return_1y"]]
-    merged = fundamentals.merge(ret, on=["company_id", "fiscal_year"], how="left")
-    if "company" not in merged.columns:
-        merged["company"] = merged["company_id"]
-    # Year filtering runs BEFORE dropping target-less rows: those rows are the
-    # denominator for the coverage test. Filtering here covers the challenger
-    # gate and both panel optimizers at once -- all three source their panel
-    # through this function.
-    merged = drop_thin_years(merged, "fwd_excess_return_1y", label="gate")
-    return merged[merged["fwd_excess_return_1y"].notna()].copy()
-
-
 def forward_dividend_yield(dps_df, report_date, price_at_report):
     """Dividends paid in ``(report_date, report_date + 1y]``, as a yield.
 
@@ -705,7 +678,7 @@ def build_scores_panel(fundamentals_df, data_dir="data") -> pd.DataFrame:
         # --- Step 1: score this year's cross-section, twice (per-year only) ---
         scored_eq = _score_snapshot(
             df_fy, metrics_to_score=metrics,
-            weight_overrides={m: 1.0 for m in metrics},
+            weight_overrides=equal_metric_weights(),
         )
         scored_tier = _score_snapshot(df_fy, metrics_to_score=metrics)
         eq_score_cols = [c for c in scored_eq.columns if c.endswith("_score")]
@@ -792,7 +765,7 @@ def build_scores_panel(fundamentals_df, data_dir="data") -> pd.DataFrame:
 
         # --- Step 3: demean within this fiscal year ---
         # fwd_excess_return_1y is the target every downstream consumer reads
-        # (the optimizers, the challenger gate, validation), and it is now
+        # (--evaluate, validation), and it is now
         # TOTAL return. The price-only version is kept alongside under an
         # explicit name so nothing can read a stale meaning by accident.
         def _demean(key):

@@ -4,8 +4,8 @@
 #  metrics.py is gitignored and load-bearing — every module imports
 #  RATIO_SPECS, DIRECTION_OVERRIDES, weight tiers, and thresholds from it.
 #  To set up on a new machine: `cp analyzer/metrics.example.py analyzer/metrics.py`
-#  and tune the placeholder numbers below to taste (or rely on the JSON
-#  optimization_results_*.json overrides loaded at runtime by main.py).
+#  and tune the placeholder numbers below to taste. The weight tiers only
+#  decide *which* metrics are scored; live and the panel weight them equally.
 #
 #  All metric *names* here are real (already public via summary_manager.py's
 #  templates); all thresholds/weights/currency-map entries are placeholders.
