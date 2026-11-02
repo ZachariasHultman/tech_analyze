@@ -58,8 +58,9 @@ def test_ranks_by_points_not_combined_score(capsys):
     out = capsys.readouterr().out
     assert "r=" not in out
     assert "reliability" not in out.lower()
-    # combined is still reported, it just no longer decides the order
-    assert "(pts=+1.00, q=0.80, v=0.70, combined=0.56)" in out
+    # combined is no longer shown -- it decides nothing
+    assert "(pts=+1.00, q=0.80, v=0.70)" in out
+    assert "combined=" not in out
 
 
 def test_removed_stock_still_shows_full_metrics(capsys):
@@ -79,7 +80,7 @@ def test_removed_stock_still_shows_full_metrics(capsys):
 
     out = capsys.readouterr().out
     assert "Removed 1 stock(s)" in out
-    assert "q=0.20, v=0.10, combined=0.02" in out
+    assert "q=0.20, v=0.10)" in out
 
 
 def test_push_top_defaults_to_a_quintile_not_a_handful():
@@ -129,7 +130,7 @@ def test_ranks_by_blend_when_present(capsys):
 
     assert [r[0] for r in result["added"]] == ["Beta AB 222", "Alpha AB 111"]
     out = capsys.readouterr().out
-    assert "rank=0.68" in out and "mom=0.95" in out
+    assert "score=0.68" in out and "mom=0.95" in out
     # pts is still reported -- it just no longer decides the order
     assert "pts=+2.00" in out
 

@@ -181,3 +181,22 @@ def test_email_has_html_part_with_table_in_the_same_place(sent_email):
     assert (html_body.index("CONSIDER BUYING") < html_body.index("<table>")
             < html_body.index("CONSIDER SELLING"))
     assert "<pre" in html_body
+
+
+def test_buy_list_is_an_html_table_labelled_score(sent_email):
+    import email as email_mod
+    captured, tmp_path = sent_email
+    _write_weights(tmp_path)
+    push = dict(_PUSH, added=[("Tele2 B 5386", 3.0, 0.81, 0.85, 0.69, 0.91, 0.88)],
+                removed=[("Old AB 999", -1.0, 0.2, 0.3, 0.06, 0.2, 0.1)])
+    main_mod._send_email(push, [])
+    parsed = email_mod.message_from_string(captured["mime"])
+    part = [p for p in parsed.walk() if p.get_content_type() == "text/html"][0]
+    body = part.get_payload(decode=True).decode("utf-8")
+    buy = body[body.index("CONSIDER BUYING"):]
+    assert buy.index("<table") < buy.index("Tele2 B")
+    assert "5386" not in buy and "Score" in buy and "ranking key" in buy
+    assert "NEW" in buy and "Removed from list (1)" in buy and "Old AB" in buy
+    assert "combined" not in body.lower()
+    # text part names it too
+    assert "score=0.91" in captured["raw"] and "combined=" not in captured["raw"]

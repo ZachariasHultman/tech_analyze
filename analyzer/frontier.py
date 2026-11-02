@@ -9,7 +9,7 @@ costs no extra API calls and needs no ``--save``.
   only the covariance, never an expected return, which is why it is the robust
   one: covariances are estimable from 5 years of weekly data, mean returns are
   not.
-* **Max-Sharpe (uses rank)** -- the best expected excess return per unit of
+* **Max-Sharpe (uses score)** -- the best expected excess return per unit of
   risk, with the screener's ``blend_score`` as the expected return via
   Grinold-Kahn: ``alpha_i = IC * sigma_i * z_i``. Historical mean returns are
   deliberately never used -- they are backward-looking and the panel measured
@@ -260,11 +260,11 @@ def _footnotes(p):
     notes = [
         f"Cap {p['cap'] * 100:.0f}% per stock. {p['weeks']} weeks of Avanza closes "
         f"{p['start']}..{p['end']}, in SEK, Ledoit-Wolf shrinkage {p['delta']:.2f}.",
-        f"Exp. return = IC {ASSUMED_IC} x vol x rank z-score, i.e. excess vs the "
+        f"Exp. return = IC {ASSUMED_IC} x vol x score z-score, i.e. excess vs the "
         "average scored stock, not a forecast of the market.",
     ]
     if not p["maxsharpe"]:
-        notes.append("B not computed: no usable rank for these stocks.")
+        notes.append("B not computed: no usable score for these stocks.")
     if p["unconverted"]:
         notes.append("[!] No FX rate, left in listing currency: "
                      + ", ".join(map(display_name, p["unconverted"])))
@@ -283,10 +283,10 @@ def format_portfolios(p):
 
     lines += [
         "  A = MIN-VARIANCE (robust): lowest-risk mix. Uses only how the",
-        "      stocks have moved together -- ignores the screener rank.",
-        "  B = MAX-SHARPE (uses rank): best expected return per unit of",
-        "      risk, with the screener rank as expected return. Less robust:",
-        "      leans on the rank being right.",
+        "      stocks have moved together -- ignores the screener score.",
+        "  B = MAX-SHARPE (uses score): best expected return per unit of",
+        "      risk, with the screener score as expected return. Less robust:",
+        "      leans on the score being right.",
         "",
     ]
     rows, zero = _weight_rows(p)
@@ -327,9 +327,9 @@ def format_portfolios_html(p):
     out.append(
         '<p style="font-family:sans-serif;font-size:13px;margin:0 0 10px;line-height:1.5">'
         "<b>A = Min-variance (robust)</b>: lowest-risk mix. Uses only how the stocks "
-        "have moved together &mdash; ignores the screener rank.<br>"
-        "<b>B = Max-Sharpe (uses rank)</b>: best expected return per unit of risk, with "
-        "the screener rank as expected return. Less robust: leans on the rank being right."
+        "have moved together &mdash; ignores the screener score.<br>"
+        "<b>B = Max-Sharpe (uses score)</b>: best expected return per unit of risk, with "
+        "the screener score as expected return. Less robust: leans on the score being right."
         "</p>")
     t = ['<table style="border-collapse:collapse;font-family:sans-serif;font-size:13px">',
          "<tr>"
@@ -337,7 +337,7 @@ def format_portfolios_html(p):
          f'<th style="{_TH}">A &nbsp;Min-variance<br><span style="font-weight:normal;'
          'color:#666">robust</span></th>'
          f'<th style="{_TH}">B &nbsp;Max-Sharpe<br><span style="font-weight:normal;'
-         'color:#666">uses rank</span></th></tr>']
+         'color:#666">uses score</span></th></tr>']
     for label, a, b in _summary_rows(p):
         t.append(f'<tr style="background:#f0f0f0"><td style="{_TDL}"><b>{e(label)}</b></td>'
                  f'<td style="{_TD}"><b>{e(a)}</b></td><td style="{_TD}"><b>{e(b)}</b></td></tr>')

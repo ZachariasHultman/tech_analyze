@@ -184,10 +184,12 @@ def _fmt_scored_row(prefix, r):
         return f"{prefix} {name}  (not scored this run)"
     pts_str = f"{pts:+.2f}" if pd.notna(pts) else "N/A"
     head = f"{prefix} {name}  ("
+    # "score" is blend_score -- renamed on display only, the column keeps its
+    # name for the panel and validation. combined_score is no longer shown: it
+    # decides nothing (the gate reads q and v directly).
     if pd.notna(blend):
-        head += f"rank={blend:.2f}, mom={mom:.2f}, " if pd.notna(mom) else f"rank={blend:.2f}, "
-    return (f"{head}pts={pts_str}, q={qual:.2f}, v={val:.2f}, "
-            f"combined={cscore:.2f})")
+        head += f"score={blend:.2f}, mom={mom:.2f}, " if pd.notna(mom) else f"score={blend:.2f}, "
+    return f"{head}pts={pts_str}, q={qual:.2f}, v={val:.2f})"
 
 
 # Weights older than this are flagged in the email; the panel only gains a
@@ -367,19 +369,19 @@ def _format_optimizer_status(status):
     return lines
 
 
-# Shared explainer for q/v/combined, printed in both the terminal watchlist
+# Shared explainer for the row fields, printed in both the terminal watchlist
 # report and the email summary.
 LEGEND_LINES = [
-    "rank = the ranking key: 50% price-vs-SMA200 percentile, 50% pts percentile",
-    "       (IC +0.118 over 7 fiscal years, p=0.052, positive 7 of 7, vs",
+    "score = THE ranking key (blend_score internally): 50% momentum percentile",
+    "        + 50% fundamentals (pts) percentile, 0-1 vs all scored stocks.",
+    "        (IC +0.118 over 7 fiscal years, p=0.052, positive 7 of 7, vs",
     "        +0.081 p=0.078 for pts alone; top-25 basket +6.36%/yr excess",
     "        but only p=0.146 -- the ordering is the solid part, not the tail)",
-    "mom = price vs its own SMA200, as a peer percentile (0-1)",
-    "q = quality percentile (0-1, peer-ranked business health)",
-    "v = value percentile (0-1, peer-ranked cheapness)",
-    "pts = summed metric score -- the fundamental half of rank, and still",
+    "mom = momentum: price vs its own SMA200, as a peer percentile (0-1)",
+    "pts = fundamentals: summed metric score -- the other half of score, and",
     "      what the sell-signal deterioration check reads",
-    "combined = q x v -- shown for context, and the sleeve gate still applies",
+    "q = quality percentile, v = value percentile (0-1, peer-ranked); both",
+    "    must be >= 0.40 to qualify at all",
 ]
 
 
@@ -720,6 +722,55 @@ def _portfolio_section(manager, push_results):
                 f"<h3>PORTFOLIO WEIGHTS</h3><p>{html.escape(msg)}</p>")
 
 
+_TH = "padding:6px 10px;text-align:right;border-bottom:2px solid #444;"
+_TD = "padding:4px 10px;text-align:right;font-variant-numeric:tabular-nums;"
+_TDL = "padding:4px 10px;text-align:left;"
+
+
+def _buy_table_html(n, rows, added_set, removed):
+    """The CONSIDER BUYING list as an HTML table, same rows and order as the
+    text part. Inline styles only -- Gmail strips <style> blocks."""
+    from analyzer.frontier import display_name
+    e = html.escape
+
+    def _f(x, fmt):
+        return format(x, fmt) if x is not None and pd.notna(x) else "–"
+
+    cols = ["", "Stock", "Score", "Momentum", "Pts", "Quality", "Value"]
+    sub = ["", "", "ranking key", "50% of score", "50% of score", "", ""]
+
+    def _tr(tag, r, bg, color=""):
+        name, pts, q, v = r[:4]
+        blend = r[5] if len(r) > 5 else None
+        mom = r[6] if len(r) > 6 else None
+        cells = [e(tag), e(display_name(name)), f"<b>{_f(blend, '.2f')}</b>",
+                 _f(mom, ".2f"), _f(pts, "+.2f"), _f(q, ".2f"), _f(v, ".2f")]
+        tds = "".join(f'<td style="{_TDL if i < 2 else _TD}{color}">{c}</td>'
+                      for i, c in enumerate(cells))
+        return f'<tr style="background:{bg}">{tds}</tr>'
+
+    head = "".join(
+        f'<th style="{_TH}{"text-align:left;" if i < 2 else ""}">{e(c)}'
+        + (f'<br><span style="font-weight:normal;color:#666">{e(s)}</span>' if s else "")
+        + "</th>"
+        for i, (c, s) in enumerate(zip(cols, sub)))
+    out = [f'<h3 style="margin:24px 0 6px;font-family:sans-serif">'
+           f"CONSIDER BUYING (top {n} by score)</h3>",
+           '<table style="border-collapse:collapse;font-family:sans-serif;font-size:13px">',
+           f"<tr>{head}</tr>"]
+    for i, r in enumerate(rows):
+        tag = "NEW" if r[0] in added_set else ""
+        out.append(_tr(tag, r, "#fafafa" if i % 2 else "#ffffff"))
+    if removed:
+        out.append(f'<tr><td colspan="7" style="{_TDL}padding-top:14px;'
+                   f'border-bottom:1px solid #ccc"><b>Removed from list '
+                   f"({len(removed)})</b></td></tr>")
+        for r in removed:
+            out.append(_tr("−", r, "#ffffff", "color:#888;"))
+    out.append("</table>")
+    return "\n".join(out)
+
+
 def _send_email(push_results: dict | None, sell_signals: list[dict],
                 portfolio_lines: list[str] | None = None,
                 portfolio_html: str | None = None) -> None:
@@ -756,10 +807,12 @@ def _send_email(push_results: dict | None, sell_signals: list[dict],
         lines.extend(LEGEND_LINES)
         lines.append("")
 
+    buy_html = ""
+    buy_start = len(lines)  # the HTML part swaps lines[buy_start:] for a table
     if push_results:
         n = push_results["top_n"]
         lines.append("=" * 50)
-        lines.append(f"  CONSIDER BUYING (top {n} by rank)")
+        lines.append(f"  CONSIDER BUYING (top {n} by score)")
         lines.append("=" * 50)
 
         top10 = push_results["added"] + push_results["already"]
@@ -782,6 +835,7 @@ def _send_email(push_results: dict | None, sell_signals: list[dict],
             lines.append(f"\nRemoved from list ({len(push_results['removed'])}):")
             for r in push_results["removed"]:
                 lines.append(f"  {_fmt_scored_row('-', r)}")
+        buy_html = _buy_table_html(n, top10, added_set, push_results["removed"])
 
     # Split around the portfolio block: the text part splices its lines in,
     # the HTML part a real table, with everything else in a monospace <pre>
@@ -807,7 +861,8 @@ def _send_email(push_results: dict | None, sell_signals: list[dict],
         return ('<pre style="font-family:Menlo,Consolas,monospace;font-size:12px">'
                 + html.escape("\n".join(block)) + "</pre>")
 
-    html_body = ("<html><body>" + _pre(head)
+    html_body = ("<html><body>"
+                 + (_pre(head[:buy_start]) + buy_html if buy_html else _pre(head))
                  + (portfolio_html or (_pre(portfolio_lines) if portfolio_lines else ""))
                  + _pre(tail) + "</body></html>")
 
