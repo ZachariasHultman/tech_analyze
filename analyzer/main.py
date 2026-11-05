@@ -622,7 +622,8 @@ def _portfolio_section(manager, push_results, avanza=None):
         p = frontier.build_portfolios(
             hist, ccys, blend_all, names, rates, core_close=core,
             satellite_share=SATELLITE_SHARE if core is not None else 1.0,
-            tax_drag=drag)
+            tax_drag=drag,
+            sectors={n: manager.sector_group.get(n) for n in names})
         if p is not None and p.get("core"):
             p["core"]["label"] = CORE_LABEL
         if avanza is not None:
@@ -1295,6 +1296,7 @@ def main():
         ki = ticker_info.get("keyIndicators") or {}
         manager.div_yield[ticker_name] = ki.get("directYield")
         manager.domicile[ticker_name] = str(ticker_info.get("isin") or "")[:2] or None
+        manager.sector_group[ticker_name] = frontier.sector_group(ticker_info.get("sectors"))
         if save_data:
             save_snapshot(
                 hist,

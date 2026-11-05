@@ -324,6 +324,8 @@ class SummaryManager:
         # withholding-tax drag in the max-Sharpe portfolio.
         self.div_yield = {}
         self.domicile = {}
+        # Industry group (frontier.sector_group) for the per-sector cap.
+        self.sector_group = {}
 
         # ---- STANDARD TEMPLATE (sector-agnostic) ----
         self.template = {

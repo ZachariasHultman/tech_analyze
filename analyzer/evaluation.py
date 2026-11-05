@@ -30,8 +30,11 @@ The panel's scores use equal metric weights (panel.build_scores_panel), which
 is exactly what live runs now -- the backtest is of the system as deployed.
 """
 
+import csv
+import glob
 import json
 import os
+import sys
 
 import numpy as np
 import pandas as pd
@@ -42,6 +45,7 @@ from analyzer.config import CORE_MIX, SATELLITE_SHARE, SLEEVE_GATE_MIN
 from analyzer.summary_manager import one_per_company
 from analyzer.frontier import (
     CORE_KEY, WEIGHT_CAP, _solve, common_weekly_returns, grinold_alpha, ledoit_wolf,
+    sector_group,
 )
 
 TARGET = "fwd_excess_return_1y"   # total return, SEK, demeaned within year
@@ -180,7 +184,34 @@ def _path_stats(weekly, w):
     return vol, dd
 
 
-def _core_aware_weights(hist, kept, core_close, decision, lookback, alpha_src, cap):
+def load_sector_groups(data_dir="data"):
+    """``{company_id: industry group}`` from each company's latest snapshot.
+    Today's classification for every year: a company rarely changes industry,
+    and the cap only needs the grouping, not anything priced."""
+    csv.field_size_limit(sys.maxsize)
+    latest = {}
+    for path in glob.glob(os.path.join(data_dir, "*_*.csv")):
+        stem = os.path.basename(path)[:-4]
+        if stem.startswith("panel_"):
+            continue
+        key, _, snap = stem.rpartition("_")
+        if key and (key not in latest or snap > latest[key][0]):
+            latest[key] = (snap, path)
+    out = {}
+    for key, (_, path) in latest.items():
+        try:
+            with open(path, newline="") as f:
+                row = next(csv.DictReader(f), None)
+        except (OSError, csv.Error):
+            continue
+        g = sector_group(row.get("sector")) if row else None
+        if g:
+            out[key] = g
+    return out
+
+
+def _core_aware_weights(hist, kept, core_close, decision, lookback, alpha_src, cap,
+                        groups=None):
     """A and B optimised for core + satellite, on the same ``kept`` names, or
     {} when the core's history does not cover the window. Kept separate from
     the satellite-alone fit so adding the core can never change which names
@@ -195,15 +226,15 @@ def _core_aware_weights(hist, kept, core_close, decision, lookback, alpha_src, c
     n = len(kept)
     S = S_full[:n, :n]
     core = (S_full[:n, n], float(S_full[n, n]), 1.0 - SATELLITE_SHARE, SATELLITE_SHARE)
-    out = {"minvar_core": _solve(S, cap, core=core)}
+    out = {"minvar_core": _solve(S, cap, core=core, groups=groups)}
     alpha = grinold_alpha(alpha_src, np.sqrt(np.diag(S) * WEEKS_PER_YEAR), kept)
     if alpha is not None and np.any(alpha > 0):
-        out["maxsharpe_core"] = _solve(S, cap, alpha, core=core)
+        out["maxsharpe_core"] = _solve(S, cap, alpha, core=core, groups=groups)
     return out
 
 
 def weighting_backtest(df, closes_sek, benches, top_n=TOP_N, cap=WEIGHT_CAP,
-                       core_close=None):
+                       core_close=None, sectors=None):
     """Layer 3: the live basket as equal / min-variance / max-Sharpe.
 
     All three run on the same subset -- basket names with enough verified
@@ -231,13 +262,14 @@ def weighting_backtest(df, closes_sek, benches, top_n=TOP_N, cap=WEIGHT_CAP,
         S, delta = ledoit_wolf(rets.to_numpy())
         sigma = np.sqrt(np.diag(S) * WEEKS_PER_YEAR)
         alpha = grinold_alpha(g.set_index("company_id")[LIVE_KEY], sigma, kept)
+        groups = [sectors.get(c) for c in kept] if sectors else None
         weights = {"equal": np.full(len(kept), 1.0 / len(kept)),
-                   "minvar": _solve(S, cap)}
+                   "minvar": _solve(S, cap, groups=groups)}
         if alpha is not None and np.any(alpha > 0):
-            weights["maxsharpe"] = _solve(S, cap, alpha)
+            weights["maxsharpe"] = _solve(S, cap, alpha, groups=groups)
         weights.update(_core_aware_weights(
             hist, kept, core_close, decision, lookback,
-            g.set_index("company_id")[LIVE_KEY], cap))
+            g.set_index("company_id")[LIVE_KEY], cap, groups))
 
         # Realised path over the median row's window -- an approximation,
         # since each row's own window is staggered around it.
@@ -308,7 +340,8 @@ def run_evaluation(scores_path="data/panel_scores.csv", out_path=RESULTS_PATH,
         "return_basis": "total return in SEK; excess = vs universe mean that year",
         **score_usefulness(df, benches, top_n),
         "weighting": weighting_backtest(df, closes_sek, benches, top_n,
-                                        core_close=core),
+                                        core_close=core,
+                                        sectors=load_sector_groups(data_dir)),
     }
     print("\n".join(format_report(result)))
     with open(out_path, "w") as f:

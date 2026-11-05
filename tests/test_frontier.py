@@ -387,3 +387,66 @@ def test_drag_moves_max_sharpe_but_never_min_variance():
     assert taxed["maxsharpe"]["weights"]["S0"] < base["maxsharpe"]["weights"]["S0"]
     assert taxed["minvar"]["weights"].to_dict() == pytest.approx(
         base["minvar"]["weights"].to_dict())
+
+
+# --- per-sector cap -------------------------------------------------------
+
+from analyzer.frontier import sector_group
+
+
+def test_sector_group_reads_middle_level_from_list_or_json():
+    lvls = [{"sectorId": "99", "sectorName": "Bioteknik"},
+            {"sectorId": "17", "sectorName": "Bioteknik & Läkemedel"},
+            {"sectorId": "15", "sectorName": "Hälsovård"}]
+    assert sector_group(lvls) == "Bioteknik & Läkemedel"
+    import json
+    assert sector_group(json.dumps(lvls)) == "Bioteknik & Läkemedel"
+    assert sector_group([{"sectorName": "Bank"}]) == "Bank"
+    assert sector_group(None) is None
+    assert sector_group("not json") is None
+    assert sector_group([]) is None
+
+
+def _calm_pharma():
+    # The four calmest names share a group: unconstrained, min-variance piles in.
+    # 8 others at the 15% cap hold 120%, so 30% on pharma stays feasible.
+    hist, ccy = _universe(n=12, vols=[0.004] * 4 + [0.02] * 8, seed=11)
+    sectors = {f"S{i}": ("Pharma" if i < 4 else f"Other{i}") for i in range(12)}
+    blend = pd.Series({f"S{i}": 0.9 - 0.05 * i for i in range(12)}
+                      | {"X1": 0.1, "X2": 0.2})
+    return hist, ccy, sectors, blend
+
+
+def test_sector_cap_binds_in_both_portfolios():
+    hist, ccy, sectors, blend = _calm_pharma()
+    pharma = [f"S{i}" for i in range(4)]
+    free = build_portfolios(hist, ccy, blend, list(hist), None, cap=0.15)
+    assert free["minvar"]["weights"][pharma].sum() > 0.30 + 1e-3
+    capped = build_portfolios(hist, ccy, blend, list(hist), None, cap=0.15,
+                              sectors=sectors, sector_cap=0.30)
+    for key in ("minvar", "maxsharpe"):
+        w = capped[key]["weights"]
+        assert w[pharma].sum() <= 0.30 + 1e-6
+        assert w.sum() == pytest.approx(1.0)
+        assert (w <= 0.15 + 1e-9).all()
+
+
+def test_no_sector_data_leaves_weights_unchanged():
+    hist, ccy, _, blend = _calm_pharma()
+    base = build_portfolios(hist, ccy, blend, list(hist), None, cap=0.15)
+    for sectors in (None, {}, {k: None for k in hist}):
+        p = build_portfolios(hist, ccy, blend, list(hist), None, cap=0.15,
+                             sectors=sectors)
+        for key in ("minvar", "maxsharpe"):
+            assert p[key]["weights"].to_dict() == pytest.approx(
+                base[key]["weights"].to_dict())
+
+
+def test_sector_cap_relaxes_when_too_few_groups():
+    hist, ccy, _, blend = _calm_pharma()
+    two = {f"S{i}": ("A" if i < 4 else "B") for i in range(12)}
+    p = build_portfolios(hist, ccy, blend, list(hist), None, cap=1.0,
+                         sectors=two, sector_cap=0.30)
+    w = p["minvar"]["weights"]
+    assert w.sum() == pytest.approx(1.0)
+    assert w[[f"S{i}" for i in range(4)]].sum() <= 0.50 + 1e-6

@@ -35,11 +35,14 @@ GBP by 100 for the Yahoo leg). Nothing here may raise into the live path.
 """
 
 import html
+import json
 import re
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
+
+from analyzer.config import SECTOR_CAP
 
 WEIGHT_CAP = 0.15
 # Below two years of common weekly history the covariance is too thin even
@@ -143,7 +146,51 @@ def ledoit_wolf(X):
     return delta * F + (1 - delta) * S, delta
 
 
-def _solve(S, cap, alpha=None, core=None):
+def sector_group(sectors):
+    """Avanza's ``sectors`` list (or its JSON string, as in a snapshot) ->
+    the middle level's name, falling back to the deepest level present.
+    None when there is no sector data."""
+    if isinstance(sectors, str):
+        try:
+            sectors = json.loads(sectors)
+        except ValueError:
+            return None
+    if not isinstance(sectors, list):
+        return None
+    names = [s.get("sectorName") for s in sectors
+             if isinstance(s, dict) and s.get("sectorName")]
+    if not names:
+        return None
+    return names[1] if len(names) > 1 else names[0]
+
+
+def _group_constraints(groups, cap, sector_cap):
+    """SLSQP inequality constraints keeping each group's weight under
+    ``sector_cap``, raised just enough to stay feasible when there are too few
+    groups to hold the whole book. Names without a group are unconstrained."""
+    if groups is None or sector_cap is None or sector_cap >= 1.0:
+        return [], None
+    idx = {}
+    for i, g in enumerate(groups):
+        if g is not None and not (isinstance(g, float) and np.isnan(g)):
+            idx.setdefault(g, []).append(i)
+    if not idx:
+        return [], None
+    singles = len(groups) - sum(len(v) for v in idx.values())
+
+    def capacity(sc):
+        return singles * cap + sum(min(sc, len(v) * cap) for v in idx.values())
+
+    sc = sector_cap
+    while capacity(sc) < 1.0 - 1e-9 and sc < 1.0:
+        sc = min(1.0, sc + 0.01)
+    cons = [{"type": "ineq", "fun": (lambda w, ii=np.array(v), c=sc: c - w[ii].sum()),
+             "jac": (lambda w, ii=np.array(v): -np.isin(np.arange(len(w)), ii).astype(float))}
+            for v in idx.values() if len(v) * cap > sc]
+    return cons, sc
+
+
+def _solve(S, cap, alpha=None, core=None, groups=None, sector_cap=SECTOR_CAP):
     """Long-only, capped satellite weights: min variance, or max Sharpe given
     alpha -- of the *total* portfolio when ``core`` is given.
 
@@ -153,9 +200,13 @@ def _solve(S, cap, alpha=None, core=None):
     ``w'Sw`` (k=0, s=1), so the no-core case is exactly the original solver.
     The core contributes no alpha: it is the market baseline the score's
     excess is measured against.
+
+    ``groups`` (one industry label per name, None for unknown) caps each
+    group's total at ``sector_cap``; without it the solver is unchanged.
     """
     n = S.shape[0]
     cap = max(cap, 1.0 / n)
+    group_cons, _ = _group_constraints(groups, cap, sector_cap)
     w0 = np.full(n, 1.0 / n)
     c, v_c, k, sh = core if core is not None else (np.zeros(n), 0.0, 0.0, 1.0)
 
@@ -176,7 +227,8 @@ def _solve(S, cap, alpha=None, core=None):
             return -(sh * alpha * v - sh * (w @ alpha) * dvar(w) / 2) / v ** 1.5
     res = minimize(fun, w0, jac=jac, method="SLSQP",
                    bounds=[(0.0, cap)] * n,
-                   constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1.0}],
+                   constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
+                   + group_cons,
                    options={"maxiter": 1000, "ftol": 1e-12})
     w = np.clip(res.x, 0.0, cap)
     return w / w.sum()
@@ -236,7 +288,8 @@ def withholding_drag(div_yields, domiciles, loss_by_country):
 
 
 def build_portfolios(price_hist, currencies, blend, names, rates, cap=WEIGHT_CAP,
-                     core_close=None, satellite_share=1.0, tax_drag=None):
+                     core_close=None, satellite_share=1.0, tax_drag=None,
+                     sectors=None, sector_cap=SECTOR_CAP):
     """Both portfolios for ``names``, or None when there is too little data.
 
     With ``core_close`` (a SEK price series of the funds the satellite sits
@@ -270,7 +323,8 @@ def build_portfolios(price_hist, currencies, blend, names, rates, cap=WEIGHT_CAP
         core = (S_full[:n, n], float(S_full[n, n]), 1.0 - satellite_share,
                 satellite_share)
 
-    w_mv = _solve(S, cap, core=core)
+    groups = [sectors.get(k) for k in kept] if sectors else None
+    w_mv = _solve(S, cap, core=core, groups=groups, sector_cap=sector_cap)
     out = {
         "names": kept,
         "weeks": len(rets),
@@ -290,7 +344,8 @@ def build_portfolios(price_hist, currencies, blend, names, rates, cap=WEIGHT_CAP
         out["core"] = {"share": 1.0 - satellite_share,
                        "vol": float(np.sqrt(core[1] * WEEKS_PER_YEAR))}
     if alpha is not None and np.any(alpha > 0):
-        w_ms = _solve(S, cap, alpha, core=core)
+        w_ms = _solve(S, cap, alpha, core=core, groups=groups,
+                      sector_cap=sector_cap)
         out["maxsharpe"] = {"weights": pd.Series(w_ms, kept),
                             **_stats(w_ms, S, alpha, core)}
     return out

@@ -147,6 +147,12 @@ EXCLUDED_SECTORS = {"Investmentbolag"}
 CORE_MIX = {"878733": 0.7, "633079": 0.3}
 CORE_LABEL = "70% Avanza Global + 30% OMXSGI"
 SATELLITE_SHARE = 0.30
+# Most of the satellite any one industry group may hold, in both A and B.
+# Group = the middle of Avanza's three sector levels (e.g. "Bioteknik &
+# Läkemedel", "Bank"): fine enough to keep pharma apart from medtech. The
+# weekly covariance sees a shared-shock risk (drug pricing, a patent cliff)
+# only if it happened inside the lookback, so it is capped explicitly.
+SECTOR_CAP = 0.30
 
 # Withholding tax lost on an ISK, as a fraction of the dividend, by the
 # issuer's domicile (ISIN prefix). On an ISK foreign withholding can be

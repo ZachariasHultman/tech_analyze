@@ -166,3 +166,17 @@ def test_core_aware_variants_need_core_history_and_keep_the_same_names():
     rec2 = weighting_backtest(df, closes, {}, core_close=late)["per_year"][0]
     assert "minvar_core" not in rec2
     assert rec2["minvar"]["weights"] == pytest.approx(rec["minvar"]["weights"])
+
+
+def test_load_sector_groups_reads_latest_snapshot(tmp_path):
+    import json
+    from analyzer.evaluation import load_sector_groups
+
+    def snap(name, sectors):
+        (tmp_path / name).write_text(
+            "sector,ohlc\n" + '"' + json.dumps(sectors).replace('"', '""') + '",x\n')
+    snap("Acme 1_2026-01-01.csv", [{"sectorName": "a"}, {"sectorName": "Old"}])
+    snap("Acme 1_2026-06-01.csv", [{"sectorName": "a"}, {"sectorName": "New"}])
+    snap("Beta 2_2026-06-01.csv", [{"sectorName": "Bank"}])
+    (tmp_path / "panel_scores.csv").write_text("company_id\nx\n")
+    assert load_sector_groups(str(tmp_path)) == {"Acme 1": "New", "Beta 2": "Bank"}
