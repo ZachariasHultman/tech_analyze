@@ -216,8 +216,27 @@ def _stats(w, S, alpha, core=None):
 CORE_KEY = "__core__"
 
 
+def withholding_drag(div_yields, domiciles, loss_by_country):
+    """Annual return lost to withholding tax on an ISK, per name:
+    dividend yield x the share of the dividend that cannot be credited.
+
+    Domicile is the ISIN prefix, so an ADR reads as US and an SDB as SE: both
+    get no drag. Right or close for the ADRs/SDBs held so far (Shell is UK,
+    0%; Autoliv is US, fully creditable), wrong for e.g. a Danish ADR."""
+    out = {}
+    for name, y in div_yields.items():
+        try:
+            y = float(y)
+        except (TypeError, ValueError):
+            y = 0.0
+        if not np.isfinite(y) or y < 0:
+            y = 0.0
+        out[name] = y * loss_by_country.get(domiciles.get(name), 0.0)
+    return pd.Series(out, dtype=float)
+
+
 def build_portfolios(price_hist, currencies, blend, names, rates, cap=WEIGHT_CAP,
-                     core_close=None, satellite_share=1.0):
+                     core_close=None, satellite_share=1.0, tax_drag=None):
     """Both portfolios for ``names``, or None when there is too little data.
 
     With ``core_close`` (a SEK price series of the funds the satellite sits
@@ -242,6 +261,10 @@ def build_portfolios(price_hist, currencies, blend, names, rates, cap=WEIGHT_CAP
     S = S_full[:n, :n]
     sigma = np.sqrt(np.diag(S) * WEEKS_PER_YEAR)
     alpha = grinold_alpha(blend, sigma, kept)
+    if alpha is not None and tax_drag is not None:
+        # After-tax expected return. Only max-Sharpe reads alpha, so this
+        # moves B's weights and leaves A's untouched.
+        alpha = alpha - tax_drag.reindex(kept).fillna(0.0).to_numpy()
     core = None
     if has_core and satellite_share < 1.0:
         core = (S_full[:n, n], float(S_full[n, n]), 1.0 - satellite_share,

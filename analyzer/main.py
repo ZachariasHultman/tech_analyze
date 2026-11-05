@@ -54,6 +54,7 @@ from analyzer.config import (
     CORE_MIX,
     CORE_LABEL,
     SATELLITE_SHARE,
+    WITHHOLDING_LOSS,
 )
 from datetime import date
 import argparse
@@ -615,9 +616,13 @@ def _portfolio_section(manager, push_results, avanza=None):
                 rates = fx.load_sek_rates(os.path.join(project_root, fx.FX_CACHE_PATH))
         blend_all = push_results.get("blend_all")
         core, notes = _fetch_core(avanza)
+        drag = frontier.withholding_drag(
+            {n: manager.div_yield.get(n) for n in names},
+            {n: manager.domicile.get(n) for n in names}, WITHHOLDING_LOSS)
         p = frontier.build_portfolios(
             hist, ccys, blend_all, names, rates, core_close=core,
-            satellite_share=SATELLITE_SHARE if core is not None else 1.0)
+            satellite_share=SATELLITE_SHARE if core is not None else 1.0,
+            tax_drag=drag)
         if p is not None and p.get("core"):
             p["core"]["label"] = CORE_LABEL
         if avanza is not None:
@@ -1287,6 +1292,9 @@ def main():
             continue
         ticker_name, hist = fetched
         manager.price_ccy[ticker_name] = _listing_currency(ticker_info, yahoo_symbol)
+        ki = ticker_info.get("keyIndicators") or {}
+        manager.div_yield[ticker_name] = ki.get("directYield")
+        manager.domicile[ticker_name] = str(ticker_info.get("isin") or "")[:2] or None
         if save_data:
             save_snapshot(
                 hist,

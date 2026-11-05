@@ -361,3 +361,29 @@ def test_fetch_core_degrades_without_raising():
 
     core, notes = main_mod._fetch_core(_Down())
     assert core is None and "satellite optimised on its own" in notes[0]
+
+
+# --- withholding tax (ISK) --------------------------------------------------
+
+from analyzer.frontier import withholding_drag
+
+
+def test_withholding_drag_is_yield_times_loss_and_zero_at_home():
+    d = withholding_drag({"SE": 0.05, "US": 0.03, "DK": 0.03, "X": None},
+                         {"SE": "SE", "US": "US", "DK": "DK", "X": "DK"},
+                         {"DK": 0.12})
+    assert d["SE"] == 0 and d["US"] == 0
+    assert d["DK"] == pytest.approx(0.0036)
+    assert d["X"] == 0  # no yield known -> no drag, never NaN
+
+
+def test_drag_moves_max_sharpe_but_never_min_variance():
+    hist, ccy = _universe(n=4, vols=[0.015] * 4, seed=3)
+    blend = pd.Series({"S0": 0.9, "S1": 0.9, "S2": 0.5, "S3": 0.5,
+                       "X1": 0.1, "X2": 0.2, "X3": 0.3})
+    base = build_portfolios(hist, ccy, blend, list(hist), None, cap=1.0)
+    taxed = build_portfolios(hist, ccy, blend, list(hist), None, cap=1.0,
+                             tax_drag=pd.Series({"S0": 0.02}))
+    assert taxed["maxsharpe"]["weights"]["S0"] < base["maxsharpe"]["weights"]["S0"]
+    assert taxed["minvar"]["weights"].to_dict() == pytest.approx(
+        base["minvar"]["weights"].to_dict())

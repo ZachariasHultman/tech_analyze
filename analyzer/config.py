@@ -147,3 +147,21 @@ EXCLUDED_SECTORS = {"Investmentbolag"}
 CORE_MIX = {"878733": 0.7, "633079": 0.3}
 CORE_LABEL = "70% Avanza Global + 30% OMXSGI"
 SATELLITE_SHARE = 0.30
+
+# Withholding tax lost on an ISK, as a fraction of the dividend, by the
+# issuer's domicile (ISIN prefix). On an ISK foreign withholding can be
+# credited against the year's schablonskatt only up to the treaty rate
+# (mostly 15%), so what is lost is the statutory rate minus that -- unless
+# reclaimed from the foreign tax authority, which is not assumed. Sweden has
+# no withholding; the US (with W-8BEN) withholds exactly the creditable 15%;
+# the UK withholds nothing. Statutory rates, not Avanza's actual practice per
+# country -- check Avanza's withholding page and adjust here. Only the
+# max-Sharpe portfolio reads this (frontier.withholding_drag): it lowers a
+# stock's expected return by dividend yield x loss rate.
+WITHHOLDING_LOSS = {
+    "NO": 0.10,      # 25% statutory, 15% treaty
+    "DK": 0.12,      # 27% statutory, 15% treaty
+    "DE": 0.11375,   # 26.375% statutory, 15% treaty
+    "FI": 0.20,      # up to 35% via a nominee account, 15% treaty
+    "CH": 0.20,      # 35% statutory, 15% treaty
+}

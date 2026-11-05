@@ -320,6 +320,10 @@ class SummaryManager:
         # analyzer/frontier.py's portfolio weights. Not scored, not saved.
         self.price_hist = {}
         self.price_ccy = {}
+        # Dividend yield and issuer domicile (ISIN prefix), for the
+        # withholding-tax drag in the max-Sharpe portfolio.
+        self.div_yield = {}
+        self.domicile = {}
 
         # ---- STANDARD TEMPLATE (sector-agnostic) ----
         self.template = {
