@@ -57,6 +57,7 @@ from analyzer.config import (
     WITHHOLDING_LOSS,
 )
 from datetime import date
+from analyzer import frontier
 import argparse
 
 
@@ -596,7 +597,7 @@ def _portfolio_section(manager, push_results, avanza=None):
     Never raises: a failure here must not cost the weekly email its buy/sell
     sections, so it degrades to a one-line note.
     """
-    from analyzer import frontier, fx
+    from analyzer import fx
     try:
         names = push_results.get("qualified_names") or []
         hist = {n: manager.price_hist.get(n) for n in names}

@@ -450,3 +450,9 @@ def test_sector_cap_relaxes_when_too_few_groups():
     w = p["minvar"]["weights"]
     assert w.sum() == pytest.approx(1.0)
     assert w[[f"S{i}" for i in range(4)]].sum() <= 0.50 + 1e-6
+
+
+def test_live_loop_can_reach_frontier():
+    # The live loop calls frontier.sector_group per ticker; it once only
+    # existed as a local import inside _portfolio_section and crashed the Pi.
+    assert main_mod.frontier is frontier
