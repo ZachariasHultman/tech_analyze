@@ -215,8 +215,10 @@ def test_watchlists_mirror_held_names_and_drop_the_rest():
     }
     # C at 0.4% is below the display bar: not pushed to min-var
     assert ("add", "10", "333") not in av.calls
-    assert notes[0].startswith("Avanza 'min-var': 2 stocks (+1 added, -1 removed)")
-    assert notes[1].startswith("Avanza 'max-sharpe': 2 stocks (+2 added, -0 removed)")
+    assert notes[0] == ("Avanza 'min-var': 2 stocks (+1 added, -1 removed); "
+                        "added: B; removed: Old")
+    assert notes[1] == ("Avanza 'max-sharpe': 2 stocks (+2 added, -0 removed); "
+                        "added: A, C")
 
 
 def test_missing_watchlist_warns_and_leaves_the_other_alone():

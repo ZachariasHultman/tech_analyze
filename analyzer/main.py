@@ -543,7 +543,7 @@ def _sync_portfolio_watchlists(avanza, p, known_names):
     portfolio that was not computed, is left untouched -- emptying a list
     because a computation failed would read as "sell everything".
     """
-    from analyzer.frontier import held_names
+    from analyzer.frontier import display_name, held_names
     notes = []
     for key, wl_name in PORTFOLIO_WATCHLISTS.items():
         port = p.get(key) if p else None
@@ -561,6 +561,9 @@ def _sync_portfolio_watchlists(avanza, p, known_names):
                 pd.DataFrame(index=held), existing)
             note = (f"Avanza '{wl_name}': {len(held)} stocks "
                     f"(+{len(added)} added, -{len(removed)} removed)")
+            for label, names in (("added", added), ("removed", removed)):
+                if names:
+                    note += f"; {label}: " + ", ".join(display_name(n) for n in names)
             if failed:
                 note += f", {len(failed)} failed: " + "; ".join(
                     f"{n}: {err}" for n, err in failed)
