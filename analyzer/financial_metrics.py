@@ -246,7 +246,11 @@ def calc_sma200_metrics(
     sma200_latest = float(sma200_ser.iloc[-1])
     last_week_avg = float(close_ser.tail(7).mean())
 
-    # slope helper (your existing function)
+    # A listing with exactly 200 closes has a one-point SMA series, and a
+    # line through one point makes polyfit raise (seen live: Raspberry Pi
+    # Holdings, which aborted the weekly run). The SMA itself is still valid.
+    if len(sma200_ser) < 2:
+        return sma200_latest, last_week_avg, None
     sma200_slope = calculate_slope(sma200_ser.tolist())
 
     return sma200_latest, last_week_avg, float(sma200_slope)
