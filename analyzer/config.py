@@ -141,11 +141,14 @@ EXCLUDED_SECTORS = {"Investmentbolag"}
 # Core-satellite. The screener's stocks are a satellite next to index funds,
 # and frontier.py optimises the satellite for the *total* portfolio, so a stock
 # that moves like the funds earns little weight however good it looks alone.
-# Avanza orderbook id -> share of the core: Avanza Global (accumulating, so its
-# NAV is already total return in SEK) and OMXSGI (the gross all-share index,
-# standing in for broad Swedish equity funds).
-CORE_MIX = {"878733": 0.7, "633079": 0.3}
-CORE_LABEL = "70% Avanza Global + 30% OMXSGI"
+# Live, the core is whatever funds sit on the Avanza account CORE_ACCOUNT,
+# weighted by today's market value (main._core_holdings), so it drifts with
+# the funds rather than with a hand-kept table. CORE_MIX (orderbook id ->
+# share) is the fallback when that account cannot be read, and the fixed mix
+# --evaluate backtests against: roughly the account as of 2026-11.
+CORE_ACCOUNT = "Fonder"
+CORE_MIX = {"878733": 0.50, "693833": 0.25, "1041067": 0.25}
+CORE_LABEL = "50% Avanza Global + 25% Aktiespararna Direktavkastning + 25% Avanza Europa"
 SATELLITE_SHARE = 0.30
 # Most of the satellite any one industry group may hold, in both A and B.
 # Group = the middle of Avanza's three sector levels (e.g. "Bioteknik &

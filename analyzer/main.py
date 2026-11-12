@@ -51,6 +51,7 @@ from analyzer.config import (
     MOMENTUM_BLEND_WEIGHT,
     EXCLUDED_TICKER_IDS,
     EXCLUDED_SECTORS,
+    CORE_ACCOUNT,
     CORE_MIX,
     CORE_LABEL,
     SATELLITE_SHARE,
@@ -573,23 +574,80 @@ def _sync_portfolio_watchlists(avanza, p, known_names):
     return notes
 
 
+def _core_holdings(avanza, account=CORE_ACCOUNT):
+    """``({orderbook id: share}, {orderbook id: name})`` of the funds on the
+    named Avanza account, by today's market value, or None when the account
+    holds no funds or cannot be read."""
+    pos = avanza.get_accounts_positions()
+    values, names = {}, {}
+    for x in (pos or {}).get("withOrderbook") or []:
+        acc = x.get("account") or {}
+        inst = x.get("instrument") or {}
+        if acc.get("name") != account or inst.get("type") != "FUND":
+            continue
+        oid = str((inst.get("orderbook") or {}).get("id") or "")
+        v = (x.get("value") or {}).get("value")
+        if not oid or not v or v <= 0:
+            continue
+        values[oid] = values.get(oid, 0.0) + float(v)
+        names[oid] = (inst.get("name") or oid).strip()
+    total = sum(values.values())
+    if total <= 0:
+        return None
+    return {k: v / total for k, v in values.items()}, names
+
+
+def _core_label(mix, names):
+    parts = sorted(mix.items(), key=lambda t: -t[1])
+    return " + ".join(f"{w * 100:.0f}% {names.get(k, k)}" for k, w in parts)
+
+
+# A fund younger than this would shorten the window every stock's covariance
+# is estimated on, so it is left out of the core instead.
+CORE_MIN_DAYS = 2 * 365
+
+
 def _fetch_core(avanza):
-    """The core funds' combined SEK price series from Avanza, or None with a
-    note. Fetched live every run (two chart calls), so the Pi needs no cache;
-    a failure degrades to optimising the satellite on its own."""
+    """``(core SEK price series, notes, label)`` for the funds the satellite
+    sits next to. The funds are read off the CORE_ACCOUNT account each run,
+    falling back to CORE_MIX; a fund whose history fails or is too short is
+    dropped and the rest renormalised. Never raises: no core at all degrades
+    to optimising the satellite on its own."""
     if avanza is None:
-        return None, []
+        return None, [], None
     from analyzer.benchmarks import core_close, fetch_avanza_series
+    notes = []
     try:
-        series = {oid: fetch_avanza_series(avanza, oid) for oid in CORE_MIX}
-        core = core_close(series, CORE_MIX)
-        if core is None:
-            return None, ["Core funds returned no overlapping history: "
-                          "satellite optimised on its own."]
-        return core, []
+        held = _core_holdings(avanza)
     except Exception as e:
-        return None, [f"Core funds unavailable ({type(e).__name__}): "
-                      "satellite optimised on its own."]
+        held = None
+        notes.append(f"Account '{CORE_ACCOUNT}' unreadable ({type(e).__name__}): "
+                     f"core assumed {CORE_LABEL}.")
+    else:
+        if held is None:
+            notes.append(f"No funds on account '{CORE_ACCOUNT}': "
+                         f"core assumed {CORE_LABEL}.")
+    mix, names = held if held is not None else (dict(CORE_MIX), {})
+    series, missing = {}, []
+    for oid in mix:
+        try:
+            s = fetch_avanza_series(avanza, oid)
+        except Exception:
+            s = None
+        if s is None or s.empty or (s.index.max() - s.index.min()).days < CORE_MIN_DAYS:
+            missing.append(names.get(oid, oid))
+        else:
+            series[oid] = s
+    if missing:
+        notes.append("Left out of the core (no or short history): " + ", ".join(missing))
+    mix = {k: w for k, w in mix.items() if k in series}
+    core = core_close(series, mix) if mix else None
+    if core is None:
+        return None, notes + ["Core funds unavailable: satellite optimised on its own."], None
+    total = sum(mix.values())
+    mix = {k: w / total for k, w in mix.items()}
+    label = CORE_LABEL if held is None and not missing else _core_label(mix, names)
+    return core, notes, label
 
 
 def _portfolio_section(manager, push_results, avanza=None):
@@ -619,7 +677,7 @@ def _portfolio_section(manager, push_results, avanza=None):
                 print(f"[WARN] FX fetch failed ({e}); using cached rates if any.")
                 rates = fx.load_sek_rates(os.path.join(project_root, fx.FX_CACHE_PATH))
         blend_all = push_results.get("blend_all")
-        core, notes = _fetch_core(avanza)
+        core, notes, core_label = _fetch_core(avanza)
         drag = frontier.withholding_drag(
             {n: manager.div_yield.get(n) for n in names},
             {n: manager.domicile.get(n) for n in names}, WITHHOLDING_LOSS)
@@ -629,7 +687,7 @@ def _portfolio_section(manager, push_results, avanza=None):
             tax_drag=drag,
             sectors={n: manager.sector_group.get(n) for n in names})
         if p is not None and p.get("core"):
-            p["core"]["label"] = CORE_LABEL
+            p["core"]["label"] = core_label
         if avanza is not None:
             known = set(names) | set(getattr(blend_all, "index", []))
             notes += _sync_portfolio_watchlists(avanza, p, known)

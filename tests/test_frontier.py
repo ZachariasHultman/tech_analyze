@@ -355,14 +355,75 @@ def test_core_close_mixes_daily_returns():
 
 
 def test_fetch_core_degrades_without_raising():
-    assert main_mod._fetch_core(None) == (None, [])
+    assert main_mod._fetch_core(None) == (None, [], None)
 
     class _Down:
+        def get_accounts_positions(self):
+            raise RuntimeError("down")
+
         def get_chart_data(self, **_):
             raise RuntimeError("down")
 
-    core, notes = main_mod._fetch_core(_Down())
-    assert core is None and "satellite optimised on its own" in notes[0]
+    core, notes, label = main_mod._fetch_core(_Down())
+    assert core is None and label is None
+    assert "satellite optimised on its own" in notes[-1]
+
+
+def _pos(account, kind, oid, name, value):
+    return {"account": {"name": account}, "value": {"value": value},
+            "instrument": {"type": kind, "name": name, "orderbook": {"id": oid}}}
+
+
+class _CoreAvanza:
+    """Positions plus a chart per orderbook id (days of history each)."""
+
+    def __init__(self, positions, days):
+        self.positions, self.days = positions, days
+
+    def get_accounts_positions(self):
+        return {"withOrderbook": self.positions}
+
+    def get_chart_data(self, order_book_id, **_):
+        n = self.days.get(order_book_id, 0)
+        if not n:
+            raise RuntimeError("no chart")
+        t0 = pd.Timestamp("2021-01-04")
+        return {"ohlc": [{"timestamp": int((t0 + pd.Timedelta(days=i)).timestamp() * 1000),
+                          "close": 100 + i * 0.01} for i in range(n)]}
+
+
+def test_core_holdings_reads_only_funds_on_the_named_account():
+    av = _CoreAvanza([
+        _pos("Fonder", "FUND", "1", "Global", 600.0),
+        _pos("Fonder", "FUND", "1", "Global", 200.0),     # same fund, second lot
+        _pos("Fonder", "FUND", "2", "Europa ", 200.0),
+        _pos("Fonder", "STOCK", "3", "Volvo", 999.0),     # stock: not core
+        _pos("Pension", "FUND", "4", "Other", 999.0),     # other account
+    ], {})
+    mix, names = main_mod._core_holdings(av, "Fonder")
+    assert mix == pytest.approx({"1": 0.8, "2": 0.2})
+    assert names["2"] == "Europa"
+    assert main_mod._core_holdings(av, "Nope") is None
+
+
+def test_fetch_core_labels_holdings_and_drops_short_funds():
+    av = _CoreAvanza([_pos("Fonder", "FUND", "1", "Global", 600.0),
+                      _pos("Fonder", "FUND", "2", "Europa", 300.0),
+                      _pos("Fonder", "FUND", "3", "Nyfond", 100.0)],
+                     {"1": 1200, "2": 1200, "3": 100})
+    core, notes, label = main_mod._fetch_core(av)
+    assert core is not None
+    assert label == "67% Global + 33% Europa"
+    assert any("Nyfond" in n for n in notes)
+
+
+def test_fetch_core_falls_back_to_core_mix_without_the_account():
+    from analyzer.config import CORE_LABEL, CORE_MIX
+    av = _CoreAvanza([_pos("Pension", "FUND", "9", "X", 1.0)],
+                     {k: 1200 for k in CORE_MIX})
+    core, notes, label = main_mod._fetch_core(av)
+    assert core is not None and label == CORE_LABEL
+    assert "No funds on account" in notes[0]
 
 
 # --- withholding tax (ISK) --------------------------------------------------
